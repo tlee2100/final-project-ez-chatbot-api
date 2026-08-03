@@ -4,4 +4,5 @@ export type JwtUser = {
   id: string;
   email: string;
   role: UserRole;
+  organizationId: string | null;
 };

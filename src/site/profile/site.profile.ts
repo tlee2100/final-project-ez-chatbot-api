@@ -1,4 +1,4 @@
-import { createMap, type Mapper } from '@automapper/core';
+import { createMap, forMember, mapFrom, type Mapper } from '@automapper/core';
 import { AutomapperProfile, InjectMapper } from '@automapper/nestjs';
 import { Injectable } from '@nestjs/common';
 import { SiteDto } from '../dto/site.dto';
@@ -12,7 +12,15 @@ export class SiteProfile extends AutomapperProfile {
 
   override get profile() {
     return (mapper: Mapper) => {
-      createMap(mapper, Site, SiteDto);
+      createMap(
+        mapper,
+        Site,
+        SiteDto,
+        forMember(
+          (d) => d.kbDocuments,
+          mapFrom((s) => s.documentIds?.length ?? s.documents?.length ?? 0),
+        ),
+      );
     };
   }
 }

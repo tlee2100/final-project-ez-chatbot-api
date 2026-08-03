@@ -12,6 +12,7 @@ import { User } from '../../user/entities/user.entity';
 import { AutoMap } from '@automapper/classes';
 import { KnowledgeBaseStatus } from '../enums/knowledge-base-status.enum';
 import { Document } from '../../document/entities/document.entity';
+import { Organization } from '../../organization/entities/organization.entity';
 
 @Entity('sites')
 export class Site {
@@ -36,6 +37,7 @@ export class Site {
   @JoinColumn({ name: 'ownerId' })
   owner: User;
 
+  @AutoMap(() => User)
   @ManyToMany(() => User, (user) => user.assignedSites)
   @JoinTable({
     name: 'site_agents',
@@ -54,10 +56,27 @@ export class Site {
   @Column({
     type: 'enum',
     enum: KnowledgeBaseStatus,
-    default: KnowledgeBaseStatus.PENDING,
+    default: KnowledgeBaseStatus.READY,
   })
   knowledgeBaseStatus: KnowledgeBaseStatus;
 
+  @AutoMap(() => String)
+  @Column({ type: 'uuid', nullable: true })
+  organizationId: string | null;
+
+  @ManyToOne(() => Organization, (org) => org.sites, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
+  @JoinColumn({ name: 'organizationId' })
+  organization: Organization;
+
   @OneToMany(() => Document, (document) => document.site)
   documents: Document[];
+
+  documentIds?: string[];
+
+  @AutoMap()
+  @Column({ name: 'isAiActive', type: 'boolean', default: true })
+  isAiActive: boolean;
 }

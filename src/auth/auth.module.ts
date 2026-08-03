@@ -6,7 +6,6 @@ import { AuthController } from './auth.controller';
 import { UserModule } from 'src/user/user.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { StringValue } from 'ms';
-import { RecaptchaService } from './recaptcha.service';
 import { User } from 'src/user/entities/user.entity';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
@@ -22,16 +21,18 @@ import { TypeOrmModule } from '@nestjs/typeorm';
         );
       }
 
+      // Access tokens are stateless (no server-side revocation on logout /
+      // role change), so keep the lifetime short. Override via JWT_EXPIRES_IN.
       return JwtModule.register({
         secret: jwtSecret,
         signOptions: {
-          expiresIn: (process.env.JWT_EXPIRES_IN || '1h') as StringValue,
+          expiresIn: (process.env.JWT_EXPIRES_IN || '15m') as StringValue,
         },
       });
     })(),
     TypeOrmModule.forFeature([User]),
   ],
-  providers: [AuthService, JwtStrategy, RecaptchaService],
+  providers: [AuthService, JwtStrategy],
   controllers: [AuthController],
 })
 export class AuthModule {}

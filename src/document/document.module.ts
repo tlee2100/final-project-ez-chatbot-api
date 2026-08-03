@@ -6,7 +6,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bull';
 import { Document } from './entities/document.entity';
 import { DocumentProcessingWorker } from './document-processing.worker';
-import { ChatModule } from 'src/chat/chat.module';
+import { NotificationModule } from 'src/notification/notification.module';
 
 @Module({
   imports: [
@@ -14,7 +14,7 @@ import { ChatModule } from 'src/chat/chat.module';
     BullModule.registerQueue({
       name: 'document-processing',
     }),
-    ChatModule,
+    NotificationModule,
   ],
   providers: [DocumentService, DocumentProcessingWorker],
   controllers: [DocumentController],

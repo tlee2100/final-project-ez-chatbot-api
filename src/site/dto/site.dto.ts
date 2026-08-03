@@ -1,6 +1,7 @@
 import { AutoMap } from '@automapper/classes';
 import { ApiProperty } from '@nestjs/swagger';
 import { KnowledgeBaseStatus } from '../enums/knowledge-base-status.enum';
+import { UserDto } from '../../user/dto/user.dto';
 
 export class SiteDto {
   @ApiProperty({
@@ -38,4 +39,34 @@ export class SiteDto {
   })
   @AutoMap(() => String)
   knowledgeBaseStatus: KnowledgeBaseStatus;
+
+  @ApiProperty({
+    example: '550e8400-e29b-41d4-a716-446655440000',
+    description: 'Organization ID',
+    nullable: true,
+  })
+  @AutoMap()
+  organizationId: string | null;
+
+  @ApiProperty({
+    example: 5,
+    description: 'Number of knowledge base documents',
+  })
+  @AutoMap()
+  kbDocuments: number;
+
+  @ApiProperty({
+    example: true,
+    description: 'Whether the AI is active for this site',
+  })
+  @AutoMap()
+  isAiActive: boolean;
+
+  @ApiProperty({
+    description: 'Assigned agents for this site',
+    type: () => [UserDto],
+    nullable: true,
+  })
+  @AutoMap(() => UserDto)
+  agents?: UserDto[];
 }

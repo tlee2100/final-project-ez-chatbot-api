@@ -6,6 +6,7 @@ import {
   IsString,
   IsUrl,
   IsUUID,
+  IsBoolean,
 } from 'class-validator';
 
 export class CreateSiteDto {
@@ -27,4 +28,21 @@ export class CreateSiteDto {
   @IsArray()
   @IsUUID('4', { each: true })
   agentIds?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Organization to own this site (SUPER_ADMIN only; ADMIN is always forced to their own organization)',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  organizationId?: string;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Whether the AI is active for this site',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  isAiActive?: boolean;
 }

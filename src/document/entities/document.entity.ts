@@ -2,12 +2,14 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Site } from '../../site/entities/site.entity';
 import { DocumentStatus } from '../enums/document-status.enum';
+import { DocumentFileType } from '../enums/document-file-type.enum';
 
 @Entity('documents')
 export class Document {
@@ -19,6 +21,17 @@ export class Document {
 
   @Column()
   filePath: string;
+
+  @Index()
+  @Column({
+    type: 'enum',
+    enum: DocumentFileType,
+    default: DocumentFileType.TXT,
+  })
+  fileType: DocumentFileType;
+
+  @Column({ type: 'integer', nullable: true })
+  fileSizeBytes: number | null;
 
   @Column({ type: 'varchar', nullable: true })
   cloudinaryPublicId: string | null;

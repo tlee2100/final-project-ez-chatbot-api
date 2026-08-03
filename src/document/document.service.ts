@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -11,11 +10,19 @@ import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import { Repository } from 'typeorm';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
+import { paginate, type Paginated, type PaginateQuery } from 'nestjs-paginate';
 import { Document } from './entities/document.entity';
 import { Site } from '../site/entities/site.entity';
 import { DocumentStatus } from './enums/document-status.enum';
+import {
+  DocumentFileType,
+  EXTENSION_TO_FILE_TYPE,
+} from './enums/document-file-type.enum';
+import { DOCUMENT_PAGINATION_CONFIG } from './config/document-pagination.config';
 import type { DocumentProcessingJobData } from './types/document-processing-job.type';
 import type { JwtUser } from 'src/auth/types/jwt-user.type';
+
+import { DocumentContextValidator } from './validators/document-context.validator';
 
 @Injectable()
 export class DocumentService {
@@ -38,6 +45,20 @@ export class DocumentService {
     });
   }
 
+  async getSiteDocuments(
+    siteId: string,
+    query: PaginateQuery,
+    user: JwtUser,
+  ): Promise<Paginated<Document>> {
+    await this.findOwnedSiteOrThrow(siteId, user);
+
+    const queryBuilder = this.documentRepository
+      .createQueryBuilder('doc')
+      .where('doc.siteId = :siteId', { siteId });
+
+    return paginate(query, queryBuilder, DOCUMENT_PAGINATION_CONFIG);
+  }
+
   async uploadDocument(
     siteId: string,
     file: Express.Multer.File,
@@ -45,28 +66,30 @@ export class DocumentService {
   ) {
     await this.findOwnedSiteOrThrow(siteId, uploadedByUser);
 
-    if (!file.buffer) {
-      throw new BadRequestException('File buffer is required');
-    }
+    // Validate file header, extension, and magic bytes synchronously before DB/Queue
+    DocumentContextValidator.validateHeaderAndExtension(file);
 
-    const uploadedFile = await this.uploadToCloudinary(file);
+    const ext = file.originalname.split('.').pop()?.toLowerCase() || '';
+    const fileType = EXTENSION_TO_FILE_TYPE.get(ext) || DocumentFileType.TXT;
 
     let savedDocument: Document;
 
     try {
       const document = this.documentRepository.create({
         filename: file.originalname,
-        filePath: uploadedFile.secure_url,
-        cloudinaryPublicId: uploadedFile.public_id,
+        filePath: 'pending',
+        fileType,
+        fileSizeBytes: file.size,
+        cloudinaryPublicId: null,
         status: DocumentStatus.PENDING,
         siteId,
+        uploadedAt: new Date(),
       });
 
       savedDocument = await this.documentRepository.save(document);
     } catch (error) {
-      await this.deleteCloudinaryAsset(uploadedFile.public_id);
       this.logger.error(
-        'Failed to save uploaded document metadata',
+        'Failed to save uploaded document metadata to database',
         error instanceof Error ? error.stack : undefined,
       );
       throw new InternalServerErrorException(
@@ -74,25 +97,24 @@ export class DocumentService {
       );
     }
 
+    // Option B: Enqueue Job with Buffer to Bull Worker (Worker will parse & upload to Cloudinary)
     const jobData: DocumentProcessingJobData = {
       documentId: savedDocument.id,
-      filePath: savedDocument.filePath,
+      filename: file.originalname,
+      fileBufferBase64: file.buffer.toString('base64'),
       uploadedByUserId: uploadedByUser.id,
+      siteId,
     };
 
     try {
       await this.documentQueue.add('process-document', jobData, {
         jobId: savedDocument.id,
-        attempts: 3,
-        backoff: {
-          type: 'exponential',
-          delay: 5000,
-        },
+        attempts: 1, // Job failure triggers Hard Delete Rollback in worker
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: true,
       });
     } catch (error) {
-      await this.deleteCloudinaryAsset(savedDocument.cloudinaryPublicId);
+      // Hard delete rollback if queue enqueue fails
       await this.documentRepository.delete(savedDocument.id);
       this.logger.error(
         `Failed to enqueue document processing job for document ${savedDocument.id}`,
@@ -106,10 +128,42 @@ export class DocumentService {
     return savedDocument;
   }
 
-  private async findOwnedSiteOrThrow(
+  async deleteDocument(
     siteId: string,
+    documentId: string,
     user: JwtUser,
-  ): Promise<Site> {
+  ): Promise<{ message: string; id: string }> {
+    await this.findOwnedSiteOrThrow(siteId, user);
+
+    const document = await this.documentRepository.findOne({
+      where: { id: documentId, siteId },
+    });
+
+    if (!document) {
+      throw new NotFoundException(
+        `Document with ID '${documentId}' not found for this site`,
+      );
+    }
+
+    // 1. Delete asset from Cloudinary
+    if (document.cloudinaryPublicId) {
+      await this.deleteCloudinaryAsset(document.cloudinaryPublicId);
+    }
+
+    // 2. Hard delete record from Database
+    await this.documentRepository.remove(document);
+
+    this.logger.log(
+      `Document ${documentId} deleted successfully from DB and Cloudinary`,
+    );
+
+    return {
+      message: 'Document deleted successfully',
+      id: documentId,
+    };
+  }
+
+  async findOwnedSiteOrThrow(siteId: string, user: JwtUser): Promise<Site> {
     const site = await this.siteRepository.findOne({
       where: { id: siteId },
     });
@@ -120,14 +174,14 @@ export class DocumentService {
 
     if (site.ownerId !== user.id) {
       throw new ForbiddenException(
-        'You do not have permission to upload documents to this site',
+        'Only the site owner or administrator is permitted to manage documents for this site',
       );
     }
 
     return site;
   }
 
-  private async deleteCloudinaryAsset(publicId: string | null): Promise<void> {
+  async deleteCloudinaryAsset(publicId: string | null): Promise<void> {
     if (!publicId) {
       return;
     }
@@ -136,6 +190,7 @@ export class DocumentService {
       await cloudinary.uploader.destroy(publicId, {
         resource_type: 'raw',
       });
+      this.logger.log(`Deleted Cloudinary asset: ${publicId}`);
     } catch (error) {
       this.logger.error(
         `Failed to delete Cloudinary asset ${publicId}`,
@@ -144,8 +199,10 @@ export class DocumentService {
     }
   }
 
-  private uploadToCloudinary(
-    file: Express.Multer.File,
+  uploadBufferToCloudinary(
+    buffer: Buffer,
+    filename: string,
+    siteId: string,
   ): Promise<UploadApiResponse> {
     const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } =
       process.env;
@@ -163,8 +220,8 @@ export class DocumentService {
     return new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
-          folder: 'documents',
-          public_id: `${Date.now()}-${file.originalname}`,
+          folder: `sites/${siteId}/documents`,
+          public_id: `${Date.now()}-${filename}`,
           resource_type: 'raw',
         },
         (error, result) => {
@@ -190,7 +247,7 @@ export class DocumentService {
         },
       );
 
-      uploadStream.end(file.buffer);
+      uploadStream.end(buffer);
     });
   }
 }

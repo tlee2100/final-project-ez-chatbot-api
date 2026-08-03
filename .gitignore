@@ -52,3 +52,4 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 TECHNICAL_EXPLANATIONS.md
+src/scripts/*.ts

@@ -12,8 +12,15 @@ import { AuthModule } from './auth/auth.module';
 import { AutomapperModule } from '@automapper/nestjs';
 import { classes } from '@automapper/classes';
 import { ChatModule } from './chat/chat.module';
+import { Conversation } from './chat/entities/conversation.entity';
+import { ChatMessage } from './chat/entities/chat-message.entity';
 import { DocumentModule } from './document/document.module';
 import { Document } from './document/entities/document.entity';
+import { OrganizationModule } from './organization/organization.module';
+import { Organization } from './organization/entities/organization.entity';
+import { NotificationModule } from './notification/notification.module';
+import { Notification } from './notification/entities/notification.entity';
+import { AnalyticsModule } from './analytics/analytics.module';
 
 @Module({
   imports: [
@@ -24,7 +31,15 @@ import { Document } from './document/entities/document.entity';
       username: process.env.DB_USERNAME,
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME,
-      entities: [User, Site, Document],
+      entities: [
+        User,
+        Site,
+        Document,
+        Organization,
+        Notification,
+        Conversation,
+        ChatMessage,
+      ],
       synchronize: false, // set true for dev, false for prod
     }),
     BullModule.forRoot({
@@ -45,6 +60,9 @@ import { Document } from './document/entities/document.entity';
     AuthModule,
     ChatModule,
     DocumentModule,
+    OrganizationModule,
+    NotificationModule,
+    AnalyticsModule,
   ],
 })
 export class AppModule {}

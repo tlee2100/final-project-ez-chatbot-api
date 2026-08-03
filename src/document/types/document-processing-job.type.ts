@@ -1,5 +1,7 @@
 export type DocumentProcessingJobData = {
   documentId: string;
-  filePath: string;
+  filename: string;
+  fileBufferBase64: string;
   uploadedByUserId: string;
+  siteId: string;
 };

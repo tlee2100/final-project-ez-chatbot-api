@@ -1,70 +1,83 @@
-import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { Type } from 'class-transformer';
-import { UserRole } from '../enums/user-role.enum';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
-export class QueryUserDto {
+export const ORGANIZATION_SORT_FIELDS = [
+  'name',
+  'slug',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+export type OrganizationSortField = (typeof ORGANIZATION_SORT_FIELDS)[number];
+
+export class QueryOrganizationDto {
   @ApiPropertyOptional({
     description: 'Page number',
     example: 1,
     minimum: 1,
+    default: 1,
   })
   @IsOptional()
-  @Min(1)
   @Type(() => Number)
   @IsInt()
+  @Min(1)
   page?: number = 1;
 
   @ApiPropertyOptional({
     description: 'Items per page',
     example: 10,
+    minimum: 1,
+    maximum: 100,
+    default: 10,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100)
   limit?: number = 10;
 
   @ApiPropertyOptional({
-    description: 'Filter by name',
-    example: 'John',
+    description: 'Filter by organization name',
+    example: 'Zodinet',
   })
   @IsOptional()
   @IsString()
   name?: string;
 
   @ApiPropertyOptional({
-    description: 'Filter by email',
-    example: 'john@example.com',
+    description: 'Filter by organization slug',
+    example: 'zodinet',
   })
   @IsOptional()
   @IsString()
-  email?: string;
+  slug?: string;
 
   @ApiPropertyOptional({
-    description: 'Filter by role',
-    enum: UserRole,
-    example: UserRole.ADMIN,
+    description: 'Filter by organization status',
+    example: 'Active',
   })
   @IsOptional()
-  @IsEnum(UserRole)
-  role?: UserRole;
+  @IsString()
+  status?: string;
 
   @ApiPropertyOptional({
     description: 'Sort field',
-    enum: ['email', 'name', 'role'],
-    example: 'email',
+    enum: ORGANIZATION_SORT_FIELDS,
+    example: 'name',
   })
   @IsOptional()
-  @IsEnum(['email', 'name', 'role'])
-  sortBy?: 'email' | 'role' | 'name';
+  @IsEnum(ORGANIZATION_SORT_FIELDS)
+  sortBy?: OrganizationSortField;
 
   @ApiPropertyOptional({
     description: 'Sort order',
     enum: ['ASC', 'DESC'],
     example: 'ASC',
+    default: 'ASC',
   })
   @IsOptional()
   @IsEnum(['ASC', 'DESC'])
-  order?: 'ASC' | 'DESC';
+  order?: 'ASC' | 'DESC' = 'ASC';
 }
