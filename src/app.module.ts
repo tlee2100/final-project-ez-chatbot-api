@@ -16,11 +16,16 @@ import { Conversation } from './chat/entities/conversation.entity';
 import { ChatMessage } from './chat/entities/chat-message.entity';
 import { DocumentModule } from './document/document.module';
 import { Document } from './document/entities/document.entity';
+import { DocumentChunk } from './document/entities/document-chunk.entity';
 import { OrganizationModule } from './organization/organization.module';
 import { Organization } from './organization/entities/organization.entity';
 import { NotificationModule } from './notification/notification.module';
 import { Notification } from './notification/entities/notification.entity';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { McpModule } from './mcp/mcp.module';
+import { AiAgentModule } from './ai-agent/ai-agent.module';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { SecurityModule } from './security/security.module';
 
 @Module({
   imports: [
@@ -35,6 +40,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
         User,
         Site,
         Document,
+        DocumentChunk,
         Organization,
         Notification,
         Conversation,
@@ -53,6 +59,13 @@ import { AnalyticsModule } from './analytics/analytics.module';
       strategyInitializer: classes(),
     }),
 
+    ThrottlerModule.forRoot([
+      {
+        name: 'short',
+        ttl: 60_000, // 1 minute
+        limit: 30, // 30 requests per minute
+      },
+    ]),
     CoreModule,
     SharedModule,
     UserModule,
@@ -63,6 +76,9 @@ import { AnalyticsModule } from './analytics/analytics.module';
     OrganizationModule,
     NotificationModule,
     AnalyticsModule,
+    McpModule,
+    AiAgentModule,
+    SecurityModule,
   ],
 })
 export class AppModule {}

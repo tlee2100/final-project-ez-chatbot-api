@@ -7,7 +7,10 @@ import {
   DocumentFileType,
   EXTENSION_TO_FILE_TYPE,
 } from '../enums/document-file-type.enum';
-import { DOCUMENT_MAX_FILE_SIZE } from '../constants/document-upload.constants';
+import {
+  DOCUMENT_ALLOWED_MIME_TYPES,
+  DOCUMENT_MAX_FILE_SIZE,
+} from '../constants/document-upload.constants';
 
 type SanitizeHtml = typeof sanitizeHtml;
 
@@ -21,17 +24,6 @@ export interface DocumentValidationResult {
 }
 
 export class DocumentContextValidator {
-  private static readonly MAX_FILE_SIZE = DOCUMENT_MAX_FILE_SIZE;
-
-  private static readonly ALLOWED_MIME_TYPES = new Set([
-    'application/pdf',
-    'text/plain',
-    'text/markdown',
-    'text/x-markdown',
-    'text/html',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  ]);
-
   /**
    * Fast synchronous validation for file header & extension (Multer FileFilter)
    */
@@ -40,9 +32,9 @@ export class DocumentContextValidator {
       throw new BadRequestException('File is required');
     }
 
-    if (file.size > this.MAX_FILE_SIZE) {
+    if (file.size > DOCUMENT_MAX_FILE_SIZE) {
       throw new BadRequestException(
-        `File size exceeds limit of ${this.MAX_FILE_SIZE / (1024 * 1024)}MB`,
+        `File size exceeds limit of ${DOCUMENT_MAX_FILE_SIZE / (1024 * 1024)}MB`,
       );
     }
 
@@ -54,7 +46,7 @@ export class DocumentContextValidator {
       );
     }
 
-    if (file.mimetype && !this.ALLOWED_MIME_TYPES.has(file.mimetype)) {
+    if (file.mimetype && !DOCUMENT_ALLOWED_MIME_TYPES.has(file.mimetype)) {
       // Allow fallback if mime type is generic application/octet-stream but extension is valid
       if (file.mimetype !== 'application/octet-stream') {
         throw new BadRequestException(

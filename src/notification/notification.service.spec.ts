@@ -1,5 +1,13 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+
+jest.mock('@automapper/nestjs', () => ({
+  InjectMapper: () => () => undefined,
+}));
+jest.mock('@automapper/classes', () => ({
+  AutoMap: () => () => undefined,
+}));
+
 import { NotificationService } from './notification.service';
 import { NotificationGateway } from './notification.gateway';
 import { Notification } from './entities/notification.entity';

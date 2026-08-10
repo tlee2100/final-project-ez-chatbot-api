@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
+import { createHash } from 'crypto';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import { InjectMapper } from '@automapper/nestjs';
 import type { Mapper } from '@automapper/core';
@@ -22,6 +23,9 @@ import { UserDto } from './dto/user.dto';
 import type { JwtUser } from '../auth/types/jwt-user.type';
 import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
 import { USER_PAGINATION_CONFIG } from './config/user-pagination.config';
+import { EmailQueueService } from '../notification/email-queue.service';
+import { ActivateAccountDto } from '../auth/dto/activate-account.dto';
+import { ACTIVATION_TOKEN_EXPIRES_MS } from '../notification/constants/email.constants';
 
 type PaginatedUserDtos = Omit<Paginated<User>, 'data'> & {
   data: UserDto[];
@@ -34,6 +38,7 @@ export class UserService {
     private readonly userRepository: Repository<User>,
     @InjectMapper()
     private readonly mapper: Mapper,
+    private readonly emailQueueService: EmailQueueService,
   ) {}
 
   async findById(id: string): Promise<User | null> {
@@ -86,17 +91,109 @@ export class UserService {
       throw new ConflictException('User with this email already exists');
     }
 
-    const initialPassword = randomBytes(9).toString('base64url').slice(0, 12);
+    const activationToken = randomBytes(32).toString('base64url');
+    const activationTokenExpiresAt = new Date(
+      Date.now() + this.getActivationTokenLifetimeMs(),
+    );
     const user = this.userRepository.create({
       ...createUserDto,
-      password: await bcrypt.hash(initialPassword, 10),
+      password: await bcrypt.hash(randomBytes(32).toString('base64url'), 10),
+      isActive: false,
+      activationTokenHash: this.hashActivationToken(activationToken),
+      activationTokenExpiresAt,
     });
     const saved = await this.userRepository.save(user);
 
+    try {
+      await this.emailQueueService.enqueueUserActivationEmail({
+        to: saved.email,
+        userName: saved.name,
+        email: saved.email,
+        activationToken,
+        activationUrl: `${process.env.FRONTEND_URL || ''}/set-password`,
+        expiresAt: activationTokenExpiresAt.toISOString(),
+      });
+    } catch {
+      await this.userRepository.delete(saved.id);
+      throw new InternalServerErrorException(
+        'User was not created because the activation email could not be queued',
+      );
+    }
+
     return {
       user: this.mapper.map(saved, User, UserDto),
-      initialPassword,
+      activationEmailQueued: true,
     };
+  }
+
+  async activateAccount(dto: ActivateAccountDto) {
+    if (dto.newPassword !== dto.confirmNewPassword) {
+      throw new BadRequestException('New passwords do not match');
+    }
+
+    const user = await this.userRepository.findOne({
+      where: { activationTokenHash: this.hashActivationToken(dto.token) },
+    });
+    if (!user || !user.activationTokenExpiresAt) {
+      throw new BadRequestException('Invalid activation token');
+    }
+    if (user.isActive || user.activationTokenExpiresAt.getTime() < Date.now()) {
+      throw new BadRequestException('Activation token has expired or was used');
+    }
+
+    user.password = await bcrypt.hash(dto.newPassword, 10);
+    user.isActive = true;
+    user.activationTokenHash = null;
+    user.activationTokenExpiresAt = null;
+    user.refreshToken = null;
+    await this.userRepository.save(user);
+    return { message: 'Account activated successfully' };
+  }
+
+  async resendActivation(id: string, actor: JwtUser) {
+    const user = await this.findUserEntity(id);
+    this.assertCanManage(user, actor);
+    if (user.isActive) {
+      throw new BadRequestException('User account is already active');
+    }
+
+    // Rate-limiting / cooldown: enforce minimum 60 seconds between resends
+    if (
+      user.activationTokenExpiresAt &&
+      user.activationTokenExpiresAt.getTime() >
+        Date.now() + this.getActivationTokenLifetimeMs() - 60 * 1000
+    ) {
+      throw new BadRequestException(
+        'Please wait at least 60 seconds before requesting another activation email',
+      );
+    }
+
+    const activationToken = randomBytes(32).toString('base64url');
+    const activationTokenExpiresAt = new Date(
+      Date.now() + this.getActivationTokenLifetimeMs(),
+    );
+    user.activationTokenHash = this.hashActivationToken(activationToken);
+    user.activationTokenExpiresAt = activationTokenExpiresAt;
+    await this.userRepository.save(user);
+
+    try {
+      await this.emailQueueService.enqueueUserActivationEmail({
+        to: user.email,
+        userName: user.name,
+        email: user.email,
+        activationToken,
+        activationUrl: `${process.env.FRONTEND_URL || ''}/set-password`,
+        expiresAt: activationTokenExpiresAt.toISOString(),
+      });
+    } catch {
+      user.activationTokenHash = null;
+      user.activationTokenExpiresAt = null;
+      await this.userRepository.save(user);
+      throw new InternalServerErrorException(
+        'The activation email could not be queued',
+      );
+    }
+    return { activationEmailQueued: true };
   }
 
   async findByEmail(email: string) {
@@ -228,5 +325,13 @@ export class UserService {
       );
       stream.end(file.buffer);
     });
+  }
+
+  private hashActivationToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private getActivationTokenLifetimeMs(): number {
+    return ACTIVATION_TOKEN_EXPIRES_MS;
   }
 }

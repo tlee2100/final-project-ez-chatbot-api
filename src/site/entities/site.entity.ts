@@ -79,4 +79,8 @@ export class Site {
   @AutoMap()
   @Column({ name: 'isAiActive', type: 'boolean', default: true })
   isAiActive: boolean;
+
+  @AutoMap(() => [String])
+  @Column({ type: 'text', array: true, default: '{}' })
+  allowedDomains: string[];
 }

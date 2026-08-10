@@ -5,11 +5,13 @@ import {
   Index,
   JoinColumn,
   ManyToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Site } from '../../site/entities/site.entity';
 import { DocumentStatus } from '../enums/document-status.enum';
 import { DocumentFileType } from '../enums/document-file-type.enum';
+import { DocumentChunk } from './document-chunk.entity';
 
 @Entity('documents')
 export class Document {
@@ -49,6 +51,9 @@ export class Document {
   @ManyToOne(() => Site, (site) => site.documents)
   @JoinColumn({ name: 'siteId' })
   site: Site;
+
+  @OneToMany(() => DocumentChunk, (chunk) => chunk.document)
+  chunks: DocumentChunk[];
 
   @CreateDateColumn()
   uploadedAt: Date;

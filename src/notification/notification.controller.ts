@@ -48,15 +48,25 @@ export class NotificationController {
 
   @ApiOperation({ summary: 'Get all notifications for the current user' })
   @Get()
-  async findAll(@Req() req: RequestWithUser, @Query('isRead') isRead?: string) {
+  async findAll(
+    @Req() req: RequestWithUser,
+    @Query('isRead') isRead?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
     const userId = req.user.id;
     const isReadBool =
       isRead === 'true' ? true : isRead === 'false' ? false : undefined;
-    const notifications = await this.notificationService.findAll(
+    const pageNumber = page ? parseInt(page, 10) : undefined;
+    const limitNumber = limit ? parseInt(limit, 10) : undefined;
+
+    const { data, totalItems } = await this.notificationService.findAll(
       userId,
       isReadBool,
+      pageNumber,
+      limitNumber,
     );
-    return notifications.map(mapToDto);
+    return { data: data.map(mapToDto), meta: { totalItems } };
   }
 
   @ApiOperation({ summary: 'Get unread notification count' })

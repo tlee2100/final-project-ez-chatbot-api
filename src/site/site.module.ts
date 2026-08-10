@@ -10,5 +10,6 @@ import { SiteProfile } from './profile/site.profile';
   imports: [TypeOrmModule.forFeature([Site, User])],
   controllers: [SiteController],
   providers: [SiteService, SiteProfile],
+  exports: [SiteService],
 })
 export class SiteModule {}

@@ -1,5 +1,11 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsUrl, IsOptional, IsBoolean } from 'class-validator';
+import {
+  IsString,
+  IsUrl,
+  IsOptional,
+  IsBoolean,
+  IsArray,
+} from 'class-validator';
 
 export class UpdateSiteDto {
   @ApiPropertyOptional({ example: 'My Site Updated' })
@@ -19,4 +25,15 @@ export class UpdateSiteDto {
   @IsOptional()
   @IsBoolean()
   isAiActive?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Allowed domains for the chat widget (e.g., example.com, *.example.com)',
+    example: ['example.com', '*.example.com'],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  allowedDomains?: string[];
 }

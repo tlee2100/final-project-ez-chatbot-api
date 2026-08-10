@@ -37,21 +37,15 @@ export class SiteService {
 
   // ── Create Site ──
   async create(createSiteDto: CreateSiteDto, user: JwtUser): Promise<SiteDto> {
-    const { agentIds, organizationId: dtoOrgId, ...siteData } = createSiteDto;
+    const { agentIds, ...siteData } = createSiteDto;
 
-    // Determine which organization the new site belongs to.
-    let organizationId: string | null;
-    if (user.role === UserRole.SUPER_ADMIN) {
-      organizationId = dtoOrgId ?? user.organizationId ?? null;
-    } else {
-      // Admins can only create sites within their own organization.
-      if (!user.organizationId) {
-        throw new BadRequestException(
-          'Admin must belong to an organization to create a site',
-        );
-      }
-      organizationId = user.organizationId;
+    // Admins can only create sites within their own organization.
+    if (!user.organizationId) {
+      throw new BadRequestException(
+        'Admin must belong to an organization to create a site',
+      );
     }
+    const organizationId = user.organizationId;
 
     const owner = await this.userRepository.findOne({
       where: { id: user.id },
@@ -78,6 +72,9 @@ export class SiteService {
 
     const site = this.siteRepository.create({
       ...siteData,
+      allowedDomains: siteData.allowedDomains
+        ? this.sanitizeAllowedDomains(siteData.allowedDomains)
+        : [],
       owner,
       organizationId,
     });
@@ -211,7 +208,14 @@ export class SiteService {
       }
     }
 
-    await this.siteRepository.update(id, dto);
+    const updateData: Record<string, any> = { ...dto };
+    if (dto.allowedDomains !== undefined) {
+      updateData.allowedDomains = this.sanitizeAllowedDomains(
+        dto.allowedDomains,
+      );
+    }
+
+    await this.siteRepository.update(id, updateData);
     return this.findOne(id);
   }
 
@@ -285,5 +289,26 @@ export class SiteService {
       user.organizationId !== null &&
       site.organizationId === user.organizationId
     );
+  }
+
+  private sanitizeAllowedDomains(domains?: string[]): string[] {
+    if (!domains || !Array.isArray(domains)) return [];
+
+    return domains
+      .map((domain) => {
+        let clean = domain.trim();
+        try {
+          if (clean.startsWith('http://') || clean.startsWith('https://')) {
+            clean = new URL(clean).hostname;
+          }
+        } catch {
+          // Ignore invalid URLs
+        }
+        clean = clean.replace(/\/$/, '');
+        clean = clean.split(':')[0];
+
+        return clean;
+      })
+      .filter(Boolean);
   }
 }

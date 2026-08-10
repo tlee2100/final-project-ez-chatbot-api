@@ -5,6 +5,7 @@ import { UserService } from '../user/user.service';
 import { LoginDto } from './dto/login.dto';
 import { User } from 'src/user/entities/user.entity';
 import { StringValue } from 'ms';
+import { ActivateAccountDto } from './dto/activate-account.dto';
 
 @Injectable()
 export class AuthService {
@@ -29,6 +30,10 @@ export class AuthService {
 
     if (!user) {
       throw new UnauthorizedException('Invalid email or password');
+    }
+
+    if (!user.isActive) {
+      throw new UnauthorizedException('Account activation is required');
     }
 
     const isPasswordValid = await bcrypt.compare(
@@ -90,5 +95,9 @@ export class AuthService {
   async logout(userId: string) {
     await this.userService.updateInternal(userId, { refreshToken: null });
     return { message: 'Logged out successfully' };
+  }
+
+  async activateAccount(dto: ActivateAccountDto) {
+    return this.userService.activateAccount(dto);
   }
 }

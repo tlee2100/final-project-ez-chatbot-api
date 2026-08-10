@@ -28,10 +28,12 @@ import { Paginate, type PaginateQuery } from 'nestjs-paginate';
 import { documentUploadOptions } from './document-upload.options';
 import { DocumentService } from './document.service';
 import { DocumentUploadExceptionFilter } from './filters/document-upload.filter';
+import { TenantScopeInterceptor } from 'src/common/interceptors/tenant-scope.interceptor';
 
 @ApiTags('Documents')
 @ApiBearerAuth()
 @Controller('sites/:siteId/kb')
+@UseInterceptors(TenantScopeInterceptor)
 export class DocumentController {
   constructor(private readonly documentService: DocumentService) {}
 
@@ -97,6 +99,46 @@ export class DocumentController {
     @Req() req: AuthRequest,
   ) {
     return this.documentService.uploadDocument(siteId, file, req.user);
+  }
+
+  @Get('stats')
+  @ApiOperation({
+    summary: 'Get Knowledge Base statistics for a site (Admin/Owner only)',
+    description:
+      'Retrieve aggregate metrics of documents, chunks, vectors and token counts for a site.',
+  })
+  @ApiResponse({ status: 200, description: 'Return site KB statistics' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden (Not site owner/admin)' })
+  @ApiResponse({ status: 404, description: 'Site not found' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async getSiteKBStats(
+    @Param('siteId') siteId: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.documentService.getSiteKBStats(siteId, req.user);
+  }
+
+  @Get('sources/:documentId/chunks')
+  @ApiOperation({
+    summary:
+      'Get all chunks and embedding metadata for a document (Admin/Owner only)',
+    description:
+      'Retrieve ordered list of chunks with token counts, section titles, and embedding metadata.',
+  })
+  @ApiResponse({ status: 200, description: 'Return document chunks' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden (Not site owner/admin)' })
+  @ApiResponse({ status: 404, description: 'Document or Site not found' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async getDocumentChunks(
+    @Param('siteId') siteId: string,
+    @Param('documentId') documentId: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.documentService.getDocumentChunks(siteId, documentId, req.user);
   }
 
   @Delete('sources/:documentId')

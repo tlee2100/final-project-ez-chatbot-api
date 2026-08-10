@@ -76,22 +76,16 @@ export class OrganizationService {
       );
 
     if (user && user.role === UserRole.ADMIN) {
-      if (!user.organizationId) {
-        return {
-          data: [],
-          meta: {
-            page,
-            limit,
-            totalItems: 0,
-            totalPages: 0,
-            hasNextPage: false,
-            hasPreviousPage: false,
-          },
-        };
-      }
-      qb.andWhere('organization.id = :userOrgId', {
-        userOrgId: user.organizationId,
-      });
+      // Find the org where the user is either a member (organizationId) or the owner (ownerId).
+      // The OR covers the case where the JWT was issued before organizationId was set on the user.
+      qb.andWhere(
+        '(organization.id = :userOrgId OR organization.ownerId = :userId)',
+        {
+          userOrgId:
+            user.organizationId ?? '00000000-0000-0000-0000-000000000000',
+          userId: user.id,
+        },
+      );
     }
 
     if (query.name) {

@@ -40,7 +40,7 @@ describe('OrganizationService access rules', () => {
     const result = await service.findAll({});
 
     expect(result.data).toHaveLength(2);
-    expect(qb.getManyAndCount).toHaveBeenCalled();
+    expect(qb.getRawAndEntities).toHaveBeenCalled();
   });
 
   it('returns 409 CONFLICT for duplicate slug', async () => {

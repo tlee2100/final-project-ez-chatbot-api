@@ -45,7 +45,7 @@ export class SiteDto {
     description: 'Organization ID',
     nullable: true,
   })
-  @AutoMap()
+  @AutoMap(() => String)
   organizationId: string | null;
 
   @ApiProperty({
@@ -69,4 +69,13 @@ export class SiteDto {
   })
   @AutoMap(() => UserDto)
   agents?: UserDto[];
+
+  @ApiProperty({
+    type: [String],
+    description:
+      'Allowed domains for the chat widget (e.g., example.com, *.example.com)',
+    example: ['example.com', '*.example.com'],
+  })
+  @AutoMap(() => [String])
+  allowedDomains: string[];
 }

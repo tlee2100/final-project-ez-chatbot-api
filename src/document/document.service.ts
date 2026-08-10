@@ -12,6 +12,7 @@ import { Repository } from 'typeorm';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import { paginate, type Paginated, type PaginateQuery } from 'nestjs-paginate';
 import { Document } from './entities/document.entity';
+import { DocumentChunk } from './entities/document-chunk.entity';
 import { Site } from '../site/entities/site.entity';
 import { DocumentStatus } from './enums/document-status.enum';
 import {
@@ -23,6 +24,7 @@ import type { DocumentProcessingJobData } from './types/document-processing-job.
 import type { JwtUser } from 'src/auth/types/jwt-user.type';
 
 import { DocumentContextValidator } from './validators/document-context.validator';
+import { DOCUMENT_VECTOR_LIMIT } from './constants/document-storage.constants';
 
 @Injectable()
 export class DocumentService {
@@ -31,6 +33,9 @@ export class DocumentService {
   constructor(
     @InjectRepository(Document)
     private readonly documentRepository: Repository<Document>,
+
+    @InjectRepository(DocumentChunk)
+    private readonly documentChunkRepository: Repository<DocumentChunk>,
 
     @InjectRepository(Site)
     private readonly siteRepository: Repository<Site>,
@@ -249,5 +254,156 @@ export class DocumentService {
 
       uploadStream.end(buffer);
     });
+  }
+
+  async getDocumentChunks(
+    siteId: string,
+    documentId: string,
+    user: JwtUser,
+  ): Promise<{
+    document: {
+      id: string;
+      filename: string;
+      fileType: DocumentFileType;
+      fileSizeBytes: number | null;
+      status: DocumentStatus;
+      filePath: string;
+      uploadedAt: Date;
+      processedAt: Date | null;
+      chunksCount: number;
+    };
+    chunks: Array<{
+      id: string;
+      chunkIndex: number;
+      content: string;
+      tokenCount: number;
+      sectionTitle: string | null;
+      metadata: Record<string, unknown>;
+      embeddingModel: string;
+      vectorDimensions: number;
+      createdAt: Date;
+    }>;
+  }> {
+    await this.findOwnedSiteOrThrow(siteId, user);
+
+    const document = await this.documentRepository.findOne({
+      where: { id: documentId, siteId },
+    });
+
+    if (!document) {
+      throw new NotFoundException(
+        `Document with ID '${documentId}' not found for this site`,
+      );
+    }
+
+    const chunks = await this.documentChunkRepository.find({
+      where: { documentId, siteId },
+      order: { chunkIndex: 'ASC' },
+      select: {
+        id: true,
+        documentId: true,
+        siteId: true,
+        chunkIndex: true,
+        content: true,
+        tokenCount: true,
+        sectionTitle: true,
+        metadata: true,
+        embeddingModel: true,
+        createdAt: true,
+      },
+    });
+
+    return {
+      document: {
+        id: document.id,
+        filename: document.filename,
+        fileType: document.fileType,
+        fileSizeBytes: document.fileSizeBytes,
+        status: document.status,
+        filePath: document.filePath,
+        uploadedAt: document.uploadedAt,
+        processedAt: document.processedAt,
+        chunksCount: chunks.length,
+      },
+      chunks: chunks.map((chunk) => ({
+        id: chunk.id,
+        chunkIndex: chunk.chunkIndex,
+        content: chunk.content,
+        tokenCount: chunk.tokenCount,
+        sectionTitle: chunk.sectionTitle,
+        metadata: chunk.metadata,
+        embeddingModel: chunk.embeddingModel,
+        vectorDimensions: 1536,
+        createdAt: chunk.createdAt,
+      })),
+    };
+  }
+
+  async getSiteKBStats(
+    siteId: string,
+    user: JwtUser,
+  ): Promise<{
+    totalDocuments: number;
+    totalChunks: number;
+    totalSizeBytes: number;
+    totalTokens: number;
+    vectorsUsed: number;
+    vectorsLimit: number;
+    usagePercentage: number;
+    lastProcessedAt: Date | null;
+  }> {
+    await this.findOwnedSiteOrThrow(siteId, user);
+
+    const totalDocuments = await this.documentRepository.count({
+      where: { siteId },
+    });
+
+    const totalChunks = await this.documentChunkRepository.count({
+      where: { siteId },
+    });
+
+    interface SizeQueryResult {
+      totalSize?: string | number | null;
+      lastProcessedAt?: string | Date | null;
+    }
+
+    interface TokenQueryResult {
+      totalTokens?: string | number | null;
+    }
+
+    const sizeResult = await this.documentRepository
+      .createQueryBuilder('doc')
+      .select('SUM(doc.fileSizeBytes)', 'totalSize')
+      .addSelect('MAX(doc.processedAt)', 'lastProcessedAt')
+      .where('doc.siteId = :siteId', { siteId })
+      .getRawOne<SizeQueryResult>();
+
+    const tokenResult = await this.documentChunkRepository
+      .createQueryBuilder('chunk')
+      .select('SUM(chunk.tokenCount)', 'totalTokens')
+      .where('chunk.siteId = :siteId', { siteId })
+      .getRawOne<TokenQueryResult>();
+
+    const totalSizeBytes = Number(sizeResult?.totalSize) || 0;
+    const totalTokens = Number(tokenResult?.totalTokens) || 0;
+    const lastProcessedAt = sizeResult?.lastProcessedAt
+      ? new Date(sizeResult.lastProcessedAt)
+      : null;
+    const vectorsUsed = totalChunks;
+    const vectorsLimit = DOCUMENT_VECTOR_LIMIT;
+    const usagePercentage = Number(
+      ((vectorsUsed / vectorsLimit) * 100).toFixed(2),
+    );
+
+    return {
+      totalDocuments,
+      totalChunks,
+      totalSizeBytes,
+      totalTokens,
+      vectorsUsed,
+      vectorsLimit,
+      usagePercentage,
+      lastProcessedAt,
+    };
   }
 }

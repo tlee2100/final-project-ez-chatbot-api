@@ -7,6 +7,8 @@ export function createRepositoryMock() {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return
     create: jest.fn((data) => data),
     remove: jest.fn(),
+    softRemove: jest.fn(),
+    delete: jest.fn().mockResolvedValue({ affected: 1 }),
     count: jest.fn().mockResolvedValue(0),
     createQueryBuilder: jest.fn(),
     merge: jest.fn(),
@@ -32,8 +34,14 @@ export function createQueryBuilderMock(returnData: unknown[] = []) {
       .mockResolvedValue([returnData, returnData.length]),
     getMany: jest.fn().mockResolvedValue(returnData),
     getOne: jest.fn().mockResolvedValue(returnData[0] ?? null),
+    getRawAndEntities: jest.fn().mockResolvedValue({
+      entities: returnData,
+      raw: returnData.map(() => ({})),
+    }),
+    getCount: jest.fn().mockResolvedValue(returnData.length),
     leftJoinAndSelect: jest.fn().mockReturnThis(),
     innerJoinAndSelect: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
   };
   return qb;
 }

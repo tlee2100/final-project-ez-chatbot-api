@@ -10,8 +10,4 @@ export class CreateConversationDto {
 
   @IsEmail()
   visitorEmail: string;
-
-  @IsString()
-  @MinLength(1)
-  firstMessage: string;
 }

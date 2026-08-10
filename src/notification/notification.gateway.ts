@@ -12,14 +12,16 @@ import { JwtUser } from '../auth/types/jwt-user.type';
 import { Notification } from './entities/notification.entity';
 import { Logger } from '@nestjs/common';
 import { DocumentNotificationPayload } from './types/document-notification-payload.type';
+import { ChatToastPayload } from './types/chat-toast-payload.type';
 
-const frontendOrigins = process.env.FRONTEND_URL?.split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+// const frontendOrigins = process.env.FRONTEND_URL?.split(',')
+//   .map((origin) => origin.trim())
+//   .filter(Boolean);
 
 @WebSocketGateway({
   cors: {
-    origin: frontendOrigins,
+    origin: true,
+    credentials: true,
   },
   namespace: '/api/v1/notifications',
 })
@@ -59,6 +61,15 @@ export class NotificationGateway
     this.server
       .to(this.getNotificationRoom(userId))
       .emit('notification.new', notification);
+  }
+
+  public emitChatToast(agentId: string, payload: ChatToastPayload): void {
+    this.server
+      .to(this.getNotificationRoom(agentId))
+      .emit('chat.toast', payload);
+    this.logger.log(
+      `chat.toast emitted to agent ${agentId} for conversation ${payload.conversationId}`,
+    );
   }
 
   private getNotificationRoom(userId: string): string {

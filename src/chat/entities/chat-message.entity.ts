@@ -12,6 +12,7 @@ import { User } from '../../user/entities/user.entity';
 export enum SenderType {
   VISITOR = 'VISITOR',
   AGENT = 'AGENT',
+  AI = 'AI',
   SYSTEM = 'SYSTEM',
 }
 

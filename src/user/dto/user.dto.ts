@@ -18,6 +18,18 @@ export class UserDto {
   @AutoMap()
   email: string;
 
+  @ApiProperty({ description: 'Whether the user has activated the account' })
+  @AutoMap()
+  isActive: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'Activation token expiry timestamp',
+    example: '2026-08-07T12:00:00.000Z',
+  })
+  @AutoMap(() => Date)
+  activationTokenExpiresAt: Date | null;
+
   @ApiProperty({
     example: 'Nguyen Van A',
     description: 'User name',
@@ -54,8 +66,11 @@ export class CreateUserResponseDto {
   @ApiProperty({ type: () => UserDto })
   user: UserDto;
 
-  @ApiProperty({ description: 'Initial password generated for the user' })
-  initialPassword: string;
+  @ApiProperty({
+    description: 'Whether the activation email was added to the email queue',
+    example: true,
+  })
+  activationEmailQueued: boolean;
 }
 
 export class DeleteUserResponseDto {

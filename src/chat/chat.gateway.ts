@@ -7,7 +7,6 @@ import {
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
-  WsException,
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import { Logger } from '@nestjs/common';
@@ -17,6 +16,8 @@ import type { JwtUser } from 'src/auth/types/jwt-user.type';
 import { ChatService } from './chat.service';
 import { SenderType } from './entities/chat-message.entity';
 import { Conversation } from './entities/conversation.entity';
+import { NotificationGateway } from '../notification/notification.gateway';
+import { ChatToastPayload } from '../notification/types/chat-toast-payload.type';
 
 type JwtPayload = {
   sub: string;
@@ -25,23 +26,23 @@ type JwtPayload = {
   organizationId: string | null;
 };
 
-type SocketData = {
+export type SocketData = {
   user?: JwtUser;
   visitor?: {
     conversationId: string;
   };
 };
 
-type ChatMessagePayload = string | { message: string };
+export type ChatMessagePayload = string | { message: string };
 
-const MAX_MESSAGE_LENGTH = 1000;
-const frontendOrigins = process.env.FRONTEND_URL?.split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+// const frontendOrigins = process.env.FRONTEND_URL?.split(',')
+//   .map((origin) => origin.trim())
+//   .filter(Boolean);
 
 @WebSocketGateway({
   cors: {
-    origin: frontendOrigins,
+    origin: true,
+    credentials: true,
   },
 })
 export class ChatGateway
@@ -52,6 +53,7 @@ export class ChatGateway
   constructor(
     private readonly jwtService: JwtService,
     private readonly chatService: ChatService,
+    private readonly notificationGateway: NotificationGateway,
   ) {}
 
   @WebSocketServer()
@@ -60,6 +62,13 @@ export class ChatGateway
   afterInit(server: Server) {
     server.use((client: Socket, next) => {
       void this.authenticateClient(client, next);
+    });
+
+    this.chatService.onConversationsClosed((conversationIds) => {
+      for (const id of conversationIds) {
+        this.notifyConversationClosed(id);
+        this.emitConversationStatusChanged(id, 'CLOSED');
+      }
     });
   }
 
@@ -100,39 +109,11 @@ export class ChatGateway
   }
 
   async handleConnection(client: Socket) {
-    const socketData = client.data as SocketData;
-    const user = socketData.user;
-    const visitor = socketData.visitor;
-
-    if (!user && !visitor) {
-      client.disconnect();
-      return;
-    }
-
-    if (visitor) {
-      this.logger.log(
-        `Visitor connected for conversation ${visitor.conversationId}`,
-      );
-      void client.join(`conversation-${visitor.conversationId}`);
-      client.emit('connected', { message: `Connected as visitor` });
-      return;
-    }
-
-    if (!user) return;
-
-    this.logger.log(`Client connected: ${client.id} (${user.email})`);
-
-    // Join site rooms for inbox real-time updates
-    await this.chatService.handleClientConnected(
-      (room) => void client.join(room),
-      user,
-    );
-
-    client.emit('connected', { message: `Connected as ${user.email}` });
+    await this.chatService.handleConnection(client);
   }
 
   handleDisconnect(client: Socket) {
-    this.logger.log(`Client disconnected: ${client.id}`);
+    this.chatService.handleDisconnect(client);
   }
 
   // ─── Legacy message event (kept for backward compat) ──────────────────────
@@ -142,21 +123,7 @@ export class ChatGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: ChatMessagePayload,
   ) {
-    const socketData = client.data as SocketData;
-    const user = socketData.user;
-
-    if (!user) {
-      throw new WsException('Unauthenticated client');
-    }
-
-    const message = this.validateMessagePayload(payload);
-    const sender = user.email;
-    const text = `${sender}: ${message}`;
-
-    this.logger.log(`Message received from ${sender}: ${message}`);
-    this.server.emit('message', text);
-
-    return message;
+    return this.chatService.handleLegacyMessage(client, payload);
   }
 
   // ─── Live-chat: Join conversation room (agent "Takes Chat") ───────────────
@@ -166,68 +133,17 @@ export class ChatGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { conversationId: string },
   ): Promise<void> {
-    const user = (client.data as SocketData).user;
-    if (!user) {
-      client.emit('joinError', { message: 'Unauthenticated' });
-      return;
-    }
-
-    try {
-      const { conversation, isNewAssignment } =
-        await this.chatService.assignAgentToConversation(
-          payload.conversationId,
-          user,
-        );
-
-      // Notify the whole site room so other agents' inboxes refresh
-      this.notifyConversationAssigned(conversation.id, conversation.siteId);
-
-      if (isNewAssignment) {
-        const joinMsg = await this.chatService.saveMessage(
-          payload.conversationId,
-          'An agent has joined the chat.',
-          SenderType.SYSTEM,
-        );
-
-        // Broadcast system message to the conversation room
-        this.server
-          .to(`conversation-${payload.conversationId}`)
-          .emit('newMessage', {
-            id: joinMsg.id,
-            conversationId: payload.conversationId,
-            content: joinMsg.content,
-            senderType: joinMsg.senderType,
-            createdAt: joinMsg.createdAt,
-          });
-      }
-
-      void client.join(`conversation-${payload.conversationId}`);
-      this.logger.log(
-        `Agent ${user.email} joined conversation ${payload.conversationId}`,
-      );
-
-      client.emit('joinedConversation', {
-        conversationId: payload.conversationId,
-        isNewAssignment,
-      });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to join conversation';
-      client.emit('joinError', { message });
-    }
+    await this.chatService.handleJoinConversation(client, payload);
   }
 
   // ─── Live-chat: Subscribe (preview without claiming) ──────────────────────
 
   @SubscribeMessage('subscribeConversation')
-  handleSubscribeConversation(
+  async handleSubscribeConversation(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { conversationId: string },
-  ): void {
-    void client.join(`conversation-${payload.conversationId}`);
-    this.logger.log(
-      `Client ${client.id} subscribed to conversation ${payload.conversationId}`,
-    );
+  ): Promise<void> {
+    await this.chatService.handleSubscribeConversation(client, payload);
   }
 
   // ─── Live-chat: Send message ───────────────────────────────────────────────
@@ -243,68 +159,35 @@ export class ChatGateway
       localId?: string;
     },
   ): Promise<void> {
-    const socketData = client.data as SocketData;
-    const user = socketData.user;
-    const visitor = socketData.visitor;
-
-    if (!user && !visitor) {
-      client.emit('messageError', { message: 'Unauthenticated' });
-      return;
-    }
-
-    if (visitor) {
-      if (visitor.conversationId !== payload.conversationId) {
-        client.emit('messageError', { message: 'Unauthorized conversation' });
-        return;
-      }
-      payload.senderType = SenderType.VISITOR;
-    } else if (user) {
-      payload.senderType = SenderType.AGENT;
-    }
-
-    try {
-      const savedMessage = await this.chatService.saveMessage(
-        payload.conversationId,
-        payload.content,
-        payload.senderType,
-        payload.senderType === SenderType.AGENT ? user?.id : undefined,
-      );
-
-      const messageEvent = {
-        id: savedMessage.id,
-        conversationId: payload.conversationId,
-        content: savedMessage.content,
-        senderType: savedMessage.senderType,
-        agentId: savedMessage.agentId,
-        createdAt: savedMessage.createdAt,
-      };
-
-      // Broadcast to everyone else in the room
-      client
-        .to(`conversation-${payload.conversationId}`)
-        .emit('newMessage', messageEvent);
-
-      // Echo back to sender with real DB id
-      client.emit('messageSaved', {
-        localId: payload.localId,
-        ...messageEvent,
-      });
-
-      // Notify the site room so the conversation list re-sorts
-      const conversation = await this.chatService.getConversationById(
-        payload.conversationId,
-      );
-      this.server
-        .to(`site-${conversation.siteId}`)
-        .emit('conversationActivity', { id: payload.conversationId });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to send message';
-      client.emit('messageError', { message });
-    }
+    await this.chatService.handleSendMessage(client, payload);
   }
 
-  // ─── Emit helpers (called by the REST controller) ─────────────────────────
+  // ─── Live-chat: Typing & Status ──────────────────────────────────────────
+
+  @SubscribeMessage('conversation-typing')
+  handleTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
+  ): void {
+    this.chatService.handleTyping(client, payload);
+  }
+
+  @SubscribeMessage('conversation-read')
+  async handleConversationRead(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
+  ): Promise<void> {
+    await this.chatService.handleConversationRead(client, payload);
+  }
+
+  // ─── Emit helpers (called by the REST controller / service) ───────────────
+
+  emitChatToastToAgent(agentId: string, payload: ChatToastPayload): void {
+    this.notificationGateway.emitChatToast(agentId, payload);
+    this.logger.log(
+      `Chat toast forwarded to agent ${agentId} for conversation ${payload.conversationId}`,
+    );
+  }
 
   notifyAgentsOfNewConversation(conversation: Conversation): void {
     this.server.to(`site-${conversation.siteId}`).emit('newConversation', {
@@ -332,8 +215,6 @@ export class ChatGateway
       .to(`conversation-${conversationId}`)
       .emit('conversationClosed', { id: conversationId });
 
-    // Also notify the site room so agents' inboxes refresh and drop the
-    // closed conversation without a manual reload.
     if (siteId) {
       this.server.to(`site-${siteId}`).emit('conversationClosed', {
         id: conversationId,
@@ -341,45 +222,28 @@ export class ChatGateway
     }
   }
 
-  // ─── System notifications ────────────────────────────────────────────────
-
-  private validateMessagePayload(payload: ChatMessagePayload): string {
-    const message =
-      typeof payload === 'string'
-        ? payload
-        : this.extractMessageFromObject(payload);
-
-    if (typeof message !== 'string') {
-      throw new WsException('Message must be a string');
-    }
-
-    const normalizedMessage = message.trim();
-
-    if (!normalizedMessage) {
-      throw new WsException('Message must not be empty');
-    }
-
-    if (normalizedMessage.length > MAX_MESSAGE_LENGTH) {
-      throw new WsException(
-        `Message must not exceed ${MAX_MESSAGE_LENGTH} characters`,
-      );
-    }
-
-    return normalizedMessage;
+  notifyHandoffRequested(conversationId: string, siteId: string): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('handlingStatusUpdated', {
+        conversationId,
+        handlingStatus: 'WAITING_FOR_AGENT',
+      });
+    this.server.to(`site-${siteId}`).emit('conversationActivity', {
+      id: conversationId,
+    });
+    this.logger.log(
+      `Handoff requested for conversation ${conversationId} (site ${siteId})`,
+    );
   }
 
-  private extractMessageFromObject(payload: ChatMessagePayload): string | null {
-    if (
-      !payload ||
-      typeof payload !== 'object' ||
-      Array.isArray(payload) ||
-      !Object.hasOwn(payload, 'message')
-    ) {
-      return null;
-    }
-
-    return payload.message;
+  emitConversationStatusChanged(conversationId: string, status: string): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('conversationStatusChanged', { conversationId, status });
   }
+
+  // ─── Auth / Query extractors ─────────────────────────────────────────────
 
   private extractToken(client: Socket): string | null {
     const authToken = (client.handshake.auth as Partial<{ token: string }>)

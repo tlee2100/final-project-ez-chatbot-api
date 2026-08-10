@@ -5,10 +5,10 @@ export class AddConversationsAndMessages1785304998045 implements MigrationInterf
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
-      `ALTER TABLE "organizations" DROP CONSTRAINT "FK_organizations_owner"`,
+      `ALTER TABLE "organizations" DROP CONSTRAINT IF EXISTS "FK_organizations_owner"`,
     );
     await queryRunner.query(
-      `ALTER TABLE "organizations" DROP CONSTRAINT "FK_cdf778d13ea7fe8095e013e34f0"`,
+      `ALTER TABLE "organizations" DROP CONSTRAINT IF EXISTS "FK_cdf778d13ea7fe8095e013e34f0"`,
     );
     await queryRunner.query(
       `CREATE TYPE "public"."conversations_status_enum" AS ENUM('OPEN', 'PAUSED', 'CLOSED')`,
@@ -29,7 +29,7 @@ export class AddConversationsAndMessages1785304998045 implements MigrationInterf
       `CREATE TABLE "chat_messages" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "conversationId" uuid NOT NULL, "senderType" "public"."chat_messages_sendertype_enum" NOT NULL, "agentId" uuid, "content" text NOT NULL, "status" "public"."chat_messages_status_enum" NOT NULL DEFAULT 'SENT', "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), CONSTRAINT "PK_40c55ee0e571e268b0d3cd37d10" PRIMARY KEY ("id"))`,
     );
     await queryRunner.query(
-      `ALTER TABLE "organizations" DROP CONSTRAINT "UQ_cdf778d13ea7fe8095e013e34f0"`,
+      `ALTER TABLE "organizations" DROP CONSTRAINT IF EXISTS "UQ_cdf778d13ea7fe8095e013e34f0"`,
     );
     await queryRunner.query(
       `ALTER TABLE "organizations" ADD CONSTRAINT "FK_cdf778d13ea7fe8095e013e34f0" FOREIGN KEY ("ownerId") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE NO ACTION`,

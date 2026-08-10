@@ -60,13 +60,37 @@ export class Conversation {
   @Column({
     type: 'enum',
     enum: HandlingStatus,
-    default: HandlingStatus.WAITING_FOR_AGENT,
+    default: HandlingStatus.AI_HANDLING,
   })
   handlingStatus: HandlingStatus;
 
   /** Used by the gateway and cron job to auto-close idle chats */
   @Column({ type: 'timestamptz', default: () => 'CURRENT_TIMESTAMP' })
   lastActivityAt: Date;
+
+  /**
+   * Rolling summary of the conversation produced by the LangGraph summarize_memory node.
+   * Used to condense old messages into a compact context window for the LLM.
+   */
+  @Column({ type: 'text', nullable: true, default: null })
+  summary: string | null;
+
+  /**
+   * Number of messages that have already been summarized and compacted.
+   * Tracked so the graph knows which portion of the history is already captured in `summary`.
+   */
+  @Column({ type: 'integer', default: 0 })
+  summarizedMessageCount: number;
+
+  /**
+   * Conversation-level AI active flag.
+   * Starts as `true` for every new conversation (AI handles it).
+   * Flips to `false` when a human agent takes over (`joinConversation`).
+   * Independent of the site-level `site.isAiActive` toggle — both must be true
+   * for the AgentService to invoke the LangGraph workflow.
+   */
+  @Column({ type: 'boolean', default: true })
+  isAiActive: boolean;
 
   @OneToMany(() => ChatMessage, (msg) => msg.conversation)
   messages: ChatMessage[];

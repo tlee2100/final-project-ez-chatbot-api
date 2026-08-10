@@ -33,6 +33,17 @@ export class User {
   password: string;
 
   @AutoMap()
+  @Column({ default: true })
+  isActive: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
+  activationTokenHash: string | null;
+
+  @AutoMap(() => Date)
+  @Column({ type: 'timestamp with time zone', nullable: true })
+  activationTokenExpiresAt: Date | null;
+
+  @AutoMap()
   @Column()
   name: string;
 

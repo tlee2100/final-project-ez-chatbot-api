@@ -47,7 +47,7 @@ export class SiteController {
   constructor(private readonly siteService: SiteService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create new site - ADMIN/SUPER_ADMIN only' })
+  @ApiOperation({ summary: 'Create new site - ADMIN only' })
   @ApiBody({ type: CreateSiteDto })
   @ApiResponse({
     status: 201,
@@ -57,7 +57,7 @@ export class SiteController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden' })
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Roles(UserRole.ADMIN)
   async create(@Body() dto: CreateSiteDto, @Req() req: AuthRequest) {
     return await this.siteService.create(dto, req.user);
   }

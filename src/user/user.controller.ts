@@ -124,6 +124,25 @@ export class UserController {
     return this.userService.create(createUserDto, req.user);
   }
 
+  @Post(':id/resend-activation')
+  @ApiOperation({ summary: 'Resend user account activation email' })
+  @ApiParam({ name: 'id', description: 'User ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Activation email queued successfully',
+  })
+  @ApiResponse({ status: 400, description: 'User is already active' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  resendActivation(
+    @Param('id') id: string,
+    @Req() req: AuthRequest,
+  ): Promise<{ activationEmailQueued: boolean }> {
+    return this.userService.resendActivation(id, req.user);
+  }
+
   @Get('me')
   @ApiOperation({ summary: 'Get current user profile' })
   @ApiResponse({

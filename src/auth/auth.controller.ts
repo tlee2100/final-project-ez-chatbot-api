@@ -1,13 +1,4 @@
-import {
-  Body,
-  Controller,
-  Post,
-  Req,
-  Res,
-  UseGuards,
-  UnauthorizedException,
-} from '@nestjs/common';
-import type { Response, Request } from 'express';
+import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -24,31 +15,26 @@ import {
   AccessTokenResponseDto,
   MessageResponseDto,
 } from './dto/auth-response.dto';
-
-// Refresh-token cookie hardening:
-// - In production the cookie uses the `__Host-` prefix (implies Secure,
-//   Path=/, no Domain) so a misconfigured deploy cannot send it over HTTP.
-// - `secure` is only set in production so local dev over http://localhost
-//   still receives the cookie.
-const REFRESH_COOKIE_NAME =
-  process.env.NODE_ENV === 'production'
-    ? '__Host-refreshToken'
-    : 'refreshToken';
-
-function refreshCookieOptions() {
-  return {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax' as const,
-    path: '/',
-  };
-}
+import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ActivateAccountDto } from './dto/activate-account.dto';
 
 @ApiTags('Auth')
 @ApiExtraModels(AccessTokenResponseDto, MessageResponseDto)
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  @Post('activate-account')
+  @ApiOperation({ summary: 'Activate an account and set its password' })
+  @ApiBody({ type: ActivateAccountDto })
+  @ApiResponse({ status: 201, description: 'Account activated successfully' })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid or expired activation token',
+  })
+  activateAccount(@Body() dto: ActivateAccountDto) {
+    return this.authService.activateAccount(dto);
+  }
 
   @Post('login')
   @ApiOperation({ summary: 'Login with email and password' })
@@ -60,16 +46,11 @@ export class AuthController {
   })
   @ApiResponse({ status: 400, description: 'Invalid request data' })
   @ApiResponse({ status: 401, description: 'Invalid email or password' })
-  async login(
-    @Body() loginDto: LoginDto,
-    @Res({ passthrough: true }) res: Response,
-  ) {
+  async login(@Body() loginDto: LoginDto) {
     const { accessToken, refreshToken } =
       await this.authService.login(loginDto);
 
-    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions());
-
-    return { accessToken };
+    return { accessToken, refreshToken };
   }
 
   @Post('refresh')
@@ -80,23 +61,12 @@ export class AuthController {
     type: AccessTokenResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Invalid or expired refresh token' })
-  async refresh(
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ) {
-    const cookies = req.cookies as Record<string, string> | undefined;
-    const refreshToken = cookies?.[REFRESH_COOKIE_NAME];
-    if (!refreshToken) {
-      // Throw 401 directly if no token is found in the cookie
-      throw new UnauthorizedException('No refresh token found');
-    }
-
+  @ApiBody({ type: RefreshTokenDto })
+  async refresh(@Body() body: RefreshTokenDto) {
     const { accessToken, refreshToken: newRefreshToken } =
-      await this.authService.refreshToken(refreshToken);
+      await this.authService.refreshToken(body.refreshToken);
 
-    res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, refreshCookieOptions());
-
-    return { accessToken };
+    return { accessToken, refreshToken: newRefreshToken };
   }
 
   @UseGuards(JwtAuthGuard)
@@ -109,12 +79,8 @@ export class AuthController {
     type: MessageResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async logout(
-    @Req() req: AuthRequest,
-    @Res({ passthrough: true }) res: Response,
-  ) {
+  async logout(@Req() req: AuthRequest) {
     await this.authService.logout(req.user.id);
-    res.clearCookie(REFRESH_COOKIE_NAME, refreshCookieOptions());
     return { message: 'Logged out successfully' };
   }
 }

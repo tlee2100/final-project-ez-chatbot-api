@@ -39,7 +39,12 @@ export class NotificationService {
     return savedNotification;
   }
 
-  async findAll(userId: string, isRead?: boolean): Promise<Notification[]> {
+  async findAll(
+    userId: string,
+    isRead?: boolean,
+    page?: number,
+    limit?: number,
+  ): Promise<{ data: Notification[]; totalItems: number }> {
     const query = this.notificationRepository
       .createQueryBuilder('notification')
       .leftJoinAndSelect('notification.site', 'site')
@@ -55,11 +60,17 @@ export class NotificationService {
       }
     }
 
-    return query.getMany();
+    if (page !== undefined && limit !== undefined) {
+      query.skip((page - 1) * limit).take(limit);
+    }
+
+    const [data, totalItems] = await query.getManyAndCount();
+    return { data, totalItems };
   }
 
   async findUnread(userId: string): Promise<Notification[]> {
-    return this.findAll(userId, false);
+    const res = await this.findAll(userId, false);
+    return res.data;
   }
 
   async findOne(id: string, userId: string): Promise<Notification> {

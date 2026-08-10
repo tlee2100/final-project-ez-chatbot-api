@@ -1,0 +1,3 @@
+export const DEFAULT_RETRIEVAL_TOP_K = 5;
+export const MAX_RETRIEVAL_TOP_K = 20;
+export const DEFAULT_RETRIEVAL_MIN_SIMILARITY = 0.7;
