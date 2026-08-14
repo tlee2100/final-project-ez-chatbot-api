@@ -25,6 +25,6 @@ jobs:
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
           COOLIFY_DEPLOY_MODE: docker-image
           IMAGE_TAG: 123
-          DEPLOY_IMAGE: registry.royal.zodinet.tech/internship/chatbot-api:123
-          RELEASE_VERSION: 123
+          DEPLOY_IMAGE: registry.royal.zodinet.tech/internship/chatbot-api:124
+          RELEASE_VERSION: 124
         run: bash .github/scripts/deploy-coolify.sh
