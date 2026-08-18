@@ -12,7 +12,13 @@ import {
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { getIntentClassifierPrompt } from './prompts';
+import {
+  CancelPrompts,
+  CancelState,
+  CancelStep,
+  getCancelPrompts,
+  getIntentClassifierPrompt,
+} from './prompts';
 import type { Response as ExpressResponse } from 'express';
 import type { Server as SocketServer } from 'socket.io';
 import { formatInTimeZone } from 'date-fns-tz';
@@ -33,9 +39,12 @@ import { Site } from '../site/entities/site.entity';
 import { ChatGateway } from './chat.gateway';
 import { NotificationService } from '../notification/notification.service';
 import { Booking } from '../booking/entities/booking.entity';
+import { BookingStatus } from '../booking/enums/booking-status.enum';
 import {
   extractBookingCode,
   latestActiveBookingCode,
+  extractPhoneFromText,
+  normalizePhone,
 } from './booking-cancellation.utils';
 import {
   cleanMixedLanguageResponse,
@@ -47,6 +56,7 @@ import {
   sanitizeBookingChips,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
+
 // ─── Agent State ──────────────────────────────────────────────────────────────
 
 /** Intent categories the classifier node can assign */
@@ -122,6 +132,10 @@ const AgentState = Annotation.Root({
     reducer: (_, y) => y,
     default: () => 0,
   }),
+  cancelState: Annotation<CancelState>({
+    reducer: (_, y) => y,
+    default: () => ({ step: null, bookingCode: null, phoneVerified: false }),
+  }),
 });
 
 // ─── Run Options ─────────────────────────────────────────────────────────────
@@ -184,12 +198,14 @@ export interface GraphRunOptions {
   ) => Promise<void>;
   /** Callback when the graph triggers a human handoff */
   onRequestHandoff: () => Promise<void>;
-  /** Whether sentiment detection is enabled  /** Sentiment Detection */
+  /** Whether sentiment detection is enabled */
   sentimentDetection?: boolean;
   /** Callback when negative sentiment is detected by the intent classifier */
   onNegativeSentiment?: (text: string) => Promise<void>;
   /** Flag to prevent duplicate alerts */
   hasNegativeSentiment?: boolean;
+  /** Initial cancel state parsed from last AI message or explicit state */
+  initialCancelState?: CancelState;
 }
 
 export interface GraphRunResult {
@@ -209,13 +225,6 @@ export interface GraphRunResult {
  *  - Guard: check site.isAiActive && conversation.isAiActive before running.
  *  - Fan out LLM tokens to both HTTP SSE (res.write) and WebSocket (server.emit).
  *  - Persist updated summary and summarizedMessageCount to the database.
- *
- * Graph topology:
- *   START → classify_intent
- *           ├─ request_human → request_handoff → summarize_memory → END
- *           └─ all other intents → model_node
- *                                     ├─ has tool calls → tools → parse_tools → model_node
- *                                     └─ no tool calls  → summarize_memory → END
  */
 @Injectable()
 export class GraphService {
@@ -285,17 +294,6 @@ export class GraphService {
    * High-level handler for a visitor message.
    * Loads the conversation context, checks the AI guard, builds the message
    * history, defines callbacks, and delegates to runStream().
-   *
-   * Used by:
-   *  - ChatController.streamAiResponse() — SSE path (res is provided)
-   *  - ChatGateway.handleSendMessage()   — WebSocket path (res is undefined)
-   *
-   * @param conversationId  UUID of the conversation
-   * @param siteId          UUID of the site
-   * @param server          Socket.io Server for WebSocket fan-out
-   * @param onMessageSaved  Called after the AI message is persisted — used by the
-   *                        gateway to emit 'newMessage' to the visitor widget.
-   * @param res             Optional Express response for HTTP SSE streaming.
    */
   async handleVisitorMessage(
     conversationId: string,
@@ -336,18 +334,39 @@ export class GraphService {
       content: m.content,
     }));
 
+    const lastAiDbMsg = dbMessages
+      .slice()
+      .reverse()
+      .find((m) => m.senderType === SenderType.AI);
+
+    const lastAiContent = lastAiDbMsg?.content ?? '';
+    const cancelMarker = lastAiContent.match(/\[cancel:(\w+)\|([^\]]*)\]/);
+
+    const initialCancelState: CancelState = {
+      step: (cancelMarker?.[1] as CancelStep) ?? null,
+      bookingCode: cancelMarker?.[2] || null,
+      phoneVerified: cancelMarker?.[1] === 'await_confirm',
+    };
+
     const onFinish = async (text: string) => {
       const savedMessage = await this.chatService.saveMessage(
         conversationId,
         text,
         SenderType.AI,
       );
+
+      const cleanDisplayContent = text
+        .replace(/\s*\[cancel:[^\]]+\]/g, '')
+        .replace(/<booking-code>.*?<\/booking-code>/g, '')
+        .replace(/<booking-cancelled>.*?<\/booking-cancelled>/g, '')
+        .trim();
+
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
         .emit('newMessage', {
           id: savedMessage.id,
           conversationId,
-          content: text,
+          content: cleanDisplayContent || text,
           senderType: 'AI',
           createdAt: savedMessage.createdAt,
         });
@@ -406,6 +425,7 @@ export class GraphService {
         sentimentDetection: site?.sentimentDetection ?? false,
         onNegativeSentiment,
         hasNegativeSentiment: conversation.hasNegativeSentiment,
+        initialCancelState,
       });
     } finally {
       this.chatGateway.server
@@ -586,7 +606,6 @@ export class GraphService {
             'getSiteConfig',
             'getAvailableSlots',
             'createBooking',
-            'cancelBooking',
           ],
           cancel_booking: ['getConversationContext', 'cancelBooking'],
           check_booking: ['getConversationContext'],
@@ -665,7 +684,14 @@ export class GraphService {
       ) => {
         if (state.siteContext.bookingEnabled !== true) return false;
 
-        // If user wants to cancel, DO NOT treat as booking continuation
+        // If cancel flow is active or user explicitly wants to cancel, DO NOT treat as booking continuation
+        if (
+          state.cancelState?.step !== null &&
+          state.cancelState?.step !== undefined
+        ) {
+          return false;
+        }
+
         if (
           /^\/(?:confirm-)?cancel-booking\b/i.test(userText) ||
           isCancelBookingPhrase(userText)
@@ -681,10 +707,11 @@ export class GraphService {
 
         const assistantText = messageText(previousAssistant);
 
-        // If assistant was asking about cancellation and user affirms, NOT booking continuation
+        // If assistant was asking about cancellation, NOT booking continuation
         if (
-          isAskingCancellationConfirmation(assistantText) &&
-          isAffirmativePhrase(userText)
+          isAskingCancellationConfirmation(assistantText) ||
+          /\[cancel:\w+/i.test(assistantText) ||
+          /xác nhận danh tính|verify your identity/i.test(assistantText)
         ) {
           return false;
         }
@@ -714,8 +741,6 @@ export class GraphService {
           return true;
         }
 
-        // If the previous assistant message contained chips (e.g. services, stylists, dates, skip)
-        // or was asking any booking step questions:
         if (assistantText.includes('<chips>')) {
           return true;
         }
@@ -731,6 +756,16 @@ export class GraphService {
        * classify_intent — uses a cold model call to label the latest user message.
        */
       const classifyIntent = async (state: typeof AgentState.State) => {
+        if (
+          state.cancelState?.step !== null &&
+          state.cancelState?.step !== undefined
+        ) {
+          this.logger.log(
+            `Cancel flow in progress (step: ${state.cancelState.step}), overriding intent to cancel_booking`,
+          );
+          return { intent: 'cancel_booking' as IntentType };
+        }
+
         const lastMessage = state.messages[state.messages.length - 1];
         const contentStr =
           typeof lastMessage.content === 'string'
@@ -824,18 +859,6 @@ export class GraphService {
             `Intent classified: ${response.intent}, Sentiment: ${response.sentiment}`,
           );
 
-          const previousAssistantText = state.messages
-            .slice(0, -1)
-            .reverse()
-            .find((message) =>
-              message.constructor?.name?.includes('AIMessage'),
-            );
-          const isCancelCodeReply =
-            !!extractBookingCode(contentStr) &&
-            !!previousAssistantText &&
-            /(booking code|confirmation code|mã.*(?:đặt lịch|xác nhận))/i.test(
-              messageText(previousAssistantText),
-            );
           const intent = isBookingSlotSelection(contentStr)
             ? 'booking_slot_selected'
             : /^\/(?:(?:confirm-)?cancel-booking|keep-booking)\b/i.test(
@@ -861,7 +884,6 @@ export class GraphService {
                 `Negative sentiment detected for conversation ${options.conversationId}. Alerting agents.`,
               );
 
-              // 1. Fire and forget so we don't block the AI response
               options
                 .onNegativeSentiment(contentStr)
                 .catch((err: unknown) =>
@@ -871,14 +893,9 @@ export class GraphService {
                   ),
                 );
 
-              // 2. Mark this conversation as having negative sentiment to prevent duplicate alerts
               await this.conversationRepo.update(options.conversationId, {
                 hasNegativeSentiment: true,
               });
-            } else {
-              this.logger.log(
-                `Negative sentiment detected again for conversation ${options.conversationId}, but agents were already alerted.`,
-              );
             }
           }
 
@@ -910,13 +927,263 @@ export class GraphService {
         return { messages: [new AIMessage(handoffMsg)] };
       };
 
-      const cancelBookingNode = async (state: typeof AgentState.State) => {
-        const latestUserText = [...state.messages]
+      const buildCancellationPayload = (booking: Booking) => ({
+        bookingCode: booking.code,
+        status: booking.status,
+        customerName: booking.customerName,
+        phone: booking.phone,
+        serviceId: booking.serviceId ?? undefined,
+        serviceName: booking.service?.name,
+        resourceId: booking.resourceId ?? undefined,
+        resourceName: booking.resource?.name,
+        date: formatInTimeZone(booking.startAt, booking.timezone, 'yyyy-MM-dd'),
+        timeSlot: formatInTimeZone(booking.startAt, booking.timezone, 'HH:mm'),
+      });
+
+      const getLatestUserText = (state: typeof AgentState.State): string => {
+        const msg = [...state.messages]
           .reverse()
-          .find((message) =>
-            message.constructor?.name?.includes('HumanMessage'),
+          .find((m) => m.constructor?.name?.includes('HumanMessage'));
+        return msg ? messageText(msg) : '';
+      };
+
+      const handleAskCode = async (
+        state: typeof AgentState.State,
+        userText: string,
+        _isVietnamese: boolean,
+        prompts: CancelPrompts,
+      ) => {
+        const bookingCode =
+          extractBookingCode(userText) ??
+          (await activeConversationBookingCode(state));
+
+        if (!bookingCode) {
+          return {
+            cancelState: {
+              step: 'ask_code' as CancelStep,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(`${prompts.askCode} [cancel:ask_code|]`)],
+          };
+        }
+
+        const booking = await this.bookingRepo.findOne({
+          where: { siteId: state.siteId, code: bookingCode },
+        });
+
+        if (!booking) {
+          return {
+            cancelState: {
+              step: null,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(prompts.notFound)],
+          };
+        }
+
+        if (booking.status === BookingStatus.CANCELLED) {
+          return {
+            cancelState: {
+              step: null,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(prompts.alreadyCancelled)],
+          };
+        }
+
+        return {
+          cancelState: {
+            step: 'verify_phone' as CancelStep,
+            bookingCode,
+            phoneVerified: false,
+          },
+          messages: [
+            new AIMessage(
+              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+            ),
+          ],
+        };
+      };
+
+      const handleVerifyPhone = async (
+        state: typeof AgentState.State,
+        userText: string,
+        _isVietnamese: boolean,
+        prompts: CancelPrompts,
+      ) => {
+        const { bookingCode } = state.cancelState;
+
+        if (!bookingCode) {
+          return {
+            cancelState: {
+              step: 'ask_code' as CancelStep,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(`${prompts.askCode} [cancel:ask_code|]`)],
+          };
+        }
+
+        const booking = await this.bookingRepo.findOne({
+          where: { siteId: state.siteId, code: bookingCode },
+          relations: { service: true, resource: true },
+        });
+
+        if (!booking) {
+          return {
+            cancelState: {
+              step: null,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(prompts.notFound)],
+          };
+        }
+
+        const providedPhone = extractPhoneFromText(userText);
+        if (!providedPhone) {
+          return {
+            cancelState: state.cancelState,
+            messages: [
+              new AIMessage(
+                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+              ),
+            ],
+          };
+        }
+
+        const isPhoneMatch =
+          normalizePhone(providedPhone) === normalizePhone(booking.phone);
+
+        if (!isPhoneMatch) {
+          return {
+            cancelState: state.cancelState,
+            messages: [
+              new AIMessage(
+                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]`,
+              ),
+            ],
+          };
+        }
+
+        const payload = buildCancellationPayload(booking);
+        this.chatGateway.emitBookingCancellation(conversationId, payload);
+
+        return {
+          cancelState: {
+            step: 'await_confirm' as CancelStep,
+            bookingCode,
+            phoneVerified: true,
+          },
+          messages: [
+            new AIMessage(
+              `${prompts.confirmCancel} [cancel:await_confirm|${bookingCode}]`,
+            ),
+          ],
+        };
+      };
+
+      const handleConfirmExecute = async (
+        state: typeof AgentState.State,
+        userText: string,
+        _isVietnamese: boolean,
+        prompts: CancelPrompts,
+      ) => {
+        const { bookingCode } = state.cancelState;
+
+        if (/^\/keep-booking\b/i.test(userText)) {
+          return {
+            cancelState: {
+              step: null,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(prompts.keepConfirmed)],
+          };
+        }
+
+        if (/^\/confirm-cancel-booking\b/i.test(userText)) {
+          if (!bookingCode) {
+            return {
+              cancelState: {
+                step: null,
+                bookingCode: null,
+                phoneVerified: false,
+              },
+              messages: [new AIMessage(prompts.cancelFail)],
+            };
+          }
+
+          this.logger.log(
+            `[cancelBookingNode] Executing cancelBooking for code: ${bookingCode}`,
           );
-        const userText = latestUserText ? messageText(latestUserText) : '';
+          const result = await currentProvider.execute({
+            name: 'cancelBooking',
+            arguments: { bookingCode },
+          });
+
+          const resultOutput = result.output;
+          if (resultOutput?.status !== 'cancelled') {
+            return {
+              cancelState: {
+                step: null,
+                bookingCode: null,
+                phoneVerified: false,
+              },
+              messages: [new AIMessage(prompts.cancelFail)],
+            };
+          }
+
+          cancelledBookingCode = bookingCode;
+          const booking = await this.bookingRepo.findOne({
+            where: { siteId: state.siteId, code: bookingCode },
+            relations: { service: true, resource: true },
+          });
+          if (booking) {
+            this.chatGateway.emitBookingCancelled(conversationId, {
+              ...buildCancellationPayload(booking),
+              ...resultOutput,
+            });
+          }
+
+          return {
+            cancelState: {
+              step: null,
+              bookingCode: null,
+              phoneVerified: false,
+            },
+            messages: [new AIMessage(prompts.cancelSuccess)],
+          };
+        }
+
+        if (bookingCode) {
+          const booking = await this.bookingRepo.findOne({
+            where: { siteId: state.siteId, code: bookingCode },
+            relations: { service: true, resource: true },
+          });
+          if (booking) {
+            this.chatGateway.emitBookingCancellation(
+              conversationId,
+              buildCancellationPayload(booking),
+            );
+          }
+        }
+
+        return {
+          cancelState: state.cancelState,
+          messages: [
+            new AIMessage(
+              `${prompts.confirmCancel} [cancel:await_confirm|${bookingCode ?? ''}]`,
+            ),
+          ],
+        };
+      };
+
+      const cancelBookingNode = async (state: typeof AgentState.State) => {
+        const userText = getLatestUserText(state);
         const convertedMessages = state.messages.map((m) => ({
           role: m.constructor?.name?.includes('HumanMessage')
             ? 'user'
@@ -928,122 +1195,16 @@ export class GraphService {
           state.siteContext,
         );
         const isVietnamese = detectedLang === 'vi';
-        const bookingCode =
-          extractBookingCode(userText) ??
-          (await activeConversationBookingCode(state));
+        const prompts = getCancelPrompts(isVietnamese);
 
-        if (!bookingCode) {
-          return {
-            messages: [
-              new AIMessage(
-                isVietnamese
-                  ? 'Vui lòng cung cấp mã đặt lịch bạn muốn hủy.'
-                  : 'Please provide the booking code you want to cancel.',
-              ),
-            ],
-          };
+        switch (state.cancelState?.step) {
+          case 'verify_phone':
+            return handleVerifyPhone(state, userText, isVietnamese, prompts);
+          case 'await_confirm':
+            return handleConfirmExecute(state, userText, isVietnamese, prompts);
+          default:
+            return handleAskCode(state, userText, isVietnamese, prompts);
         }
-
-        const booking = await this.bookingRepo.findOne({
-          where: { siteId: state.siteId, code: bookingCode },
-          relations: { service: true, resource: true },
-        });
-        if (!booking) {
-          return {
-            messages: [
-              new AIMessage(
-                isVietnamese
-                  ? 'Không tìm thấy lịch đặt với mã này.'
-                  : 'No booking was found with this code.',
-              ),
-            ],
-          };
-        }
-
-        const cancellationPayload = {
-          bookingCode: booking.code,
-          status: booking.status,
-          customerName: booking.customerName,
-          phone: booking.phone,
-          serviceId: booking.serviceId ?? undefined,
-          serviceName: booking.service?.name,
-          resourceId: booking.resourceId ?? undefined,
-          resourceName: booking.resource?.name,
-          date: formatInTimeZone(
-            booking.startAt,
-            booking.timezone,
-            'yyyy-MM-dd',
-          ),
-          timeSlot: formatInTimeZone(
-            booking.startAt,
-            booking.timezone,
-            'HH:mm',
-          ),
-        };
-
-        const previousAssistant = state.messages
-          .slice(0, -1)
-          .reverse()
-          .find((message) => message.constructor?.name?.includes('AIMessage'));
-        const previousAssistantText = previousAssistant
-          ? messageText(previousAssistant)
-          : '';
-
-        const isExplicitConfirm =
-          /^\/confirm-cancel-booking\b/i.test(userText) ||
-          (isAskingCancellationConfirmation(previousAssistantText) &&
-            isAffirmativePhrase(userText));
-
-        if (!isExplicitConfirm) {
-          this.chatGateway.emitBookingCancellation(
-            conversationId,
-            cancellationPayload,
-          );
-          return {
-            messages: [
-              new AIMessage(
-                isVietnamese
-                  ? 'Vui lòng kiểm tra và xác nhận hủy lịch trên phiếu bên dưới.'
-                  : 'Please review and confirm the booking cancellation on the card below.',
-              ),
-            ],
-          };
-        }
-
-        this.logger.log('[Tool Node] Executing tool: cancelBooking');
-        const result = await currentProvider.execute({
-          name: 'cancelBooking',
-          arguments: { bookingCode },
-        });
-        if (result.output.status !== 'cancelled') {
-          const error = result.output.error ?? result.output.result;
-          return {
-            messages: [
-              new AIMessage(
-                typeof error === 'string'
-                  ? error
-                  : isVietnamese
-                    ? 'Không thể hủy lịch này. Vui lòng kiểm tra lại mã đặt lịch.'
-                    : 'Unable to cancel this booking. Please check the booking code.',
-              ),
-            ],
-          };
-        }
-
-        cancelledBookingCode = bookingCode;
-        this.chatGateway.emitBookingCancelled(conversationId, {
-          ...cancellationPayload,
-          ...result.output,
-        });
-        return {
-          messages: [
-            new AIMessage(
-              isVietnamese
-                ? 'Lịch đặt của bạn đã được hủy.'
-                : 'Your booking has been cancelled.',
-            ),
-          ],
-        };
       };
 
       const bookingSlotSelectedNode = (state: typeof AgentState.State) => {
@@ -1326,6 +1487,11 @@ export class GraphService {
         visitorContext: options.visitorContext ?? {},
         siteContext: options.siteContext ?? {},
         intent: null,
+        cancelState: options.initialCancelState ?? {
+          step: null,
+          bookingCode: null,
+          phoneVerified: false,
+        },
         knowledgeSources: [],
         summary: existingSummary,
         summarizedMessageCount: existingSummarizedMessageCount,
@@ -1358,24 +1524,33 @@ export class GraphService {
                 .map((c) => c.text ?? '')
                 .join('');
 
+        const convertedMessages: LLMMessage[] = messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
         const detectedLang = detectConversationLanguage(
-          messages,
+          convertedMessages,
           options.siteContext,
         );
         const isVietnamese = detectedLang === 'vi';
+        const strippedText = textContent
+          .replace(/\s*\[cancel:[^\]]+\]/g, '')
+          .trim();
+
         const intentSafeText =
           finalState.intent === 'small_talk'
             ? sanitizeSmallTalkResponse(
-                textContent,
+                strippedText,
                 isVietnamese,
                 options.siteContext,
               )
             : sanitizeBookingChips(
-                textContent,
+                strippedText,
                 options.siteContext,
                 options.visitorContext,
                 detectedLang,
               );
+
         const cleanLangText = cleanMixedLanguageResponse(
           intentSafeText,
           isVietnamese,
@@ -1384,14 +1559,22 @@ export class GraphService {
           cleanLangText,
           isVietnamese,
         );
+
         if (sanitizedText.trim()) {
           const bookingMetadata = createdBookingCode
             ? `\n<booking-code>${createdBookingCode}</booking-code>`
             : cancelledBookingCode
               ? `\n<booking-cancelled>${cancelledBookingCode}</booking-cancelled>`
               : '';
+
+          const cancelMetadata =
+            finalState.cancelState?.step !== null &&
+            finalState.cancelState?.step !== undefined
+              ? `\n[cancel:${finalState.cancelState.step}|${finalState.cancelState.bookingCode ?? ''}]`
+              : '';
+
           await onFinish(
-            `${sanitizedText}${bookingMetadata}`,
+            `${sanitizedText}${bookingMetadata}${cancelMetadata}`,
             finalState.knowledgeSources,
           );
         }

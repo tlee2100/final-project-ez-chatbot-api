@@ -1,6 +1,8 @@
 import {
   extractBookingCode,
   latestActiveBookingCode,
+  extractPhoneFromText,
+  normalizePhone,
 } from './booking-cancellation.utils';
 import {
   detectConversationLanguage,
@@ -11,6 +13,7 @@ import {
   sanitizeBookingChips,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
+import { getCancelPrompts } from './prompts';
 
 describe('booking cancellation code resolution', () => {
   it('extracts codes from widget commands and visitor messages', () => {
@@ -28,6 +31,57 @@ describe('booking cancellation code resolution', () => {
     ].join('\n');
 
     expect(latestActiveBookingCode(history)).toBe('AB12CD34');
+  });
+});
+
+describe('booking cancellation phone utilities', () => {
+  it('extracts Vietnamese phone numbers with various prefixes and formats', () => {
+    expect(extractPhoneFromText('SĐT của tôi là 0912345678')).toBe(
+      '0912345678',
+    );
+    expect(extractPhoneFromText('Số điện thoại: +84912345678')).toBe(
+      '0912345678',
+    );
+    expect(extractPhoneFromText('84912345678')).toBe('0912345678');
+    expect(extractPhoneFromText('038 123 4567')).toBe('0381234567');
+    expect(extractPhoneFromText('079-123-4567')).toBe('0791234567');
+    expect(extractPhoneFromText('không có số nào ở đây')).toBeNull();
+    expect(extractPhoneFromText('12345')).toBeNull();
+  });
+
+  it('normalizes phone strings correctly', () => {
+    expect(normalizePhone('+84912345678')).toBe('0912345678');
+    expect(normalizePhone('84912345678')).toBe('0912345678');
+    expect(normalizePhone('0912 345 678')).toBe('0912345678');
+    expect(normalizePhone('0912-345-678')).toBe('0912345678');
+  });
+});
+
+describe('booking cancellation prompts', () => {
+  it('returns Vietnamese cancellation prompts when isVietnamese is true', () => {
+    const viPrompts = getCancelPrompts(true);
+    expect(viPrompts.askCode).toContain('mã đặt lịch');
+    expect(viPrompts.verifyPhone).toContain('số điện thoại');
+    expect(viPrompts.phoneWrong).toContain('không khớp');
+    expect(viPrompts.confirmCancel).toContain('xác nhận');
+    expect(viPrompts.keepConfirmed).toContain('giữ nguyên');
+    expect(viPrompts.cancelSuccess).toContain('thành công');
+    expect(viPrompts.cancelFail).toContain('Không thể hủy');
+    expect(viPrompts.alreadyCancelled).toContain('đã được hủy trước đó');
+    expect(viPrompts.notFound).toContain('Không tìm thấy');
+  });
+
+  it('returns English cancellation prompts when isVietnamese is false', () => {
+    const enPrompts = getCancelPrompts(false);
+    expect(enPrompts.askCode).toContain('booking code');
+    expect(enPrompts.verifyPhone).toContain('phone number');
+    expect(enPrompts.phoneWrong).toContain('does not match');
+    expect(enPrompts.confirmCancel).toContain('confirm');
+    expect(enPrompts.keepConfirmed).toContain('kept');
+    expect(enPrompts.cancelSuccess).toContain('successfully cancelled');
+    expect(enPrompts.cancelFail).toContain('Unable to cancel');
+    expect(enPrompts.alreadyCancelled).toContain('already been cancelled');
+    expect(enPrompts.notFound).toContain('No booking found');
   });
 });
 
