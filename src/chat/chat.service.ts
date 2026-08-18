@@ -43,6 +43,8 @@ import { CreateConversationResponseDto } from './dto/create-conversation-respons
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
 import { AiService } from './ai.service';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
+import { Booking } from '../booking/entities/booking.entity';
+import { latestActiveBookingCode } from './booking-cancellation.utils';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -79,6 +81,8 @@ export class ChatService {
     private readonly chatMessageRepository: Repository<ChatMessage>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(Booking)
+    private readonly bookingRepository: Repository<Booking>,
     private readonly notificationService: NotificationService,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
@@ -1360,6 +1364,96 @@ export class ChatService {
         closedAt: new Date().toISOString(),
         summaryText: finalSummary || 'No summary available.',
       });
+
+      let targetEmail = conversation.visitorEmail;
+      let targetName = conversation.visitorName;
+
+      if (messageCount > 0) {
+        const rawMessages = await this.chatMessageRepository.find({
+          where: { conversationId: conversation.id },
+          order: { createdAt: 'ASC' },
+          relations: { agent: true },
+        });
+
+        const fullChatContent = rawMessages.map((m) => m.content).join('\n');
+        const bookingCode = latestActiveBookingCode(fullChatContent);
+
+        if (bookingCode) {
+          const booking = await this.bookingRepository.findOne({
+            where: { code: bookingCode },
+          });
+          if (booking && booking.customerEmail) {
+            targetEmail = booking.customerEmail;
+            targetName = booking.customerName || targetName;
+          }
+        }
+
+        if (targetEmail) {
+          const transcriptMessages = rawMessages
+            .filter((m) => m.senderType !== SenderType.SYSTEM)
+            .map((m) => {
+              let cleanContent = (m.content || '')
+                .replace(/<booking-code>.*?<\/booking-code>/gs, '')
+                .replace(/<booking-cancelled>.*?<\/booking-cancelled>/gs, '')
+                .replace(/<chips>.*?<\/chips>/gs, '')
+                .trim();
+
+              const slashCmdMatch = cleanContent.match(
+                /^\/([\w-]+)(?:\s+((?:(?!\s*::).)*))?(?:\s*::\s*(.*))?$/s,
+              );
+              if (slashCmdMatch) {
+                const command = slashCmdMatch[1];
+                const payload = slashCmdMatch[2];
+                const textAfter = slashCmdMatch[3];
+
+                if (command === 'confirm-booking' && payload) {
+                  try {
+                    const data = JSON.parse(payload) as Record<string, unknown>;
+                    let formatted = `**[Booking Confirmed]**`;
+                    if (typeof data.date === 'string')
+                      formatted += `\n- Date: ${data.date}`;
+                    if (typeof data.timeSlot === 'string')
+                      formatted += `\n- Time: ${data.timeSlot}`;
+                    if (typeof data.customerName === 'string')
+                      formatted += `\n- Name: ${data.customerName}`;
+                    if (typeof data.phone === 'string')
+                      formatted += `\n- Phone: ${data.phone}`;
+                    cleanContent = formatted;
+                  } catch {
+                    cleanContent = `**[Booking Confirmed]**`;
+                  }
+                } else if (textAfter) {
+                  cleanContent = textAfter;
+                } else {
+                  cleanContent = '';
+                }
+              }
+
+              return {
+                displayName:
+                  m.senderType === SenderType.VISITOR
+                    ? 'You'
+                    : m.senderType === SenderType.AI
+                      ? 'Bot'
+                      : m.agent?.name || 'Agent',
+                content: cleanContent,
+                timestamp: m.createdAt.toISOString(),
+              };
+            })
+            .filter((m) => m.content.length > 0);
+
+          if (transcriptMessages.length > 0) {
+            void this.emailQueueService.enqueueChatTranscriptEmail({
+              to: targetEmail,
+              visitorName: targetName || 'Visitor',
+              siteName: conversation.site.name || 'Support Chat',
+              messages: transcriptMessages,
+              startedAt: conversation.createdAt.toISOString(),
+              closedAt: new Date().toISOString(),
+            });
+          }
+        }
+      }
     }
 
     return this.getConversationById(id);

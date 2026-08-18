@@ -17,6 +17,7 @@ describe('ChatService saveMessage', () => {
     const conversationRepository = createRepositoryMock();
     const chatMessageRepository = createRepositoryMock();
     const userRepository = createRepositoryMock();
+    const bookingRepository = createRepositoryMock();
     const notificationService = { create: jest.fn() };
     const chatGateway = {
       notifyAgentsOfNewConversation: jest.fn(),
@@ -25,7 +26,10 @@ describe('ChatService saveMessage', () => {
       server: { to: jest.fn().mockReturnThis(), emit: jest.fn() },
     };
     const graphService = {};
-    const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
+    const emailQueueService = {
+      enqueueConversationSummaryEmail: jest.fn(),
+      enqueueChatTranscriptEmail: jest.fn(),
+    };
     const aiService = { invoke: jest.fn() };
 
     const service = new ChatService(
@@ -33,6 +37,7 @@ describe('ChatService saveMessage', () => {
       conversationRepository as never,
       chatMessageRepository as never,
       userRepository as never,
+      bookingRepository as never,
       notificationService as never,
       chatGateway as never,
       graphService as never,
@@ -84,7 +89,12 @@ describe('ChatService saveMessage', () => {
     });
     expect(conversationRepository.findOne).toHaveBeenCalledWith({
       where: { id: 'conv-1' },
-      select: { id: true, status: true, handlingStatus: true },
+      select: {
+        id: true,
+        status: true,
+        handlingStatus: true,
+        closedReason: true,
+      },
     });
   });
 

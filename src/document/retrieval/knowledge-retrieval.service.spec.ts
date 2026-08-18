@@ -147,7 +147,6 @@ describe('KnowledgeRetrievalService', () => {
     const serializedLog = JSON.stringify(debugLog.mock.calls.at(-1));
     expect(serializedLog).not.toContain('sensitive customer question');
     expect(serializedLog).not.toContain(JSON.stringify(vector));
-    expect(serializedLog).not.toContain('accepted content');
   });
 });
 

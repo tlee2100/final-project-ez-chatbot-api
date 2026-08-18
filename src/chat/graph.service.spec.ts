@@ -47,7 +47,6 @@ describe('booking chat flow guards', () => {
       'Hi! How can I help you today?',
     );
   });
-
   it('replaces booking data accidentally exposed in small talk', () => {
     expect(
       sanitizeSmallTalkResponse(

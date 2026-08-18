@@ -836,7 +836,6 @@ export class GraphService {
           );
         const userText = latestUserText ? messageText(latestUserText) : '';
         const isVietnamese = isVietnameseText(userText);
-
         if (/^\/keep-booking\b/i.test(userText)) {
           return {
             messages: [
@@ -846,7 +845,6 @@ export class GraphService {
             ],
           };
         }
-
         const bookingCode =
           extractBookingCode(userText) ??
           (await activeConversationBookingCode(state));

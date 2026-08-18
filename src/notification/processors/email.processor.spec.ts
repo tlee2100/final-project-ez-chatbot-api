@@ -1,3 +1,9 @@
+jest.mock('marked', () => ({
+  marked: {
+    parse: (text: string) => text,
+  },
+}));
+
 import { EmailProcessor } from './email.processor';
 
 interface SentMailOptions {

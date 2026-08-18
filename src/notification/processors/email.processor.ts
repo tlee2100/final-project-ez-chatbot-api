@@ -17,6 +17,7 @@ import {
   type BookingConfirmationEmailJobData,
   type BookingCancellationEmailJobData,
   type ConversationSummaryEmailJobData,
+  type ChatTranscriptEmailJobData,
 } from '../email-queue.service';
 import {
   EMAIL_TIME_ZONE,
@@ -218,6 +219,40 @@ export class EmailProcessor {
     } catch (error) {
       this.logger.error(
         `Failed to send conversation summary email to ${job.data.to} (job #${job.id}): ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+      throw error;
+    }
+  }
+
+  @Process('send-chat-transcript')
+  async handleChatTranscript(job: Job<ChatTranscriptEmailJobData>) {
+    this.logger.log(
+      `Processing send-chat-transcript job #${job.id} (attempt ${job.attemptsMade + 1}/${job.opts.attempts || 1}) to ${job.data.to}`,
+    );
+    try {
+      const messagesWithHtml = job.data.messages.map((m) => ({
+        ...m,
+        content: marked.parse(m.content, { async: false }),
+      }));
+
+      await this.mailerService.sendMail({
+        to: job.data.to,
+        subject: `Your chat transcript – ${job.data.siteName}`,
+        template: 'chat-transcript',
+        context: {
+          ...job.data,
+          messages: messagesWithHtml,
+          startedAt: formatEmailDateTime(job.data.startedAt),
+          closedAt: formatEmailDateTime(job.data.closedAt),
+        },
+      });
+      this.logger.log(
+        `Chat transcript email successfully sent to ${job.data.to}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to send chat transcript email to ${job.data.to} (job #${job.id}): ${(error as Error).message}`,
         (error as Error).stack,
       );
       throw error;

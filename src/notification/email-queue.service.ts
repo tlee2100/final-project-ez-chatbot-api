@@ -71,6 +71,18 @@ export interface ConversationSummaryEmailJobData {
   summaryText: string;
 }
 
+export interface ChatTranscriptEmailJobData {
+  to: string;
+  visitorName: string;
+  siteName: string;
+  messages: {
+    displayName: string;
+    content: string;
+    timestamp: string; // ISO string
+  }[];
+  startedAt: string;
+  closedAt: string;
+}
 export const DEFAULT_EMAIL_JOB_OPTIONS: JobOptions = {
   attempts: 3,
   backoff: {
@@ -156,6 +168,15 @@ export class EmailQueueService {
     });
   }
 
+  enqueueChatTranscriptEmail(
+    data: ChatTranscriptEmailJobData,
+    opts?: JobOptions,
+  ): Promise<unknown> {
+    return this.emailQueue.add('send-chat-transcript', data, {
+      ...DEFAULT_EMAIL_JOB_OPTIONS,
+      ...opts,
+    });
+  }
   decryptActivationToken(job: UserActivationEmailJobData): string {
     const decipher = createDecipheriv(
       'aes-256-gcm',
@@ -170,7 +191,8 @@ export class EmailQueueService {
   }
 
   getEncryptionKey(): Buffer {
-    const secret = process.env.JWT_SECRET;
+    const secret =
+      process.env.EMAIL_TOKEN_ENCRYPTION_KEY || process.env.JWT_SECRET;
     if (!secret) {
       throw new Error('Missing JWT_SECRET environment variable');
     }
