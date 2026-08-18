@@ -1,5 +1,5 @@
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsOptional, IsInt } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** DTO for POST /api/internal/mcp/kb/search */
 export class McpSearchKnowledgeDto {
@@ -10,6 +10,14 @@ export class McpSearchKnowledgeDto {
   @IsString()
   @IsNotEmpty()
   query: string;
+
+  @ApiPropertyOptional({
+    deprecated: true,
+    description: 'Ignored. Retrieval count is configured per site.',
+  })
+  @IsOptional()
+  @IsInt()
+  topK?: number;
 }
 
 /** DTO for POST /api/internal/mcp/booking/create */
@@ -34,10 +42,10 @@ export class McpCreateBookingDto {
   @IsNotEmpty()
   serviceId: string;
 
-  @ApiProperty({ example: 'uuid-of-resource', required: false })
+  @ApiProperty({ example: 'uuid-of-resource' })
   @IsString()
-  @IsOptional()
-  resourceId?: string;
+  @IsNotEmpty()
+  resourceId: string;
 
   @ApiProperty({ example: '2026-08-10' })
   @IsString()

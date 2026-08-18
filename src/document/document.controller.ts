@@ -1,8 +1,10 @@
 import {
   Controller,
+  Body,
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Req,
   UploadedFile,
@@ -29,6 +31,7 @@ import { documentUploadOptions } from './document-upload.options';
 import { DocumentService } from './document.service';
 import { DocumentUploadExceptionFilter } from './filters/document-upload.filter';
 import { TenantScopeInterceptor } from 'src/common/interceptors/tenant-scope.interceptor';
+import { UpdateKnowledgeBaseSettingsDto } from './dto/knowledge-base-settings.dto';
 
 @ApiTags('Documents')
 @ApiBearerAuth()
@@ -36,6 +39,30 @@ import { TenantScopeInterceptor } from 'src/common/interceptors/tenant-scope.int
 @UseInterceptors(TenantScopeInterceptor)
 export class DocumentController {
   constructor(private readonly documentService: DocumentService) {}
+
+  @Get('settings')
+  @ApiOperation({ summary: 'Get knowledge base settings for a site' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  getSettings(@Param('siteId') siteId: string, @Req() req: AuthRequest) {
+    return this.documentService.getKnowledgeBaseSettings(siteId, req.user);
+  }
+
+  @Patch('settings')
+  @ApiOperation({ summary: 'Update knowledge base settings for a site' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  updateSettings(
+    @Param('siteId') siteId: string,
+    @Body() dto: UpdateKnowledgeBaseSettingsDto,
+    @Req() req: AuthRequest,
+  ) {
+    return this.documentService.updateKnowledgeBaseSettings(
+      siteId,
+      dto,
+      req.user,
+    );
+  }
 
   @Get('sources')
   @ApiOperation({

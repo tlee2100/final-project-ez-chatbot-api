@@ -4,7 +4,10 @@ import type { Job } from 'bull';
 import { Repository } from 'typeorm';
 import { Document } from './entities/document.entity';
 import { DocumentStatus } from './enums/document-status.enum';
-import type { DocumentProcessingJobData } from './types/document-processing-job.type';
+import type {
+  DocumentProcessingJobData,
+  DocumentReindexJobData,
+} from './types/document-processing-job.type';
 import { BadRequestException, Logger } from '@nestjs/common';
 import { NotificationGateway } from 'src/notification/notification.gateway';
 import { NotificationService } from 'src/notification/notification.service';
@@ -14,6 +17,11 @@ import { DocumentContextValidator } from './validators/document-context.validato
 import { DocumentChunkingService } from './chunking/document-chunking.service';
 import { EmbeddingService } from './embedding/embedding.service';
 import { DocumentIngestionService } from './document-ingestion.service';
+import { DocumentReindexStatus } from './enums/document-reindex-status.enum';
+import {
+  DOCUMENT_CHUNK_MAX_TOKENS,
+  DOCUMENT_CHUNK_OVERLAP_TOKENS,
+} from './constants/document-chunking.constants';
 
 @Processor('document-processing')
 export class DocumentProcessingWorker {
@@ -34,6 +42,8 @@ export class DocumentProcessingWorker {
   async handleProcessDocument(job: Job<DocumentProcessingJobData>) {
     const { documentId, filename, fileBufferBase64, uploadedByUserId } =
       job.data;
+    const chunkSize = job.data.chunkSize ?? DOCUMENT_CHUNK_MAX_TOKENS;
+    const chunkOverlap = job.data.chunkOverlap ?? DOCUMENT_CHUNK_OVERLAP_TOKENS;
 
     this.logger.log(`Processing document ${documentId} (${filename})`);
 
@@ -87,6 +97,7 @@ export class DocumentProcessingWorker {
       const chunks = this.documentChunkingService.chunk(
         sanitizedContent,
         validationResult.fileType,
+        { chunkSize, chunkOverlap },
       );
       const embeddingResult = await this.embeddingService.embedMany(
         chunks.map((chunk) => chunk.content),
@@ -110,6 +121,8 @@ export class DocumentProcessingWorker {
         filePath: uploadResult.secure_url,
         cloudinaryPublicId: uploadResult.public_id,
         processedAt,
+        chunkSize,
+        chunkOverlap,
       });
 
       // 6. Emit success only after the persistence transaction has committed.
@@ -166,6 +179,93 @@ export class DocumentProcessingWorker {
         type: NotificationType.SYSTEM,
         title: 'Document Processing Failed',
         message: `Failed to process document '${filename}': ${errorMessage}`,
+      });
+    }
+  }
+
+  @Process('reindex-document')
+  async handleReindexDocument(job: Job<DocumentReindexJobData>): Promise<void> {
+    const { documentId, uploadedByUserId, chunkSize, chunkOverlap } = job.data;
+    const document = await this.documentRepository.findOne({
+      where: { id: documentId, siteId: job.data.siteId },
+    });
+    if (!document) return;
+
+    try {
+      await this.documentRepository.update(document.id, {
+        reindexStatus: DocumentReindexStatus.PROCESSING,
+        reindexError: null,
+      });
+      this.notificationGateway.emitDocumentStatusToUsers([uploadedByUserId], {
+        type: 'document-reindex-processing',
+        documentId,
+        filename: document.filename,
+        status: 'processing',
+      });
+
+      if (!document.cloudinaryPublicId) {
+        throw new BadRequestException('Original file is unavailable');
+      }
+      const buffer = await this.documentService.downloadCloudinaryAsset(
+        document.cloudinaryPublicId,
+      );
+      const validationResult =
+        await DocumentContextValidator.validateAndExtractContent(
+          buffer,
+          document.filename,
+        );
+      const sanitizedContent = validationResult.sanitizedContent?.trim();
+      if (!sanitizedContent) {
+        throw new BadRequestException(
+          'Document does not contain text that can be embedded',
+        );
+      }
+
+      const chunks = this.documentChunkingService.chunk(
+        sanitizedContent,
+        validationResult.fileType,
+        { chunkSize, chunkOverlap },
+      );
+      const embeddingResult = await this.embeddingService.embedMany(
+        chunks.map((chunk) => chunk.content),
+      );
+      const processedAt = new Date();
+      await this.documentIngestionService.persistProcessedDocument({
+        documentId,
+        chunks,
+        embeddingResult,
+        filePath: document.filePath ?? '',
+        cloudinaryPublicId: document.cloudinaryPublicId,
+        processedAt,
+        chunkSize,
+        chunkOverlap,
+        replaceExisting: true,
+      });
+
+      this.notificationGateway.emitDocumentStatusToUsers([uploadedByUserId], {
+        type: 'document-reindex-ready',
+        documentId,
+        filename: document.filename,
+        status: 'ready',
+        processedAt: processedAt.toISOString(),
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown re-index error';
+      this.logger.error(
+        `Re-index failed for document ${documentId}: ${errorMessage}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      await this.documentRepository.update(documentId, {
+        reindexStatus: DocumentReindexStatus.FAILED,
+        reindexError: errorMessage.slice(0, 2000),
+      });
+      this.notificationGateway.emitDocumentStatusToUsers([uploadedByUserId], {
+        type: 'document-reindex-failed',
+        documentId,
+        filename: document.filename,
+        status: 'failed',
+        error: errorMessage,
       });
     }
   }

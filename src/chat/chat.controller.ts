@@ -13,9 +13,15 @@ import {
   Req,
   Res,
   UseGuards,
+  BadRequestException,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { UserRole } from '../user/enums/user-role.enum';
 import { Paginate } from 'nestjs-paginate';
 import type { PaginateQuery } from 'nestjs-paginate';
 import { ChatService } from './chat.service';
@@ -26,6 +32,10 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
 import { DomainAllowlistGuard } from 'src/common/guards/domain-allowlist.guard';
 import { ApiThrottlerGuard } from 'src/common/guards/api-throttler.guard';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { validateAndGetImageFile } from '../utils/file-signature.util';
+import { ClosedReason } from './entities/conversation.entity';
+import { CreateAdminTestConversationDto } from './dto/create-admin-test-conversation.dto';
 
 @Controller('chat')
 export class ChatController {
@@ -47,11 +57,31 @@ export class ChatController {
     return this.chatService.createConversation(dto);
   }
 
+  // ─── Admin: Create test conversation (authenticated) ──────────────────────
+
+  /**
+   * Protected — admin/owner creates a sandboxed test conversation for their
+   * site. Unlike the public endpoint this bypasses:
+   *   - DomainAllowlistGuard (not a visitor origin)
+   *   - Agent inbox notifications (keeps the inbox clean)
+   *
+   * Authorization: site owner or SUPER_ADMIN only (enforced in service layer).
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Post('admin-test/conversations')
+  createAdminTestConversation(
+    @Body() dto: CreateAdminTestConversationDto,
+    @Req() req: AuthRequest,
+  ): Promise<CreateConversationResponseDto> {
+    return this.chatService.createAdminTestConversation(dto.siteId, req.user);
+  }
   // ─── Public: AI SSE streaming endpoint (visitor) ────────────────────────
 
   /**
    * Public — visitor's chat widget calls this to get an AI-streamed response.
    */
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Post('conversations/:id/stream')
   @HttpCode(HttpStatus.OK)
   @Header('Content-Type', 'text/plain; charset=utf-8')
@@ -162,7 +192,7 @@ export class ChatController {
   @UseGuards(JwtAuthGuard)
   @Patch('conversations/:id/close')
   closeConversation(@Param('id') id: string) {
-    return this.chatService.closeConversation(id);
+    return this.chatService.closeConversation(id, ClosedReason.AGENT);
   }
 
   /**
@@ -185,5 +215,32 @@ export class ChatController {
   @Patch('public/conversations/:id/call-agent')
   async callAgent(@Param('id') id: string) {
     return this.chatService.escalateToAgent(id);
+  }
+
+  // ─── Attachments ────────────────────────────────────────────────────────
+
+  @Post('public/conversations/:id/upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadAttachmentPublic(
+    @Param('id') id: string,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('No file provided');
+    const validFile = validateAndGetImageFile(file);
+    const url = await this.chatService.uploadAttachment(validFile);
+    return { url };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('conversations/:id/upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadAttachmentAgent(
+    @Param('id') id: string,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('No file provided');
+    const validFile = validateAndGetImageFile(file);
+    const url = await this.chatService.uploadAttachment(validFile);
+    return { url };
   }
 }

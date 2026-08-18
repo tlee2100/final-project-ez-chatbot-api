@@ -16,6 +16,16 @@ import { Site } from 'src/site/entities/site.entity';
  * Guards public chat endpoints so that only requests whose `Origin` header
  * matches the site's `allowedDomains` list can start a conversation.
  * Supports exact matches and wildcard subdomains (e.g. `*.example.com`).
+ *
+ * Validation Rules:
+ * 1. No siteId in request → Pass (not a site-scoped endpoint).
+ * 2. No Origin header    → Pass (non-browser, server-to-server, or Postman requests).
+ * 3. Origin matches allowedDomains → Pass.
+ * 4. Otherwise → Reject with 403 Forbidden.
+ *
+ * NOTE: Authenticated admin/agent requests do NOT use this public guard;
+ * they must use dedicated endpoints (e.g. POST /chat/admin-test/conversations)
+ * protected by JwtAuthGuard.
  */
 @Injectable()
 export class DomainAllowlistGuard implements CanActivate {
@@ -36,13 +46,15 @@ export class DomainAllowlistGuard implements CanActivate {
       string | undefined;
 
     if (!siteId) {
-      return true; // No siteId found — not a tenant-scoped endpoint or missing payload (will be caught by validation)
+      // No siteId — not a tenant-scoped endpoint or missing payload
+      // (will be caught downstream by validation pipe).
+      return true;
     }
 
     const origin = request.headers['origin'] ?? '';
 
-    // No Origin header means this is a same-origin, server-to-server, or non-browser request
-    // (e.g. Postman, curl, testchat.html opened from local filesystem). Allow it through.
+    // No Origin header → same-origin, server-to-server, or non-browser request
+    // (e.g. Postman, curl, testchat.html from local filesystem). Allow through.
     if (!origin) {
       this.logger.debug(
         `[DomainAllowlistGuard] No Origin header — allowing site: ${siteId}`,
@@ -65,23 +77,21 @@ export class DomainAllowlistGuard implements CanActivate {
 
     if (!site) {
       this.logger.warn(
-        `[DomainAllowlistGuard] Site not found in DB — siteId=${siteId}, origin=${origin}`,
+        `[DomainAllowlistGuard] Site not found — siteId=${siteId}, origin=${origin}`,
       );
       throw new ForbiddenException('Site not found or access denied');
     }
 
-    // DEBUG: log actual DB value so we can trace unexpected 403s
     this.logger.debug(
       `[DomainAllowlistGuard] site=${siteId} allowedDomains=${JSON.stringify(site.allowedDomains)} origin=${origin}`,
     );
 
-    // If no allowedDomains configured, block access (strict security)
     if (!site.allowedDomains?.length) {
       this.logger.warn(
-        `[DomainAllowlistGuard] Site has no allowedDomains configured — siteId=${siteId}, origin=${origin}`,
+        `[DomainAllowlistGuard] No allowedDomains configured — siteId=${siteId}, origin=${origin}`,
       );
       throw new ForbiddenException(
-        `Site configuration error: No allowed domains configured`,
+        'Site configuration error: No allowed domains configured',
       );
     }
 
@@ -105,7 +115,7 @@ export class DomainAllowlistGuard implements CanActivate {
     return allowedDomains.some((pattern) => {
       if (pattern.startsWith('*.')) {
         // Wildcard: *.example.com matches sub.example.com but NOT example.com
-        const baseDomain = pattern.slice(2); // 'example.com'
+        const baseDomain = pattern.slice(2);
         return hostname.endsWith(`.${baseDomain}`);
       }
       return hostname === pattern;

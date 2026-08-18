@@ -6,6 +6,7 @@ import { Conversation } from '../chat/entities/conversation.entity';
 import { User } from '../user/entities/user.entity';
 import { Site } from '../site/entities/site.entity';
 import { DocumentModule } from '../document/document.module';
+import { BookingModule } from '../booking/booking.module';
 import { McpController } from './mcp.controller';
 import { McpService } from './mcp.service';
 
@@ -28,6 +29,7 @@ import { McpService } from './mcp.service';
     }),
     TypeOrmModule.forFeature([Document, Conversation, User, Site]),
     DocumentModule,
+    BookingModule,
   ],
   controllers: [McpController],
   providers: [McpService],

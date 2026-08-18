@@ -4,21 +4,30 @@ import {
   ForbiddenException,
   BadRequestException,
   ConflictException,
+  forwardRef,
+  Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
+import { Booking } from '../booking/entities/booking.entity';
+import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
 import type { Mapper } from '@automapper/core';
 import { InjectMapper } from '@automapper/nestjs';
+import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 
 import { CreateSiteDto } from './dto/create-site.dto';
 import { UpdateSiteDto } from './dto/update-site.dto';
 import { Site } from './entities/site.entity';
 import { User } from '../user/entities/user.entity';
+import { NotificationService } from '../notification/notification.service';
+import { NotificationType } from '../notification/enums/notification-type.enum';
+
 import { SiteDto } from './dto/site.dto';
 import { UserRole } from '../user/enums/user-role.enum';
 import type { JwtUser } from 'src/auth/types/jwt-user.type';
 import { SITE_PAGINATION_CONFIG } from './config/site-pagination.config';
+import { ChatGateway } from '../chat/chat.gateway';
 
 type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
   data: SiteDto[];
@@ -33,7 +42,18 @@ export class SiteService {
     private readonly userRepository: Repository<User>,
     @InjectMapper()
     private readonly mapper: Mapper,
-  ) {}
+    private readonly notificationService: NotificationService,
+    @Inject(forwardRef(() => ChatGateway))
+    private readonly chatGateway: ChatGateway,
+    @InjectRepository(Booking)
+    private readonly bookingRepository: Repository<Booking>,
+  ) {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+  }
 
   // ── Create Site ──
   async create(createSiteDto: CreateSiteDto, user: JwtUser): Promise<SiteDto> {
@@ -131,9 +151,32 @@ export class SiteService {
 
     const paginated = await paginate(query, qb, SITE_PAGINATION_CONFIG);
 
+    const siteIds = paginated.data.map((s) => s.id);
+    const activeChatsMap: Record<string, number> = {};
+
+    if (siteIds.length > 0) {
+      const activeChatsRows = await this.siteRepository.manager.query<
+        Array<{ siteId: string; count: string }>
+      >(
+        `SELECT "siteId", COUNT(id) as count FROM conversations WHERE "siteId" = ANY($1) AND status != 'CLOSED' GROUP BY "siteId"`,
+        [siteIds],
+      );
+      activeChatsRows.forEach((row: { siteId: string; count: string }) => {
+        activeChatsMap[row.siteId] = parseInt(row.count, 10);
+      });
+    }
+
+    const dtos = this.mapper
+      .mapArray(paginated.data, Site, SiteDto)
+      .map((dto) => {
+        dto.activeChats = activeChatsMap[dto.id] || 0;
+        dto.updatedAt = new Date().toISOString(); // Fallback for updatedAt
+        return dto;
+      });
+
     return {
       ...paginated,
-      data: this.mapper.mapArray(paginated.data, Site, SiteDto),
+      data: dtos,
     };
   }
 
@@ -141,7 +184,12 @@ export class SiteService {
   async findOneEntity(id: string): Promise<Site> {
     const site = await this.siteRepository.findOne({
       where: { id },
-      relations: { owner: true, agents: true, documents: true },
+      relations: {
+        owner: true,
+        agents: true,
+        documents: true,
+        bookingConfig: true,
+      },
     });
     if (!site) {
       throw new NotFoundException(`Site with id ${id} not found`);
@@ -153,13 +201,35 @@ export class SiteService {
   //    deliberately public fields) ──
   async findOne(id: string): Promise<SiteDto> {
     const site = await this.findOneEntity(id);
-    return this.mapper.map(site, Site, SiteDto);
+    const dto = this.mapper.map(site, Site, SiteDto);
+
+    const activeChatsRows = await this.siteRepository.manager.query<
+      Array<{ count: string }>
+    >(
+      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
+      [id],
+    );
+    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    dto.updatedAt = new Date().toISOString();
+
+    return dto;
   }
 
   // ── Find One Site Dto (Access-checked) ──
   async findOneWithAccess(id: string, user: JwtUser): Promise<SiteDto> {
     const site = await this.assertSiteAccess(id, user);
-    return this.mapper.map(site, Site, SiteDto);
+    const dto = this.mapper.map(site, Site, SiteDto);
+
+    const activeChatsRows = await this.siteRepository.manager.query<
+      Array<{ count: string }>
+    >(
+      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
+      [id],
+    );
+    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    dto.updatedAt = new Date().toISOString();
+
+    return dto;
   }
 
   // ── Assert access helper ──
@@ -208,7 +278,7 @@ export class SiteService {
       }
     }
 
-    const updateData: Record<string, any> = { ...dto };
+    const updateData = { ...dto };
     if (dto.allowedDomains !== undefined) {
       updateData.allowedDomains = this.sanitizeAllowedDomains(
         dto.allowedDomains,
@@ -216,13 +286,93 @@ export class SiteService {
     }
 
     await this.siteRepository.update(id, updateData);
-    return this.findOne(id);
+    const updatedSite = await this.findOne(id);
+
+    // Broadcast updated settings to active conversations
+
+    const conversations = await this.siteRepository.manager
+      .createQueryBuilder()
+      .select('conversation.id', 'id')
+      .from('conversations', 'conversation')
+      .where('conversation.siteId = :siteId', { siteId: id })
+      .andWhere("conversation.status != 'CLOSED'")
+      .getRawMany<{ id: string }>();
+    if (conversations.length > 0) {
+      const conversationIds = conversations.map((c) => c.id);
+      this.chatGateway.broadcastSiteSettingsUpdated(
+        conversationIds,
+        updatedSite,
+      );
+    }
+
+    return updatedSite;
   }
 
   // ── Delete Site ──
   async remove(id: string, user: JwtUser): Promise<void> {
     await this.assertSiteAccess(id, user);
-    await this.siteRepository.delete(id);
+
+    try {
+      await this.siteRepository.manager.transaction(async (manager) => {
+        // 1. Delete notifications related to the site directly
+        await manager.query(`DELETE FROM "notifications" WHERE "siteId" = $1`, [
+          id,
+        ]);
+
+        // 2. Delete conversations, their messages, and their notifications
+        const conversations: Array<{ id: string }> = await manager.query(
+          `SELECT id FROM "conversations" WHERE "siteId" = $1`,
+          [id],
+        );
+        if (conversations.length > 0) {
+          const conversationIds = conversations.map((c) => c.id);
+          await manager.query(
+            `DELETE FROM "notifications" WHERE "conversationId" = ANY($1)`,
+            [conversationIds],
+          );
+          await manager.query(
+            `DELETE FROM "chat_messages" WHERE "conversationId" = ANY($1)`,
+            [conversationIds],
+          );
+          await manager.query(
+            `DELETE FROM "conversations" WHERE "siteId" = $1`,
+            [id],
+          );
+        }
+
+        // 3. Delete documents and their chunks
+        const documents: Array<{ id: string }> = await manager.query(
+          `SELECT id FROM "documents" WHERE "siteId" = $1`,
+          [id],
+        );
+        if (documents.length > 0) {
+          const documentIds = documents.map((d) => d.id);
+          await manager.query(
+            `DELETE FROM "document_chunks" WHERE "documentId" = ANY($1)`,
+            [documentIds],
+          );
+          await manager.query(`DELETE FROM "documents" WHERE "siteId" = $1`, [
+            id,
+          ]);
+        }
+
+        // 4. Clean up many-to-many agent assignments
+        await manager.query(`DELETE FROM "site_agents" WHERE "siteId" = $1`, [
+          id,
+        ]);
+
+        // 5. Delete the site
+        await manager.delete(Site, id);
+      });
+    } catch (error) {
+      const err = error as { code?: string };
+      if (err?.code === '23503') {
+        throw new BadRequestException(
+          'Cannot delete this site due to a database constraint. It may still be linked to other records.',
+        );
+      }
+      throw error;
+    }
   }
 
   // ── Assign Agent ──
@@ -238,11 +388,44 @@ export class SiteService {
       throw new BadRequestException('Agent is already assigned to this site');
     }
 
+    const newAgent = await this.userRepository.findOne({
+      where: { id: agentId },
+    });
+
     await this.siteRepository
       .createQueryBuilder()
       .relation(Site, 'agents')
       .of(siteId)
       .add(agentId);
+
+    // Send notification to the newly assigned agent
+    await this.notificationService.create({
+      recipientId: agentId,
+      type: NotificationType.SYSTEM,
+      title: 'Assigned to Site',
+      message: `You have been added to the site '${site.name}'.`,
+      siteId: site.id,
+    });
+
+    // Notify other site users (owner and existing agents)
+    const usersToNotify = new Set<string>();
+    if (site.ownerId) usersToNotify.add(site.ownerId);
+    site.agents.forEach((agent) => usersToNotify.add(agent.id));
+
+    // Don't notify the newly assigned agent twice, just in case
+    usersToNotify.delete(agentId);
+
+    const agentName = newAgent ? newAgent.name : 'A new agent';
+    const notifyPromises = Array.from(usersToNotify).map((id) =>
+      this.notificationService.create({
+        recipientId: id,
+        type: NotificationType.SYSTEM,
+        title: 'New Agent Assigned',
+        message: `${agentName} has been assigned to the site '${site.name}'.`,
+        siteId: site.id,
+      }),
+    );
+    await Promise.all(notifyPromises);
 
     return this.findOne(siteId);
   }
@@ -310,5 +493,56 @@ export class SiteService {
         return clean;
       })
       .filter(Boolean);
+  }
+
+  async hasActiveBookingsForService(
+    siteId: string,
+    serviceId: string,
+  ): Promise<boolean> {
+    const count = await this.bookingRepository.count({
+      where: {
+        siteId,
+        serviceId,
+        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
+      },
+    });
+    return count > 0;
+  }
+
+  async hasActiveBookingsForResource(
+    siteId: string,
+    resourceId: string,
+  ): Promise<boolean> {
+    const count = await this.bookingRepository.count({
+      where: {
+        siteId,
+        resourceId,
+        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
+      },
+    });
+    return count > 0;
+  }
+
+  // ── Upload Image ──
+  async uploadImage(
+    siteId: string,
+    file: Express.Multer.File,
+    user: JwtUser,
+  ): Promise<UploadApiResponse> {
+    await this.assertSiteAccess(siteId, user);
+
+    return new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: `sites/${siteId}` },
+        (error, result) => {
+          if (result) {
+            resolve(result);
+          } else {
+            reject(new Error(error?.message || 'Cloudinary upload failed'));
+          }
+        },
+      );
+      stream.end(file.buffer);
+    });
   }
 }

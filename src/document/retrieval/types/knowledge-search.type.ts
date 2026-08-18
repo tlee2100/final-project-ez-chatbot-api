@@ -16,6 +16,7 @@ export type KnowledgeSearchResult = {
   chunkId: string;
   documentId: string;
   filename: string;
+  sourceUrl?: string | null;
   content: string;
   tokenCount: number;
   sectionTitle: string | null;

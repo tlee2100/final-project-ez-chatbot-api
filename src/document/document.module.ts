@@ -38,6 +38,11 @@ import { CHUNK_SEARCH_REPOSITORY } from './constants/document.tokens';
     },
   ],
   controllers: [DocumentController],
-  exports: [KnowledgeRetrievalService],
+  exports: [
+    DocumentService,
+    KnowledgeRetrievalService,
+    DocumentChunkingService,
+    EmbeddingService,
+  ],
 })
 export class DocumentModule {}

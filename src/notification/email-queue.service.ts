@@ -29,6 +29,48 @@ export interface UserActivationEmailJobData {
   expiresAt: string;
 }
 
+export interface PasswordChangedEmailJobData {
+  to: string;
+  userName: string;
+  changedAt: string;
+}
+
+export interface BookingConfirmationEmailJobData {
+  to: string;
+  customerName: string;
+  bookingCode: string;
+  serviceName: string;
+  resourceName: string | null;
+  startAt: string; // ISO string (UTC)
+  endAt: string; // ISO string (UTC)
+  timezone: string; // Site timezone (e.g. "Asia/Ho_Chi_Minh")
+  siteName: string;
+}
+
+export interface BookingCancellationEmailJobData {
+  to: string;
+  customerName: string;
+  bookingCode: string;
+  serviceName: string;
+  resourceName: string | null;
+  startAt: string;
+  timezone: string;
+  siteName: string;
+}
+
+export interface ConversationSummaryEmailJobData {
+  to: string; // Admin email
+  adminName: string;
+  siteName: string;
+  conversationId: string;
+  visitorName?: string;
+  visitorEmail?: string;
+  messageCount: number;
+  startedAt: string;
+  closedAt: string;
+  summaryText: string;
+}
+
 export const DEFAULT_EMAIL_JOB_OPTIONS: JobOptions = {
   attempts: 3,
   backoff: {
@@ -74,6 +116,46 @@ export class EmailQueueService {
     });
   }
 
+  enqueuePasswordChangedEmail(
+    data: PasswordChangedEmailJobData,
+    opts?: JobOptions,
+  ): Promise<unknown> {
+    return this.emailQueue.add('send-password-changed', data, {
+      ...DEFAULT_EMAIL_JOB_OPTIONS,
+      ...opts,
+    });
+  }
+
+  enqueueBookingConfirmationEmail(
+    data: BookingConfirmationEmailJobData,
+    opts?: JobOptions,
+  ): Promise<unknown> {
+    return this.emailQueue.add('send-booking-confirmation', data, {
+      ...DEFAULT_EMAIL_JOB_OPTIONS,
+      ...opts,
+    });
+  }
+
+  enqueueBookingCancellationEmail(
+    data: BookingCancellationEmailJobData,
+    opts?: JobOptions,
+  ): Promise<unknown> {
+    return this.emailQueue.add('send-booking-cancellation', data, {
+      ...DEFAULT_EMAIL_JOB_OPTIONS,
+      ...opts,
+    });
+  }
+
+  enqueueConversationSummaryEmail(
+    data: ConversationSummaryEmailJobData,
+    opts?: JobOptions,
+  ): Promise<unknown> {
+    return this.emailQueue.add('send-conversation-summary', data, {
+      ...DEFAULT_EMAIL_JOB_OPTIONS,
+      ...opts,
+    });
+  }
+
   decryptActivationToken(job: UserActivationEmailJobData): string {
     const decipher = createDecipheriv(
       'aes-256-gcm',
@@ -88,12 +170,9 @@ export class EmailQueueService {
   }
 
   getEncryptionKey(): Buffer {
-    const secret =
-      process.env.EMAIL_TOKEN_ENCRYPTION_KEY || process.env.JWT_SECRET;
+    const secret = process.env.JWT_SECRET;
     if (!secret) {
-      throw new Error(
-        'Missing EMAIL_TOKEN_ENCRYPTION_KEY or JWT_SECRET environment variable',
-      );
+      throw new Error('Missing JWT_SECRET environment variable');
     }
 
     return createHash('sha256')

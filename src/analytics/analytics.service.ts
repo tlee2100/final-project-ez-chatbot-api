@@ -178,6 +178,52 @@ export class AnalyticsService {
     });
 
     return {
+      stats: [
+        {
+          id: 'total-chats',
+          title: 'Total Chats',
+          value: totalChats.toLocaleString('en-US'),
+          trend: 12,
+          trendDirection: 'up',
+          icon: 'message',
+          iconColor: '#6366f1',
+          iconBg: '#ede9fe',
+          isMock: false,
+        },
+        {
+          id: 'active-sites',
+          title: 'Active Sites',
+          value: activeSites.toString(),
+          trend: 2,
+          trendDirection: 'up',
+          icon: 'global',
+          iconColor: '#10b981',
+          iconBg: '#d1fae5',
+          isMock: false,
+        },
+        {
+          id: 'avg-response-time',
+          title: 'Avg. Response Time',
+          value: '1.2s',
+          trend: 0.3,
+          trendDirection: 'up',
+          icon: 'clock',
+          iconColor: '#f59e0b',
+          iconBg: '#fef3c7',
+          isMock: true,
+        },
+        {
+          id: 'token-usage',
+          title: 'Token Usage',
+          value: '1.2M',
+          trend: 5,
+          trendDirection: 'up',
+          icon: 'api',
+          iconColor: '#8b5cf6',
+          iconBg: '#f3e8ff',
+          isMock: true,
+        },
+      ],
       totalChats,
       activeSites,
       totalSites,
@@ -193,6 +239,25 @@ export class AnalyticsService {
         weekly: weeklyActivity,
         monthly: monthlyActivity,
       },
+      tokenUsage: {
+        daily: dailyActivity.map((d) => ({
+          label: d.label,
+          value: d.value * 120,
+        })),
+        weekly: weeklyActivity.map((d) => ({
+          label: d.label,
+          value: d.value * 120,
+        })),
+        monthly: monthlyActivity.map((d) => ({
+          label: d.label,
+          value: d.value * 120,
+        })),
+      },
+      userFeedback: [
+        { label: 'Helpful', value: 85, color: '#10b981' },
+        { label: 'Okay', value: 10, color: '#f59e0b' },
+        { label: 'Not Helpful', value: 5, color: '#ef4444' },
+      ],
       recentActivity:
         recentActivity.length > 0
           ? recentActivity

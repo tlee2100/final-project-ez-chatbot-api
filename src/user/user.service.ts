@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -33,6 +34,8 @@ type PaginatedUserDtos = Omit<Paginated<User>, 'data'> & {
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
@@ -146,8 +149,22 @@ export class UserService {
     user.activationTokenHash = null;
     user.activationTokenExpiresAt = null;
     user.refreshToken = null;
-    await this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    await this.enqueuePasswordChangedNotification(saved, new Date());
     return { message: 'Account activated successfully' };
+  }
+
+  async validateActivationToken(token: string) {
+    const user = await this.userRepository.findOne({
+      where: { activationTokenHash: this.hashActivationToken(token) },
+    });
+    if (!user || !user.activationTokenExpiresAt) {
+      throw new NotFoundException('Invalid activation token');
+    }
+    if (user.isActive || user.activationTokenExpiresAt.getTime() < Date.now()) {
+      throw new NotFoundException('Activation token has expired or was used');
+    }
+    return { valid: true };
   }
 
   async resendActivation(id: string, actor: JwtUser) {
@@ -244,7 +261,8 @@ export class UserService {
 
     user.password = await bcrypt.hash(dto.newPassword, 10);
     user.refreshToken = null;
-    await this.userRepository.save(user);
+    const saved = await this.userRepository.save(user);
+    await this.enqueuePasswordChangedNotification(saved, new Date());
     return { message: 'Password changed successfully' };
   }
 
@@ -333,5 +351,23 @@ export class UserService {
 
   private getActivationTokenLifetimeMs(): number {
     return ACTIVATION_TOKEN_EXPIRES_MS;
+  }
+
+  private async enqueuePasswordChangedNotification(
+    user: Pick<User, 'id' | 'email' | 'name'>,
+    changedAt: Date,
+  ): Promise<void> {
+    try {
+      await this.emailQueueService.enqueuePasswordChangedEmail({
+        to: user.email,
+        userName: user.name,
+        changedAt: changedAt.toISOString(),
+      });
+    } catch (error) {
+      this.logger.error(
+        `Password changed email could not be queued for user ${user.id}: ${(error as Error).message}`,
+        (error as Error).stack,
+      );
+    }
   }
 }

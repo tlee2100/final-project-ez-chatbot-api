@@ -24,6 +24,13 @@ export enum HandlingStatus {
   AGENT_HANDLING = 'AGENT_HANDLING',
 }
 
+export enum ClosedReason {
+  VISITOR = 'VISITOR',
+  TIMEOUT = 'TIMEOUT',
+  AGENT = 'AGENT',
+  ERROR = 'ERROR',
+}
+
 @Entity('conversations')
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
@@ -64,6 +71,13 @@ export class Conversation {
   })
   handlingStatus: HandlingStatus;
 
+  @Column({
+    type: 'enum',
+    enum: ClosedReason,
+    nullable: true,
+  })
+  closedReason: ClosedReason | null;
+
   /** Used by the gateway and cron job to auto-close idle chats */
   @Column({ type: 'timestamptz', default: () => 'CURRENT_TIMESTAMP' })
   lastActivityAt: Date;
@@ -81,6 +95,9 @@ export class Conversation {
    */
   @Column({ type: 'integer', default: 0 })
   summarizedMessageCount: number;
+
+  @Column({ type: 'boolean', default: false })
+  hasNegativeSentiment: boolean;
 
   /**
    * Conversation-level AI active flag.

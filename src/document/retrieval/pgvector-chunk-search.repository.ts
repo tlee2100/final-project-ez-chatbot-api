@@ -13,6 +13,7 @@ type RawKnowledgeSearchRow = {
   chunkId: string;
   documentId: string;
   filename: string;
+  sourceUrl: string | null;
   content: string;
   tokenCount: string | number;
   sectionTitle: string | null;
@@ -40,6 +41,7 @@ export class PgVectorChunkSearchRepository implements ChunkSearchRepository {
       .select('chunk.id', 'chunkId')
       .addSelect('chunk.documentId', 'documentId')
       .addSelect('document.filename', 'filename')
+      .addSelect('document.sourceUrl', 'sourceUrl')
       .addSelect('chunk.content', 'content')
       .addSelect('chunk.tokenCount', 'tokenCount')
       .addSelect('chunk.sectionTitle', 'sectionTitle')
@@ -48,6 +50,7 @@ export class PgVectorChunkSearchRepository implements ChunkSearchRepository {
       .where('chunk.siteId = :siteId')
       .andWhere('document.siteId = :siteId')
       .andWhere('document.status = :readyStatus')
+      .andWhere('document.isActive = true')
       .andWhere('chunk.embeddingModel = :embeddingModel')
       .setParameters({
         queryVector,
@@ -63,6 +66,7 @@ export class PgVectorChunkSearchRepository implements ChunkSearchRepository {
       chunkId: row.chunkId,
       documentId: row.documentId,
       filename: row.filename,
+      sourceUrl: row.sourceUrl,
       content: row.content,
       tokenCount: Number(row.tokenCount),
       sectionTitle: row.sectionTitle,

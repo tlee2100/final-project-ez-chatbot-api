@@ -56,7 +56,12 @@ export class McpToolProvider implements IToolProvider {
       }
 
       return {
-        output: finalOutput,
+        output:
+          typeof finalOutput === 'object' &&
+          finalOutput !== null &&
+          !Array.isArray(finalOutput)
+            ? (finalOutput as Record<string, unknown>)
+            : { result: finalOutput },
       };
     } catch (error) {
       this.logger.error(`[MCP Tool] Failed to execute ${request.name}`, error);

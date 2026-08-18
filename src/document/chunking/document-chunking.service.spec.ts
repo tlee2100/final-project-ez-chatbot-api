@@ -95,6 +95,33 @@ describe('DocumentChunkingService', () => {
     expect(chunks[1].content.startsWith(expectedOverlap)).toBe(true);
   });
 
+  it('supports site-specific chunk size and overlap', () => {
+    const options = { chunkSize: 200, chunkOverlap: 25 };
+    const content = Array.from(
+      { length: 800 },
+      (_, index) => `item-${index}`,
+    ).join(' ');
+    const chunks = service.chunk(content, DocumentFileType.TXT, options);
+    const expectedOverlap = tokenizer
+      .lastTokens(chunks[0].content, options.chunkOverlap)
+      .trim();
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.tokenCount <= options.chunkSize)).toBe(
+      true,
+    );
+    expect(chunks[1].content.startsWith(expectedOverlap)).toBe(true);
+  });
+
+  it('rejects overlap equal to the chunk size', () => {
+    expect(() =>
+      service.chunk('content', DocumentFileType.TXT, {
+        chunkSize: 100,
+        chunkOverlap: 100,
+      }),
+    ).toThrow(BadRequestException);
+  });
+
   it('rejects content that is empty after normalization', () => {
     expect(() => service.chunk(' \r\n\t ', DocumentFileType.TXT)).toThrow(
       BadRequestException,

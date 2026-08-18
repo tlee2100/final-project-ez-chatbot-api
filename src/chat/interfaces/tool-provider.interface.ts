@@ -22,7 +22,7 @@ export interface ToolRequest {
  * The result returned by a tool execution.
  */
 export interface ToolResult {
-  output: any;
+  output: Record<string, unknown>;
 }
 
 /**

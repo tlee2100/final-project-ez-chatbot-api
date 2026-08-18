@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SharedModule } from 'src/shared/shared.module';
 import { BullModule } from '@nestjs/bull';
@@ -8,6 +9,12 @@ import { UserModule } from './user/user.module';
 import { User } from './user/entities/user.entity';
 import { SiteModule } from './site/site.module';
 import { Site } from './site/entities/site.entity';
+import { SiteBookingConfig } from './site/entities/site-booking-config.entity';
+import { BookingService } from './site/entities/booking-service.entity';
+import { BookingResource } from './site/entities/booking-resources.entity';
+import { IndustryTemplate } from './site/entities/industry-template.entity';
+import { Booking } from './booking/entities/booking.entity';
+import { BookingModule } from './booking/booking.module';
 import { AuthModule } from './auth/auth.module';
 import { AutomapperModule } from '@automapper/nestjs';
 import { classes } from '@automapper/classes';
@@ -23,9 +30,12 @@ import { NotificationModule } from './notification/notification.module';
 import { Notification } from './notification/entities/notification.entity';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { McpModule } from './mcp/mcp.module';
-import { AiAgentModule } from './ai-agent/ai-agent.module';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { SecurityModule } from './security/security.module';
+import { CrawlerModule } from './crawler/crawler.module';
+import { CrawlerConfig } from './crawler/entities/crawler-config.entity';
+import { CrawlRun } from './crawler/entities/crawl-run.entity';
+import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
 
 @Module({
   imports: [
@@ -39,12 +49,20 @@ import { SecurityModule } from './security/security.module';
       entities: [
         User,
         Site,
+        SiteBookingConfig,
+        BookingService,
+        BookingResource,
+        IndustryTemplate,
+        Booking,
         Document,
         DocumentChunk,
         Organization,
         Notification,
         Conversation,
         ChatMessage,
+        CrawlerConfig,
+        CrawlRun,
+        CrawlRunItem,
       ],
       synchronize: false, // set true for dev, false for prod
     }),
@@ -66,6 +84,7 @@ import { SecurityModule } from './security/security.module';
         limit: 30, // 30 requests per minute
       },
     ]),
+    ScheduleModule.forRoot(),
     CoreModule,
     SharedModule,
     UserModule,
@@ -76,9 +95,10 @@ import { SecurityModule } from './security/security.module';
     OrganizationModule,
     NotificationModule,
     AnalyticsModule,
+    BookingModule,
     McpModule,
-    AiAgentModule,
     SecurityModule,
+    CrawlerModule,
   ],
 })
 export class AppModule {}

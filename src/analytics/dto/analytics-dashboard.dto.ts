@@ -19,6 +19,28 @@ export class ChatActivityDto {
   monthly: ChatActivityPointDto[];
 }
 
+export class TokenUsageDto {
+  @ApiProperty({ type: [ChatActivityPointDto] })
+  daily: ChatActivityPointDto[];
+
+  @ApiProperty({ type: [ChatActivityPointDto] })
+  weekly: ChatActivityPointDto[];
+
+  @ApiProperty({ type: [ChatActivityPointDto] })
+  monthly: ChatActivityPointDto[];
+}
+
+export class UserFeedbackItemDto {
+  @ApiProperty({ example: 'Helpful' })
+  label: string;
+
+  @ApiProperty({ example: 85 })
+  value: number;
+
+  @ApiProperty({ example: '#10b981' })
+  color: string;
+}
+
 export class ContainmentRateDto {
   @ApiProperty({
     example: 78,
@@ -53,7 +75,39 @@ export class RecentActivityItemDto {
   timeAgo: string;
 }
 
+export class DashboardStatItemDto {
+  @ApiProperty({ example: 'total-chats' })
+  id: string;
+
+  @ApiProperty({ example: 'Total Chats' })
+  title: string;
+
+  @ApiProperty({ example: '1,248' })
+  value: string;
+
+  @ApiProperty({ example: 12 })
+  trend: number;
+
+  @ApiProperty({ example: 'up' })
+  trendDirection: string;
+
+  @ApiProperty({ example: 'message' })
+  icon: string;
+
+  @ApiProperty({ example: '#6366f1' })
+  iconColor: string;
+
+  @ApiProperty({ example: '#ede9fe' })
+  iconBg: string;
+
+  @ApiProperty({ example: false })
+  isMock: boolean;
+}
+
 export class DashboardAnalyticsDto {
+  @ApiProperty({ type: [DashboardStatItemDto] })
+  stats: DashboardStatItemDto[];
+
   @ApiProperty({ example: 1248 })
   totalChats: number;
 
@@ -77,6 +131,12 @@ export class DashboardAnalyticsDto {
 
   @ApiProperty({ type: ChatActivityDto })
   chatActivity: ChatActivityDto;
+
+  @ApiProperty({ type: TokenUsageDto })
+  tokenUsage: TokenUsageDto;
+
+  @ApiProperty({ type: [UserFeedbackItemDto] })
+  userFeedback: UserFeedbackItemDto[];
 
   @ApiProperty({ type: [RecentActivityItemDto] })
   recentActivity: RecentActivityItemDto[];

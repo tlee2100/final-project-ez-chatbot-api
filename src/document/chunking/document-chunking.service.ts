@@ -20,6 +20,11 @@ export type ChunkDraft = {
   metadata: Record<string, unknown>;
 };
 
+export type DocumentChunkingOptions = {
+  chunkSize: number;
+  chunkOverlap: number;
+};
+
 type ContentSection = {
   content: string;
   sectionTitle: string | null;
@@ -33,7 +38,15 @@ export class DocumentChunkingService {
     private readonly tokenizer = new DocumentTokenizer(),
   ) {}
 
-  chunk(content: string, fileType: DocumentFileType): ChunkDraft[] {
+  chunk(
+    content: string,
+    fileType: DocumentFileType,
+    options: DocumentChunkingOptions = {
+      chunkSize: DOCUMENT_CHUNK_MAX_TOKENS,
+      chunkOverlap: DOCUMENT_CHUNK_OVERLAP_TOKENS,
+    },
+  ): ChunkDraft[] {
+    this.validateOptions(options);
     const normalizedContent = this.normalizeContent(content, fileType);
     if (!normalizedContent) {
       throw new BadRequestException(
@@ -42,7 +55,9 @@ export class DocumentChunkingService {
     }
 
     const sections = this.toSections(normalizedContent, fileType);
-    const chunks = sections.flatMap((section) => this.chunkSection(section));
+    const chunks = sections.flatMap((section) =>
+      this.chunkSection(section, options),
+    );
 
     if (chunks.length === 0) {
       throw new BadRequestException(
@@ -130,17 +145,22 @@ export class DocumentChunkingService {
     return sections;
   }
 
-  private chunkSection(section: ContentSection): ContentSection[] {
+  private chunkSection(
+    section: ContentSection,
+    options: DocumentChunkingOptions,
+  ): ContentSection[] {
     const tokens = this.tokenizer.tokensFor(section.content);
     const chunks: ContentSection[] = [];
     let start = 0;
 
     while (start < tokens.length) {
-      const hardEnd = Math.min(
-        start + DOCUMENT_CHUNK_MAX_TOKENS,
-        tokens.length,
+      const hardEnd = Math.min(start + options.chunkSize, tokens.length);
+      const end = this.findPreferredEnd(
+        tokens,
+        start,
+        hardEnd,
+        options.chunkSize,
       );
-      const end = this.findPreferredEnd(tokens, start, hardEnd);
       const content = this.tokenizer
         .decodeTokens(tokens.slice(start, end))
         .trim();
@@ -153,7 +173,7 @@ export class DocumentChunkingService {
         break;
       }
 
-      start = Math.max(start + 1, end - DOCUMENT_CHUNK_OVERLAP_TOKENS);
+      start = Math.max(start + 1, end - options.chunkOverlap);
     }
 
     return chunks;
@@ -163,6 +183,7 @@ export class DocumentChunkingService {
     tokens: number[],
     start: number,
     hardEnd: number,
+    chunkSize: number,
   ): number {
     if (hardEnd === tokens.length) {
       return hardEnd;
@@ -177,7 +198,7 @@ export class DocumentChunkingService {
     const boundaryTokenCount = this.tokenizer.countTokens(
       window.slice(0, boundary),
     );
-    const minimumTokens = Math.min(100, DOCUMENT_CHUNK_MAX_TOKENS);
+    const minimumTokens = Math.min(100, chunkSize);
 
     if (boundaryTokenCount < minimumTokens) {
       return hardEnd;
@@ -194,5 +215,20 @@ export class DocumentChunkingService {
     ].filter((index) => index > 0);
 
     return candidates.length > 0 ? Math.max(...candidates) : undefined;
+  }
+
+  private validateOptions(options: DocumentChunkingOptions): void {
+    if (!Number.isInteger(options.chunkSize) || options.chunkSize < 1) {
+      throw new BadRequestException('chunkSize must be a positive integer');
+    }
+    if (
+      !Number.isInteger(options.chunkOverlap) ||
+      options.chunkOverlap < 0 ||
+      options.chunkOverlap >= options.chunkSize
+    ) {
+      throw new BadRequestException(
+        'chunkOverlap must be a non-negative integer smaller than chunkSize',
+      );
+    }
   }
 }

@@ -495,6 +495,56 @@ Upload flow:
 5. A Bull job is queued in Redis.
 6. The worker marks the document as `processing`, then `ready`.
 
+## Web Crawler and Sitemap Sync
+
+The crawler implements KB-006, KB-007, and KB-008. It discovers URLs from one
+root sitemap per site (including nested sitemap indexes and gzip files), renders
+each public page with Chromium, extracts the readable content, and reuses the
+existing chunking, embedding, and pgvector pipeline. The configured sitemap,
+nested sitemaps, and listed pages may use public hostnames that differ from the
+site's primary URL.
+
+Production deployment is feature-flagged. Set `CRAWLER_ENABLED=true` only after
+Chromium has been verified in the production image. The provided Dockerfile
+installs Alpine Chromium and sets `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
+The browser sandbox stays enabled unless `CRAWLER_CHROMIUM_NO_SANDBOX=true` is
+explicitly set in a hardened container.
+
+Crawler management endpoints require `ADMIN` or `SUPER_ADMIN` and tenant access
+to `siteId`:
+
+| Method | Endpoint                                               | Purpose                          |
+| ------ | ------------------------------------------------------ | -------------------------------- |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawler`                     | Read config and active run       |
+| `PUT`  | `/api/v1/sites/:siteId/kb/crawler`                     | Save sitemap and 7-day auto-sync |
+| `POST` | `/api/v1/sites/:siteId/kb/crawl`                       | Start a full sitemap run         |
+| `POST` | `/api/v1/sites/:siteId/kb/upload/url`                  | Ingest one public URL            |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls`                      | List run history                 |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls/:runId`               | Read progress and counters       |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls/:runId/pages`         | Filter/search URL results        |
+| `POST` | `/api/v1/sites/:siteId/kb/crawls/:runId/retry-failed`  | Retry failed URLs                |
+| `POST` | `/api/v1/sites/:siteId/kb/sources/:documentId/recrawl` | Recrawl one web source           |
+
+The crawler always enforces `robots.txt`, ports 80/443, redirect validation, and
+public IPv4/IPv6 resolution. A sitemap may list pages and nested sitemaps on
+different public hosts, but each individual HTTP request may only redirect
+within its initial hostname and may not downgrade HTTPS to HTTP. The crawler
+sends no backend cookies or authorization headers. ETag/Last-Modified and
+extracted-content hashes avoid unnecessary Chromium and embedding work. A
+failed recrawl keeps the last indexed chunks. Sitemap sources are retired from
+retrieval only after they are absent from two consecutive successful full
+syncs.
+
+Reverting the crawler migration removes URL-source documents and their chunks
+so the legacy non-null file-path constraint can be restored; back up crawler
+content before a migration rollback.
+
+Run `npm test -- --runInBand src/crawler` for the crawler unit suite. For the
+local CSR render fixture, set `RUN_CRAWLER_INTEGRATION=true`, set
+`PUPPETEER_EXECUTABLE_PATH` to an installed Chromium or Chrome binary, and run
+`npm run test:crawler:integration`. The fixture injects the URL guard so it can
+bind to a random localhost port; production requests still reject localhost.
+
 ## WebSocket Chat
 
 The Socket.IO gateway requires a valid JWT. The token can be sent through handshake auth, query string, or `Authorization` header.

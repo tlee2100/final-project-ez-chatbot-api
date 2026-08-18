@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Like, Repository } from 'typeorm';
 import { StateGraph, START, END, Annotation } from '@langchain/langgraph';
 import {
   BaseMessage,
@@ -12,9 +12,10 @@ import {
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { INTENT_CLASSIFIER_SYSTEM_PROMPT } from './prompts';
+import { getIntentClassifierPrompt } from './prompts';
 import type { Response as ExpressResponse } from 'express';
 import type { Server as SocketServer } from 'socket.io';
+import { formatInTimeZone } from 'date-fns-tz';
 import { AiService } from './ai.service';
 import { ChatService } from './chat.service';
 import { TOOL_PROVIDER } from './interfaces/tool-provider.interface';
@@ -24,14 +25,36 @@ import type {
 } from './interfaces/tool-provider.interface';
 import type { LLMMessage } from './interfaces/llm-request.interface';
 import { Conversation } from './entities/conversation.entity';
-import { SenderType } from './entities/chat-message.entity';
+import {
+  ChatMessage as ChatMessageEntity,
+  SenderType,
+} from './entities/chat-message.entity';
 import { Site } from '../site/entities/site.entity';
 import { ChatGateway } from './chat.gateway';
 import { NotificationService } from '../notification/notification.service';
+import { Booking } from '../booking/entities/booking.entity';
+import {
+  extractBookingCode,
+  latestActiveBookingCode,
+} from './booking-cancellation.utils';
+import {
+  isBookingSlotSelection,
+  parseBookingSlotSelection,
+  replacePseudoToolResponse,
+  sanitizeSmallTalkResponse,
+} from './chat-flow.utils';
 // ─── Agent State ──────────────────────────────────────────────────────────────
 
 /** Intent categories the classifier node can assign */
-type IntentType = 'question' | 'request_human' | 'small_talk' | null;
+type IntentType =
+  | 'question'
+  | 'request_human'
+  | 'small_talk'
+  | 'book_appointment'
+  | 'booking_slot_selected'
+  | 'check_booking'
+  | 'cancel_booking'
+  | null;
 
 /**
  * AgentState — the shared state object threaded through the entire LangGraph workflow.
@@ -61,12 +84,28 @@ const AgentState = Annotation.Root({
     reducer: (_, y) => y,
     default: () => ({}),
   }),
-  siteContext: Annotation<{ name?: string; domains?: string[] }>({
+  siteContext: Annotation<{
+    name?: string;
+    domains?: string[];
+    bookingEnabled?: boolean;
+    bookingServices?: { id: string; name: string }[];
+    bookingResources?: { id: string; name: string }[];
+    bookingHours?: {
+      timezone?: string | null;
+      availableDays?: number[];
+      startTime?: string;
+      endTime?: string;
+      slotDuration?: number;
+    };
+    industryTemplateConfig?: Record<string, unknown>;
+  }>({
     reducer: (_, y) => y,
     default: () => ({}),
   }),
   /** Knowledge source references extracted from tool responses */
-  knowledgeSources: Annotation<{ documentId: string; filename: string }[]>({
+  knowledgeSources: Annotation<
+    { documentId: string; filename: string; sourceUrl?: string }[]
+  >({
     reducer: (_, y) => y,
     default: () => [],
   }),
@@ -90,6 +129,10 @@ export interface GraphRunOptions {
   siteId: string;
   /** Conversation UUID for context injection */
   conversationId: string;
+  /** Custom system prompt override for the site */
+  systemPromptOverride?: string | null;
+  /** Max tokens per response */
+  maxTokensPerResponse?: number;
   /** Visitor details to provide context to the LLM */
   visitorContext?: {
     name?: string;
@@ -99,6 +142,17 @@ export interface GraphRunOptions {
   siteContext?: {
     name?: string;
     domains?: string[];
+    bookingEnabled?: boolean;
+    bookingServices?: { id: string; name: string }[];
+    bookingResources?: { id: string; name: string }[];
+    bookingHours?: {
+      timezone?: string | null;
+      availableDays?: number[];
+      startTime?: string;
+      endTime?: string;
+      slotDuration?: number;
+    };
+    industryTemplateConfig?: Record<string, unknown>;
   };
   /** Existing rolling summary (loaded from conversation.summary) */
   existingSummary?: string;
@@ -118,16 +172,77 @@ export interface GraphRunOptions {
   /** Callback after graph finishes — caller saves the AI message to DB */
   onFinish: (
     text: string,
-    knowledgeSources?: { documentId: string; filename: string }[],
+    knowledgeSources?: {
+      documentId: string;
+      filename: string;
+      sourceUrl?: string;
+    }[],
   ) => Promise<void>;
   /** Callback when the graph triggers a human handoff */
   onRequestHandoff: () => Promise<void>;
+  /** Whether sentiment detection is enabled  /** Sentiment Detection */
+  sentimentDetection?: boolean;
+  /** Callback when negative sentiment is detected by the intent classifier */
+  onNegativeSentiment?: (text: string) => Promise<void>;
+  /** Flag to prevent duplicate alerts */
+  hasNegativeSentiment?: boolean;
 }
 
 export interface GraphRunResult {
   newSummary?: string;
   newSummarizedMessageCount?: number;
 }
+
+const isVietnameseText = (text: string) =>
+  /[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]|(bạn|tôi|mình|không|ưu tiên|ngày|giờ|dịch vụ|đặt lịch|hủy lịch|nhân viên|vui lòng|chọn|thời gian|phù hợp|cảm ơn)/i.test(
+    text,
+  );
+
+const sanitizeBookingChips = (
+  text: string,
+  siteContext?: GraphRunOptions['siteContext'],
+) => {
+  if (!text.includes('<chips>') || siteContext?.bookingEnabled !== true) {
+    return text;
+  }
+
+  const noPreference = isVietnameseText(text)
+    ? 'Không ưu tiên'
+    : 'No Preference';
+  const services =
+    siteContext.bookingServices?.map((service) => service.name) ?? [];
+  const resources =
+    siteContext.bookingResources?.map((resource) => resource.name) ?? [];
+
+  if (
+    /(what'?s your name|may i have your name|your phone number|phone number|tên.*bạn|bạn.*tên|số điện thoại)/i.test(
+      text,
+    )
+  ) {
+    return text.replace(/\s*<chips>.*?<\/chips>/g, '').trim();
+  }
+
+  if (/(preferred stylist|stylist|staff|nhân viên)/i.test(text)) {
+    const options = [...resources, noPreference].filter(Boolean);
+    return options.length
+      ? text.replace(
+          /<chips>.*?<\/chips>/,
+          `<chips>${options.join('|')}</chips>`,
+        )
+      : text;
+  }
+
+  if (/(which service|dịch vụ)/i.test(text)) {
+    return services.length
+      ? text.replace(
+          /<chips>.*?<\/chips>/,
+          `<chips>${services.join('|')}</chips>`,
+        )
+      : text;
+  }
+
+  return text;
+};
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
@@ -145,7 +260,7 @@ export interface GraphRunResult {
  * Graph topology:
  *   START → classify_intent
  *           ├─ request_human → request_handoff → summarize_memory → END
- *           └─ question/small_talk → model_node
+ *           └─ all other intents → model_node
  *                                     ├─ has tool calls → tools → parse_tools → model_node
  *                                     └─ no tool calls  → summarize_memory → END
  */
@@ -161,8 +276,12 @@ export class GraphService {
     private readonly toolProviderFactory: IToolProviderFactory,
     @InjectRepository(Conversation)
     private readonly conversationRepo: Repository<Conversation>,
+    @InjectRepository(ChatMessageEntity)
+    private readonly chatMessageRepo: Repository<ChatMessageEntity>,
     @InjectRepository(Site)
     private readonly siteRepo: Repository<Site>,
+    @InjectRepository(Booking)
+    private readonly bookingRepo: Repository<Booking>,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
     private readonly notificationService: NotificationService,
@@ -229,6 +348,7 @@ export class GraphService {
     conversationId: string,
     siteId: string,
     res?: ExpressResponse,
+    onNegativeSentiment?: (text: string) => Promise<void>,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
@@ -238,7 +358,15 @@ export class GraphService {
 
     const [conversation, site] = await Promise.all([
       this.chatService.getConversationById(conversationId),
-      this.siteRepo.findOne({ where: { id: siteId } }),
+      this.siteRepo.findOne({
+        where: { id: siteId },
+        relations: {
+          industryTemplateInfo: true,
+          bookingConfig: true,
+          bookingServices: true,
+          bookingResources: true,
+        },
+      }),
     ]);
 
     const dbMessages = await this.chatService.getMessagesForConversation(
@@ -285,6 +413,8 @@ export class GraphService {
         messages,
         siteId,
         conversationId,
+        systemPromptOverride: site?.systemPromptOverride ?? null,
+        maxTokensPerResponse: site?.maxTokensPerResponse ?? 1000,
         visitorContext: {
           name: conversation.visitorName ?? undefined,
           email: conversation.visitorEmail ?? undefined,
@@ -292,6 +422,27 @@ export class GraphService {
         siteContext: {
           name: site?.name ?? undefined,
           domains: site?.allowedDomains ?? [],
+          bookingEnabled: site?.bookingEnabled === true,
+          bookingServices:
+            site?.bookingServices?.map((service) => ({
+              id: service.id,
+              name: service.name,
+            })) ?? [],
+          bookingResources:
+            site?.bookingResources?.map((resource) => ({
+              id: resource.id,
+              name: resource.name,
+            })) ?? [],
+          bookingHours: site?.bookingConfig
+            ? {
+                timezone: site.bookingConfig.bookingTimezone,
+                availableDays: site.bookingConfig.bookingAvailableDays,
+                startTime: site.bookingConfig.bookingStartTime,
+                endTime: site.bookingConfig.bookingEndTime,
+                slotDuration: site.bookingConfig.bookingSlotDuration,
+              }
+            : undefined,
+          industryTemplateConfig: site?.industryTemplateInfo?.config,
         },
         existingSummary: conversation.summary ?? undefined,
         existingSummarizedMessageCount: conversation.summarizedMessageCount,
@@ -299,6 +450,9 @@ export class GraphService {
         server: this.chatGateway.server,
         onFinish,
         onRequestHandoff,
+        sentimentDetection: site?.sentimentDetection ?? false,
+        onNegativeSentiment,
+        hasNegativeSentiment: conversation.hasNegativeSentiment,
       });
     } finally {
       this.chatGateway.server
@@ -327,6 +481,8 @@ export class GraphService {
     } = options;
 
     let toolProvider: IToolProvider | undefined;
+    let createdBookingCode: string | undefined;
+    let cancelledBookingCode: string | undefined;
 
     try {
       // ── 1. Build LangChain messages from raw LLMMessage array ──────────────
@@ -352,10 +508,92 @@ export class GraphService {
             func: async (args) => {
               if (!currentProvider)
                 throw new Error('Tool provider not initialized');
+
+              let toolArgs: Record<string, unknown> = args;
+
+              if (def.name === 'createBooking') {
+                const userMessages = messages
+                  .filter((message) => message.role === 'user')
+                  .map((message) => message.content.trim().toLowerCase());
+                const slotSelection = messages
+                  .slice()
+                  .reverse()
+                  .filter((message) => message.role === 'user')
+                  .map((message) => parseBookingSlotSelection(message.content))
+                  .find(Boolean);
+                const services = options.siteContext?.bookingServices ?? [];
+                const resources = options.siteContext?.bookingResources ?? [];
+                const service =
+                  services.find((item) => item.id === args.serviceId) ??
+                  services.find((item) =>
+                    userMessages.includes(item.name.toLowerCase()),
+                  );
+                const resource =
+                  resources.find((item) => item.id === args.resourceId) ??
+                  resources.find(
+                    (item) => item.id === slotSelection?.resourceId,
+                  ) ??
+                  resources.find((item) =>
+                    userMessages.some(
+                      (message) =>
+                        message === item.name.toLowerCase() ||
+                        message.endsWith(` with ${item.name.toLowerCase()}`),
+                    ),
+                  );
+
+                toolArgs = {
+                  ...args,
+                  serviceId: service?.id,
+                  resourceId: resource?.id,
+                  date: slotSelection?.date ?? args.date,
+                  timeSlot: slotSelection?.timeSlot ?? args.timeSlot,
+                };
+
+                if (!resource) {
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message:
+                      'Do not execute. A specific staff/resource must be selected before booking. Ask the user to choose one available staff member, or choose one available staff member from the selected slot and state it clearly.',
+                  });
+                }
+
+                if (!service) {
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message:
+                      'Do not execute. A valid service from the current site must be selected before booking.',
+                  });
+                }
+
+                const lastUserMessage = messages
+                  .slice()
+                  .reverse()
+                  .find((m) => m.role === 'user')?.content as string;
+
+                const isConfirmed =
+                  lastUserMessage?.includes('/confirm-booking');
+
+                if (!isConfirmed) {
+                  this.logger.log(
+                    `[Tool Node] Intercepting tool: ${def.name} for confirmation gate`,
+                  );
+                  this.chatGateway.emitBookingSummary(conversationId, {
+                    ...toolArgs,
+                    serviceName: service.name,
+                    resourceName: resource.name,
+                  });
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message:
+                      'Do not execute. The widget already displayed the booking summary card. Do not repeat booking details, do not add Confirm/Edit chips, and ask the user to review the card in one short sentence only.',
+                  });
+                }
+              }
+
               this.logger.log(`[Tool Node] Executing tool: ${def.name}`);
               const result = await currentProvider.execute({
                 name: def.name,
-                arguments: args,
+                arguments: toolArgs,
               });
               return JSON.stringify(result.output);
             },
@@ -363,15 +601,102 @@ export class GraphService {
       );
 
       // Separate the human-handoff tool (handled by request_handoff node)
+      // and restrict admin-only/future tools from visitors
+      const restrictedForVisitor = [
+        'listDocuments',
+        'cancelBooking',
+        'getUserDetails',
+      ];
       const aiTools = langchainTools.filter(
-        (t) => !t.name.includes('requestHumanAgent'),
+        (t) =>
+          !t.name.includes('requestHumanAgent') &&
+          !restrictedForVisitor.includes(t.name),
       );
       const toolNode = new ToolNode(aiTools);
 
-      // ── 3. Bind tools to the streaming model ────────────────────────────────
-      const boundModel = this.aiService
-        .buildModel(0.5, true)
-        .bindTools(aiTools);
+      const toolsForIntent = (intent: IntentType) => {
+        const allowedToolNamesByIntent: Partial<
+          Record<NonNullable<IntentType>, string[]>
+        > = {
+          small_talk: [],
+          question: [
+            'getConversationContext',
+            'getSiteConfig',
+            'searchKnowledge',
+          ],
+          book_appointment: [
+            'getSiteConfig',
+            'getAvailableSlots',
+            'createBooking',
+          ],
+          check_booking: ['getConversationContext'],
+        };
+
+        const allowedToolNames = intent
+          ? allowedToolNamesByIntent[intent]
+          : undefined;
+
+        return allowedToolNames
+          ? aiTools.filter((tool) => allowedToolNames.includes(tool.name))
+          : aiTools;
+      };
+
+      const messageText = (message: BaseMessage) =>
+        typeof message.content === 'string'
+          ? message.content
+          : JSON.stringify(message.content);
+
+      const activeConversationBookingCode = async (
+        state: typeof AgentState.State,
+      ) => {
+        const metadataMessages = await this.chatMessageRepo.find({
+          where: [
+            { conversationId, content: Like('%<booking-code>%') },
+            { conversationId, content: Like('%<booking-cancelled>%') },
+          ],
+          select: { content: true },
+          order: { createdAt: 'ASC' },
+        });
+        return latestActiveBookingCode(
+          [
+            ...metadataMessages.map((message) => message.content),
+            state.summary,
+            ...state.messages.map(messageText),
+          ].join('\n'),
+        );
+      };
+
+      const isBookingContinuation = (
+        state: typeof AgentState.State,
+        userText: string,
+      ) => {
+        if (state.siteContext.bookingEnabled !== true) return false;
+
+        const previousAssistant = state.messages
+          .slice(0, -1)
+          .reverse()
+          .find((message) => message.constructor?.name?.includes('AIMessage'));
+        if (!previousAssistant) return false;
+
+        const assistantText = messageText(previousAssistant);
+        const chips = assistantText
+          .match(/<chips>(.*?)<\/chips>/)?.[1]
+          .split('|')
+          .map((chip) => chip.trim().toLowerCase());
+        if (chips?.includes(userText.trim().toLowerCase())) return true;
+        if (
+          /\b(change|update|set)\b.*\b(booking|name|phone|email|date|time|staff|stylist|service)\b/i.test(
+            userText,
+          ) ||
+          /what details.*change|details.*change/i.test(assistantText)
+        ) {
+          return true;
+        }
+
+        return /(which service|preferred stylist|what date|available time|select.*time|phone number|confirmation email|what'?s your name|bạn muốn.*dịch vụ|bạn.*stylist|bạn muốn.*ngày|chọn.*giờ|khung giờ|số điện thoại|tên.*bạn|email xác nhận)/i.test(
+          assistantText,
+        );
+      };
 
       // ── 4. Define graph nodes ────────────────────────────────────────────────
 
@@ -384,11 +709,23 @@ export class GraphService {
           typeof lastMessage.content === 'string'
             ? lastMessage.content
             : JSON.stringify(lastMessage.content);
+        const bookingEnabled = state.siteContext.bookingEnabled === true;
+        const intents = bookingEnabled
+          ? ([
+              'question',
+              'request_human',
+              'small_talk',
+              'book_appointment',
+              'check_booking',
+              'cancel_booking',
+            ] as const)
+          : (['question', 'request_human', 'small_talk'] as const);
 
         const intentSchema = z.object({
-          intent: z
-            .enum(['question', 'request_human', 'small_talk'])
-            .catch('small_talk'),
+          intent: z.enum(intents).catch('small_talk'),
+          sentiment: z
+            .enum(['positive', 'neutral', 'negative'])
+            .catch('neutral'),
         });
 
         const model = this.aiService
@@ -397,12 +734,73 @@ export class GraphService {
 
         try {
           const response = await model.invoke([
-            new SystemMessage(INTENT_CLASSIFIER_SYSTEM_PROMPT),
+            new SystemMessage(getIntentClassifierPrompt(bookingEnabled)),
             new HumanMessage(`<user_input>\n${contentStr}\n</user_input>`),
           ]);
 
-          this.logger.log(`Intent classified: ${response.intent}`);
-          return { intent: response.intent as IntentType };
+          this.logger.log(
+            `Intent classified: ${response.intent}, Sentiment: ${response.sentiment}`,
+          );
+
+          const previousAssistantText = state.messages
+            .slice(0, -1)
+            .reverse()
+            .find((message) =>
+              message.constructor?.name?.includes('AIMessage'),
+            );
+          const isCancelCodeReply =
+            !!extractBookingCode(contentStr) &&
+            !!previousAssistantText &&
+            /(booking code|confirmation code|mã.*(?:đặt lịch|xác nhận))/i.test(
+              messageText(previousAssistantText),
+            );
+          const intent = isBookingSlotSelection(contentStr)
+            ? 'booking_slot_selected'
+            : /^\/(?:(?:confirm-)?cancel-booking|keep-booking)\b/i.test(
+                  contentStr,
+                ) || isCancelCodeReply
+              ? 'cancel_booking'
+              : isBookingContinuation(state, contentStr)
+                ? 'book_appointment'
+                : response.intent;
+          if (intent !== response.intent) {
+            this.logger.log(
+              `Intent overridden for booking continuation: ${response.intent} -> ${intent}`,
+            );
+          }
+
+          if (
+            options.sentimentDetection &&
+            response.sentiment === 'negative' &&
+            options.onNegativeSentiment
+          ) {
+            if (!options.hasNegativeSentiment) {
+              this.logger.log(
+                `Negative sentiment detected for conversation ${options.conversationId}. Alerting agents.`,
+              );
+
+              // 1. Fire and forget so we don't block the AI response
+              options
+                .onNegativeSentiment(contentStr)
+                .catch((err: unknown) =>
+                  this.logger.error(
+                    `Error in onNegativeSentiment callback: ${err instanceof Error ? err.message : String(err)}`,
+                    err,
+                  ),
+                );
+
+              // 2. Mark this conversation as having negative sentiment to prevent duplicate alerts
+              await this.conversationRepo.update(options.conversationId, {
+                hasNegativeSentiment: true,
+              });
+            } else {
+              this.logger.log(
+                `Negative sentiment detected again for conversation ${options.conversationId}, but agents were already alerted.`,
+              );
+            }
+          }
+
+          return { intent: intent as IntentType };
         } catch (error) {
           this.logger.error('Failed to parse structured intent', error);
           return { intent: 'small_talk' as IntentType };
@@ -430,29 +828,202 @@ export class GraphService {
         return { messages: [new AIMessage(handoffMsg)] };
       };
 
+      const cancelBookingNode = async (state: typeof AgentState.State) => {
+        const latestUserText = [...state.messages]
+          .reverse()
+          .find((message) =>
+            message.constructor?.name?.includes('HumanMessage'),
+          );
+        const userText = latestUserText ? messageText(latestUserText) : '';
+        const isVietnamese = isVietnameseText(userText);
+
+        if (/^\/keep-booking\b/i.test(userText)) {
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese ? 'Xác nhận giữ lịch!' : 'Keep booking confirmed!',
+              ),
+            ],
+          };
+        }
+
+        const bookingCode =
+          extractBookingCode(userText) ??
+          (await activeConversationBookingCode(state));
+
+        if (!bookingCode) {
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese
+                  ? 'Vui lòng cung cấp mã đặt lịch bạn muốn hủy.'
+                  : 'Please provide the booking code you want to cancel.',
+              ),
+            ],
+          };
+        }
+
+        const booking = await this.bookingRepo.findOne({
+          where: { siteId: state.siteId, code: bookingCode },
+          relations: { service: true, resource: true },
+        });
+        if (!booking) {
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese
+                  ? 'Không tìm thấy lịch đặt với mã này.'
+                  : 'No booking was found with this code.',
+              ),
+            ],
+          };
+        }
+
+        const cancellationPayload = {
+          bookingCode: booking.code,
+          status: booking.status,
+          customerName: booking.customerName,
+          phone: booking.phone,
+          serviceId: booking.serviceId ?? undefined,
+          serviceName: booking.service?.name,
+          resourceId: booking.resourceId ?? undefined,
+          resourceName: booking.resource?.name,
+          date: formatInTimeZone(
+            booking.startAt,
+            booking.timezone,
+            'yyyy-MM-dd',
+          ),
+          timeSlot: formatInTimeZone(
+            booking.startAt,
+            booking.timezone,
+            'HH:mm',
+          ),
+        };
+
+        if (!/^\/confirm-cancel-booking\b/i.test(userText)) {
+          this.chatGateway.emitBookingCancellation(
+            conversationId,
+            cancellationPayload,
+          );
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese
+                  ? 'Vui lòng kiểm tra và xác nhận hủy lịch.'
+                  : 'Please review and confirm the booking cancellation.',
+              ),
+            ],
+          };
+        }
+
+        this.logger.log('[Tool Node] Executing tool: cancelBooking');
+        const result = await currentProvider.execute({
+          name: 'cancelBooking',
+          arguments: { bookingCode },
+        });
+        if (result.output.status !== 'cancelled') {
+          const error = result.output.error ?? result.output.result;
+          return {
+            messages: [
+              new AIMessage(
+                typeof error === 'string'
+                  ? error
+                  : isVietnamese
+                    ? 'Không thể hủy lịch này. Vui lòng kiểm tra lại mã đặt lịch.'
+                    : 'Unable to cancel this booking. Please check the booking code.',
+              ),
+            ],
+          };
+        }
+
+        cancelledBookingCode = bookingCode;
+        this.chatGateway.emitBookingCancelled(conversationId, {
+          ...cancellationPayload,
+          ...result.output,
+        });
+        return {
+          messages: [
+            new AIMessage(
+              isVietnamese
+                ? 'Lịch đặt của bạn đã được hủy.'
+                : 'Your booking has been cancelled.',
+            ),
+          ],
+        };
+      };
+
+      const bookingSlotSelectedNode = (state: typeof AgentState.State) => {
+        const latestUserText = [...state.messages]
+          .reverse()
+          .find((message) =>
+            message.constructor?.name?.includes('HumanMessage'),
+          );
+        const userText = latestUserText ? messageText(latestUserText) : '';
+        const slotSelection = parseBookingSlotSelection(userText);
+        const previousAssistantText = [...state.messages]
+          .reverse()
+          .find((message) => message.constructor?.name?.includes('AIMessage'));
+        const isVietnamese =
+          slotSelection?.language === 'vi' ||
+          (slotSelection?.language !== 'en' &&
+            isVietnameseText(
+              `${previousAssistantText ? messageText(previousAssistantText) : ''}\n${userText}`,
+            ));
+        return {
+          messages: [
+            new AIMessage(
+              isVietnamese ? 'Bạn tên là gì?' : "What's your name?",
+            ),
+          ],
+        };
+      };
+
       /**
        * model_node — invokes the bound LLM with tools, streaming tokens to both
        * the HTTP response (visitor) and the WebSocket room (admin dashboard).
        */
       const modelNode = async (state: typeof AgentState.State) => {
-        const systemPrompt = this.aiService.buildSystemPrompt({
+        const isSmallTalk = state.intent === 'small_talk';
+        const promptSiteContext = isSmallTalk
+          ? {
+              name: state.siteContext.name,
+              domains: state.siteContext.domains,
+            }
+          : state.siteContext;
+        let systemPrompt = this.aiService.buildSystemPrompt({
           messages: [],
           summary: state.summary,
           siteId: state.siteId,
           conversationId: state.conversationId,
           visitorContext: state.visitorContext,
-          siteContext: state.siteContext,
+          siteContext: promptSiteContext,
+          systemPromptOverride: options.systemPromptOverride,
         });
+        if (isSmallTalk) {
+          systemPrompt +=
+            '\n\nCurrent intent: small talk. Reply briefly to the user message. Do not mention or list booking services, staff, resources, availability, or booking options. Do not output chips or call tools.';
+        }
 
         const messagesWithSystem = [
           new SystemMessage(systemPrompt),
           ...state.messages,
         ];
+        const visibleTools = toolsForIntent(state.intent);
+        this.logger.log(
+          `[Tool Binding] intent=${state.intent ?? 'unknown'} tools=${visibleTools.map((tool) => tool.name).join(', ')}`,
+        );
+        const shouldStream = !['book_appointment', 'small_talk'].includes(
+          state.intent ?? '',
+        );
+        const boundModel = this.aiService
+          .buildModel(0.2, shouldStream, options.maxTokensPerResponse)
+          .bindTools(visibleTools);
 
         const response = await boundModel.invoke(messagesWithSystem, {
           callbacks: [
             {
               handleLLMNewToken(token: string) {
+                if (!shouldStream) return;
                 if (token) {
                   // 1. HTTP SSE — visitor receives tokens
                   if (res) {
@@ -474,6 +1045,7 @@ export class GraphService {
       /**
        * parse_tools — extracts knowledge source references from searchKnowledge
        * tool responses so they can be attached to the saved AI message.
+       * Also intercepts booking tool calls to emit UI events.
        */
       const parseTools = (state: typeof AgentState.State) => {
         const calledTools = state.messages
@@ -485,44 +1057,70 @@ export class GraphService {
         );
 
         const lastMessage = state.messages[state.messages.length - 1];
-        if (
-          lastMessage instanceof ToolMessage &&
-          lastMessage.name?.includes('searchKnowledge')
-        ) {
+
+        if (lastMessage instanceof ToolMessage) {
           try {
             const parsed = JSON.parse(lastMessage.content as string) as unknown;
 
-            // Handle both { chunks: [...] } from MCP and [...] from older mocks
-            let results: unknown[] = [];
-            if (Array.isArray(parsed)) {
-              results = parsed;
-            } else if (
-              parsed &&
-              typeof parsed === 'object' &&
-              'chunks' in parsed &&
-              Array.isArray((parsed as Record<string, unknown>).chunks)
-            ) {
-              results = (parsed as Record<string, unknown>).chunks as unknown[];
+            // Handle booking tools interception
+            if (lastMessage.name?.includes('getAvailableSlots')) {
+              this.chatGateway.emitBookingSlots(conversationId, parsed);
+            } else if (lastMessage.name?.includes('createBooking')) {
+              const isActionRequired =
+                (parsed as Record<string, unknown>)?.error ===
+                'ACTION_REQUIRED';
+              if (!isActionRequired) {
+                const bookingCode = (parsed as Record<string, unknown>)
+                  ?.bookingCode;
+                createdBookingCode =
+                  typeof bookingCode === 'string' ? bookingCode : undefined;
+                this.chatGateway.emitBookingSuccess(conversationId, parsed);
+              }
             }
 
-            const sourcesMap = new Map<string, string>();
-            results.forEach((c: unknown) => {
-              if (c && typeof c === 'object') {
-                const chunk = c as Record<string, unknown>;
-                if (
-                  typeof chunk.documentId === 'string' &&
-                  typeof chunk.filename === 'string'
-                ) {
-                  sourcesMap.set(chunk.documentId, chunk.filename);
-                }
+            // Handle searchKnowledge
+            if (lastMessage.name?.includes('searchKnowledge')) {
+              let results: unknown[] = [];
+              if (Array.isArray(parsed)) {
+                results = parsed;
+              } else if (
+                parsed &&
+                typeof parsed === 'object' &&
+                'chunks' in parsed &&
+                Array.isArray((parsed as Record<string, unknown>).chunks)
+              ) {
+                results = (parsed as Record<string, unknown>)
+                  .chunks as unknown[];
               }
-            });
-            const knowledgeSources = Array.from(sourcesMap.entries()).map(
-              ([documentId, filename]) => ({ documentId, filename }),
-            );
-            return { knowledgeSources };
+
+              const sourcesMap = new Map<
+                string,
+                { filename: string; sourceUrl?: string }
+              >();
+              results.forEach((c: unknown) => {
+                if (c && typeof c === 'object') {
+                  const chunk = c as Record<string, unknown>;
+                  if (
+                    typeof chunk.documentId === 'string' &&
+                    typeof chunk.filename === 'string'
+                  ) {
+                    sourcesMap.set(chunk.documentId, {
+                      filename: chunk.filename,
+                      sourceUrl:
+                        typeof chunk.sourceUrl === 'string'
+                          ? chunk.sourceUrl
+                          : undefined,
+                    });
+                  }
+                }
+              });
+              const knowledgeSources = Array.from(sourcesMap.entries()).map(
+                ([documentId, source]) => ({ documentId, ...source }),
+              );
+              return { knowledgeSources };
+            }
           } catch (error) {
-            this.logger.error('Failed to parse searchKnowledge output', error);
+            this.logger.error('Failed to parse tool output', error);
           }
         }
         return {};
@@ -577,14 +1175,26 @@ export class GraphService {
         .addNode('model_node', modelNode)
         .addNode('tools', toolNode)
         .addNode('parse_tools', parseTools)
+        .addNode('booking_slot_selected', bookingSlotSelectedNode)
+        .addNode('cancel_booking', cancelBookingNode)
         .addNode('request_handoff', requestHandoff)
         .addNode('summarize_memory', summarizeMemory);
 
       // Edges
       workflow.addEdge(START, 'classify_intent');
 
-      workflow.addConditionalEdges('classify_intent', (state) =>
-        state.intent === 'request_human' ? 'request_handoff' : 'model_node',
+      workflow.addConditionalEdges(
+        'classify_intent',
+        (state) => state.intent ?? 'small_talk',
+        {
+          question: 'model_node',
+          small_talk: 'model_node',
+          book_appointment: 'model_node',
+          booking_slot_selected: 'booking_slot_selected',
+          check_booking: 'model_node',
+          cancel_booking: 'cancel_booking',
+          request_human: 'request_handoff',
+        },
       );
 
       workflow.addConditionalEdges('model_node', toolsCondition, {
@@ -594,6 +1204,8 @@ export class GraphService {
 
       workflow.addEdge('tools', 'parse_tools');
       workflow.addEdge('parse_tools', 'model_node');
+      workflow.addEdge('booking_slot_selected', 'summarize_memory');
+      workflow.addEdge('cancel_booking', 'summarize_memory');
       workflow.addEdge('request_handoff', 'summarize_memory');
       workflow.addEdge('summarize_memory', END);
 
@@ -639,8 +1251,33 @@ export class GraphService {
                 .map((c) => c.text ?? '')
                 .join('');
 
-        if (textContent.trim()) {
-          await onFinish(textContent, finalState.knowledgeSources);
+        const latestUserText = messages
+          .slice()
+          .reverse()
+          .find((message) => message.role === 'user')?.content;
+        const isVietnamese = isVietnameseText(latestUserText ?? '');
+        const intentSafeText =
+          finalState.intent === 'small_talk'
+            ? sanitizeSmallTalkResponse(
+                textContent,
+                isVietnamese,
+                options.siteContext,
+              )
+            : sanitizeBookingChips(textContent, options.siteContext);
+        const sanitizedText = replacePseudoToolResponse(
+          intentSafeText,
+          isVietnamese,
+        );
+        if (sanitizedText.trim()) {
+          const bookingMetadata = createdBookingCode
+            ? `\n<booking-code>${createdBookingCode}</booking-code>`
+            : cancelledBookingCode
+              ? `\n<booking-cancelled>${cancelledBookingCode}</booking-cancelled>`
+              : '';
+          await onFinish(
+            `${sanitizedText}${bookingMetadata}`,
+            finalState.knowledgeSources,
+          );
         }
       }
 

@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class UpdateConversationHandlingStatusDefault1754350000000 implements MigrationInterface {
-  name = 'UpdateConversationHandlingStatusDefault1754350000000';
+export class UpdateConversationHandlingStatusDefault1786431543151 implements MigrationInterface {
+  name = 'UpdateConversationHandlingStatusDefault1786431543151';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

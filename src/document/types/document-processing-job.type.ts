@@ -4,4 +4,14 @@ export type DocumentProcessingJobData = {
   fileBufferBase64: string;
   uploadedByUserId: string;
   siteId: string;
+  chunkSize: number;
+  chunkOverlap: number;
+};
+
+export type DocumentReindexJobData = {
+  documentId: string;
+  uploadedByUserId: string;
+  siteId: string;
+  chunkSize: number;
+  chunkOverlap: number;
 };

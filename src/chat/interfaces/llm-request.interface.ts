@@ -17,6 +17,9 @@ export interface LLMRequest {
   /** Optional system prompt override. Defaults to SYSTEM_PROMPT env var. */
   systemPrompt?: string;
 
+  /** Custom system prompt override for the site */
+  systemPromptOverride?: string | null;
+
   /** Site UUID — used to scope tool calls and knowledge retrieval */
   siteId?: string;
 
@@ -36,5 +39,16 @@ export interface LLMRequest {
   siteContext?: {
     name?: string;
     domains?: string[];
+    bookingEnabled?: boolean;
+    bookingServices?: { id: string; name: string }[];
+    bookingResources?: { id: string; name: string }[];
+    bookingHours?: {
+      timezone?: string | null;
+      availableDays?: number[];
+      startTime?: string;
+      endTime?: string;
+      slotDuration?: number;
+    };
+    industryTemplateConfig?: Record<string, unknown>;
   };
 }

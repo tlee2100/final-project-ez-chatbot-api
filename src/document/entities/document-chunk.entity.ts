@@ -47,7 +47,7 @@ export class DocumentChunk {
   @Column({ type: 'varchar', length: 500, nullable: true })
   sectionTitle: string | null;
 
-  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" })
+  @Column({ type: 'jsonb', default: {} })
   metadata: Record<string, unknown>;
 
   @Column('vector', { length: 1536 })

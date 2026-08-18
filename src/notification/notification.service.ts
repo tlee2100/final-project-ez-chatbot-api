@@ -4,6 +4,7 @@ import { Repository, IsNull } from 'typeorm';
 import { Notification } from './entities/notification.entity';
 import { CreateNotificationDto } from './dto/create-notification.dto';
 import { NotificationGateway } from './notification.gateway';
+import { NotificationType } from './enums/notification-type.enum';
 
 @Injectable()
 export class NotificationService {
@@ -37,6 +38,25 @@ export class NotificationService {
     );
 
     return savedNotification;
+  }
+
+  async emitSentimentAlert(
+    userIds: string[],
+    siteId: string,
+    conversationId: string,
+    text: string,
+  ): Promise<void> {
+    const promises = userIds.map((userId) =>
+      this.create({
+        recipientId: userId,
+        type: NotificationType.NEGATIVE_SENTIMENT,
+        title: 'Negative Sentiment Detected',
+        message: `Visitor expressed negative sentiment: "${text}"`,
+        siteId,
+        conversationId,
+      }),
+    );
+    await Promise.all(promises);
   }
 
   async findAll(

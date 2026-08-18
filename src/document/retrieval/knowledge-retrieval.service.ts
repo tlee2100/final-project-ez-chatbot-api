@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { performance } from 'node:perf_hooks';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { CHUNK_SEARCH_REPOSITORY } from '../constants/document.tokens';
 import { EmbeddingService } from '../embedding/embedding.service';
 import type { ChunkSearchRepository } from './ports/chunk-search.repository';
@@ -8,6 +10,7 @@ import type {
   SearchRelevantChunksInput,
 } from './types/knowledge-search.type';
 import { validateSearchRelevantChunksInput } from './validation/knowledge-search-input.validator';
+import { Site } from '../../site/entities/site.entity';
 
 @Injectable()
 export class KnowledgeRetrievalService {
@@ -17,13 +20,32 @@ export class KnowledgeRetrievalService {
     private readonly embeddingService: EmbeddingService,
     @Inject(CHUNK_SEARCH_REPOSITORY)
     private readonly chunkSearchRepository: ChunkSearchRepository,
+    @InjectRepository(Site)
+    private readonly siteRepository: Repository<Site>,
   ) {}
 
   async searchRelevantChunks(
     input: SearchRelevantChunksInput,
   ): Promise<KnowledgeSearchResult[]> {
+    const baseInput = validateSearchRelevantChunksInput({
+      siteId: input.siteId,
+      query: input.query,
+    });
+    const site = await this.siteRepository.findOne({
+      where: { id: baseInput.siteId },
+      select: {
+        id: true,
+        kbRetrievalTopK: true,
+        kbSimilarityThreshold: true,
+      },
+    });
     const { siteId, query, topK, minSimilarity } =
-      validateSearchRelevantChunksInput(input);
+      validateSearchRelevantChunksInput({
+        siteId: baseInput.siteId,
+        query: baseInput.query,
+        topK: site?.kbRetrievalTopK,
+        minSimilarity: site?.kbSimilarityThreshold,
+      });
 
     const totalStartedAt = performance.now();
     const embedding = await this.embeddingService.embedOne(query);
@@ -51,6 +73,11 @@ export class KnowledgeRetrievalService {
       totalDurationMs: searchCompletedAt - totalStartedAt,
       candidateCount: candidates.length,
       acceptedCount: results.length,
+      acceptedChunks: results.map((r) => ({
+        docId: r.documentId,
+        similarity: r.similarity.toFixed(3),
+        preview: r.content.substring(0, 50).replace(/\n/g, ' ') + '...',
+      })),
     });
 
     return results;

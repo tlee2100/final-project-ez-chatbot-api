@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatGateway } from './chat.gateway';
@@ -6,6 +6,7 @@ import { ChatService } from './chat.service';
 import { ChatController } from './chat.controller';
 import { AiService } from './ai.service';
 import { GraphService } from './graph.service';
+import { ChatTimeoutService } from './chat-timeout.service';
 import { McpToolProviderFactory } from './providers/mcp-tool-provider.factory';
 import { TOOL_PROVIDER } from './interfaces/tool-provider.interface';
 import { Conversation } from './entities/conversation.entity';
@@ -13,15 +14,15 @@ import { ChatMessage } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { Site } from '../site/entities/site.entity';
 import { NotificationModule } from '../notification/notification.module';
-import { AiAgentModule } from '../ai-agent/ai-agent.module';
+import { Booking } from '../booking/entities/booking.entity';
+
 import { SiteModule } from '../site/site.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Conversation, ChatMessage, Site, User]),
+    TypeOrmModule.forFeature([Conversation, ChatMessage, Site, User, Booking]),
     NotificationModule,
-    AiAgentModule,
-    SiteModule,
+    forwardRef(() => SiteModule),
     (() => {
       const jwtSecret = process.env.JWT_SECRET;
       if (!jwtSecret) {
@@ -36,6 +37,7 @@ import { SiteModule } from '../site/site.module';
   providers: [
     ChatGateway,
     ChatService,
+    ChatTimeoutService,
     AiService,
     GraphService,
     McpToolProviderFactory,

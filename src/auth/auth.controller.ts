@@ -1,4 +1,12 @@
-import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Post,
+  Req,
+  UseGuards,
+  Get,
+  Query,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -34,6 +42,17 @@ export class AuthController {
   })
   activateAccount(@Body() dto: ActivateAccountDto) {
     return this.authService.activateAccount(dto);
+  }
+
+  @Get('validate-activation-token')
+  @ApiOperation({ summary: 'Validate an activation token' })
+  @ApiResponse({ status: 200, description: 'Token is valid' })
+  @ApiResponse({
+    status: 404,
+    description: 'Token is invalid or expired',
+  })
+  validateActivationToken(@Query('token') token: string) {
+    return this.authService.validateActivationToken(token);
   }
 
   @Post('login')

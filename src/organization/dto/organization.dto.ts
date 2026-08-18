@@ -109,4 +109,21 @@ export class OrganizationDto {
     description: 'Number of agent-role users in this organization',
   })
   agentsCount: number;
+
+  @ApiProperty({
+    example: 1,
+    description: 'Number of owners in this organization',
+  })
+  ownersCount: number;
+
+  @ApiProperty({
+    description: 'Formatted admin owner payload for the UI',
+    nullable: true,
+  })
+  adminOwner: {
+    name: string;
+    email: string;
+    avatar: string | null;
+    initials: string;
+  } | null;
 }

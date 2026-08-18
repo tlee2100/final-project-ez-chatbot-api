@@ -323,6 +323,19 @@ export class OrganizationService {
   private toDto(
     organization: Organization & { sitesCount?: number; agentsCount?: number },
   ): OrganizationDto {
+    let initials = 'U';
+    const owner = organization.owner;
+
+    if (owner?.name) {
+      const names = owner.name.trim().split(' ');
+      initials =
+        names.length > 1
+          ? `${names[0][0]}${names[names.length - 1][0]}`.toUpperCase()
+          : names[0].substring(0, 2).toUpperCase();
+    } else if (owner?.email) {
+      initials = owner.email.substring(0, 2).toUpperCase();
+    }
+
     return {
       id: organization.id,
       name: organization.name,
@@ -332,15 +345,23 @@ export class OrganizationService {
       ownerId: organization.ownerId ?? null,
       createdAt: organization.createdAt,
       updatedAt: organization.updatedAt,
-      owner: organization.owner
+      owner: owner
         ? {
-            id: organization.owner.id,
-            name: organization.owner.name,
-            email: organization.owner.email,
-            avatarUrl: organization.owner.avatarUrl ?? null,
+            id: owner.id,
+            name: owner.name,
+            email: owner.email,
+            avatarUrl: owner.avatarUrl ?? null,
           }
         : null,
-      // loadRelationCountAndMap injects these as virtual properties at runtime
+      adminOwner: owner
+        ? {
+            name: owner.name || owner.email?.split('@')[0] || 'Unknown',
+            email: owner.email || '',
+            avatar: owner.avatarUrl ?? null,
+            initials,
+          }
+        : null,
+      ownersCount: owner ? 1 : 0,
       sitesCount: organization.sitesCount ?? 0,
       agentsCount: organization.agentsCount ?? 0,
     };

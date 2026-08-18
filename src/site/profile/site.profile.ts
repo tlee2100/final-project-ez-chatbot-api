@@ -20,6 +20,10 @@ export class SiteProfile extends AutomapperProfile {
           (d) => d.kbDocuments,
           mapFrom((s) => s.documentIds?.length ?? s.documents?.length ?? 0),
         ),
+        forMember(
+          (d) => d.enabled,
+          mapFrom((s) => s.isAiActive),
+        ),
       );
     };
   }

@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   InternalServerErrorException,
 } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
 
 jest.mock('@automapper/nestjs', () => ({
   InjectMapper: () => () => undefined,
@@ -279,6 +280,196 @@ describe('UserService access rules', () => {
 
       expect(
         emailQueueService.enqueueUserActivationEmail,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('password changed notifications', () => {
+    it('queues a notification after account activation', async () => {
+      const repository = createRepositoryMock();
+      const emailQueueService = {
+        enqueueUserActivationEmail: jest.fn(),
+        enqueuePasswordChangedEmail: jest
+          .fn()
+          .mockResolvedValue({ id: 'job-password-changed' }),
+      };
+      const service = new UserService(
+        repository as never,
+        createMapperMock() as never,
+        emailQueueService as never,
+      );
+      const user = {
+        id: 'user-1',
+        email: 'agent@example.com',
+        name: 'Agent',
+        password: 'temporary-hash',
+        isActive: false,
+        activationTokenHash: 'activation-token-hash',
+        activationTokenExpiresAt: new Date(Date.now() + 60_000),
+        refreshToken: 'refresh-token',
+      };
+      repository.findOne.mockResolvedValue(user);
+      repository.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      await expect(
+        service.activateAccount({
+          token: 'activation-token',
+          newPassword: 'NewPassword123',
+          confirmNewPassword: 'NewPassword123',
+        }),
+      ).resolves.toEqual({ message: 'Account activated successfully' });
+
+      expect(repository.save).toHaveBeenCalled();
+      expect(user.isActive).toBe(true);
+      expect(user.refreshToken).toBeNull();
+      expect(
+        emailQueueService.enqueuePasswordChangedEmail,
+      ).toHaveBeenCalledWith({
+        to: user.email,
+        userName: user.name,
+        changedAt: expect.any(String) as string,
+      });
+    });
+
+    it('keeps account activation successful when notification enqueue fails', async () => {
+      const repository = createRepositoryMock();
+      const emailQueueService = {
+        enqueueUserActivationEmail: jest.fn(),
+        enqueuePasswordChangedEmail: jest
+          .fn()
+          .mockRejectedValue(new Error('Redis unavailable')),
+      };
+      const service = new UserService(
+        repository as never,
+        createMapperMock() as never,
+        emailQueueService as never,
+      );
+      repository.findOne.mockResolvedValue({
+        id: 'user-1',
+        email: 'agent@example.com',
+        name: 'Agent',
+        password: 'temporary-hash',
+        isActive: false,
+        activationTokenHash: 'activation-token-hash',
+        activationTokenExpiresAt: new Date(Date.now() + 60_000),
+        refreshToken: 'refresh-token',
+      });
+      repository.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      await expect(
+        service.activateAccount({
+          token: 'activation-token',
+          newPassword: 'NewPassword123',
+          confirmNewPassword: 'NewPassword123',
+        }),
+      ).resolves.toEqual({ message: 'Account activated successfully' });
+      expect(repository.save).toHaveBeenCalled();
+    });
+
+    it('queues a notification after changing the current password', async () => {
+      const repository = createRepositoryMock();
+      const emailQueueService = {
+        enqueueUserActivationEmail: jest.fn(),
+        enqueuePasswordChangedEmail: jest
+          .fn()
+          .mockResolvedValue({ id: 'job-password-changed' }),
+      };
+      const service = new UserService(
+        repository as never,
+        createMapperMock() as never,
+        emailQueueService as never,
+      );
+      const user = {
+        id: 'user-1',
+        email: 'agent@example.com',
+        name: 'Agent',
+        password: await bcrypt.hash('OldPassword123', 10),
+        refreshToken: 'refresh-token',
+      };
+      repository.findOne.mockResolvedValue(user);
+      repository.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'OldPassword123',
+          newPassword: 'NewPassword123',
+          confirmNewPassword: 'NewPassword123',
+        }),
+      ).resolves.toEqual({ message: 'Password changed successfully' });
+
+      expect(user.refreshToken).toBeNull();
+      expect(await bcrypt.compare('NewPassword123', user.password)).toBe(true);
+      expect(
+        emailQueueService.enqueuePasswordChangedEmail,
+      ).toHaveBeenCalledWith({
+        to: user.email,
+        userName: user.name,
+        changedAt: expect.any(String) as string,
+      });
+    });
+
+    it('keeps password change successful when notification enqueue fails', async () => {
+      const repository = createRepositoryMock();
+      const emailQueueService = {
+        enqueueUserActivationEmail: jest.fn(),
+        enqueuePasswordChangedEmail: jest
+          .fn()
+          .mockRejectedValue(new Error('Redis unavailable')),
+      };
+      const service = new UserService(
+        repository as never,
+        createMapperMock() as never,
+        emailQueueService as never,
+      );
+      repository.findOne.mockResolvedValue({
+        id: 'user-1',
+        email: 'agent@example.com',
+        name: 'Agent',
+        password: await bcrypt.hash('OldPassword123', 10),
+        refreshToken: 'refresh-token',
+      });
+      repository.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'OldPassword123',
+          newPassword: 'NewPassword123',
+          confirmNewPassword: 'NewPassword123',
+        }),
+      ).resolves.toEqual({ message: 'Password changed successfully' });
+      expect(repository.save).toHaveBeenCalled();
+    });
+
+    it('does not queue a notification when password validation fails', async () => {
+      const repository = createRepositoryMock();
+      const emailQueueService = {
+        enqueueUserActivationEmail: jest.fn(),
+        enqueuePasswordChangedEmail: jest.fn(),
+      };
+      const service = new UserService(
+        repository as never,
+        createMapperMock() as never,
+        emailQueueService as never,
+      );
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'OldPassword123',
+          newPassword: 'NewPassword123',
+          confirmNewPassword: 'DifferentPassword123',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(
+        emailQueueService.enqueuePasswordChangedEmail,
       ).not.toHaveBeenCalled();
     });
   });

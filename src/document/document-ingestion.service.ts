@@ -6,8 +6,12 @@ import type { EmbeddingResult } from './embedding/embedding.service';
 import { DocumentChunk } from './entities/document-chunk.entity';
 import { Document } from './entities/document.entity';
 import { DocumentStatus } from './enums/document-status.enum';
+import { DocumentReindexStatus } from './enums/document-reindex-status.enum';
 
-import { DOCUMENT_CHUNK_INSERT_BATCH_SIZE } from './constants/document-storage.constants';
+import {
+  DOCUMENT_CHUNK_INSERT_BATCH_SIZE,
+  DOCUMENT_VECTOR_LIMIT,
+} from './constants/document-storage.constants';
 
 export type PersistProcessedDocumentInput = {
   documentId: string;
@@ -16,6 +20,9 @@ export type PersistProcessedDocumentInput = {
   filePath: string;
   cloudinaryPublicId: string;
   processedAt: Date;
+  chunkSize: number;
+  chunkOverlap: number;
+  replaceExisting?: boolean;
 };
 
 @Injectable()
@@ -56,6 +63,19 @@ export class DocumentIngestionService {
       );
 
       const chunkRepository = manager.getRepository(DocumentChunk);
+      const [siteChunkCount, existingDocumentChunkCount] = await Promise.all([
+        chunkRepository.count({ where: { siteId: document.siteId } }),
+        chunkRepository.count({ where: { documentId: document.id } }),
+      ]);
+      if (
+        siteChunkCount - existingDocumentChunkCount + chunks.length >
+        DOCUMENT_VECTOR_LIMIT
+      ) {
+        throw new Error('Knowledge base vector quota has been reached');
+      }
+      if (input.replaceExisting) {
+        await chunkRepository.delete({ documentId: document.id });
+      }
       for (
         let start = 0;
         start < chunks.length;
@@ -71,6 +91,10 @@ export class DocumentIngestionService {
         cloudinaryPublicId: input.cloudinaryPublicId,
         processedAt: input.processedAt,
         status: DocumentStatus.READY,
+        indexedChunkSize: input.chunkSize,
+        indexedChunkOverlap: input.chunkOverlap,
+        reindexStatus: DocumentReindexStatus.IDLE,
+        reindexError: null,
       });
     });
   }

@@ -1,4 +1,9 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -13,7 +18,13 @@ import type {
   AvailableSlot,
   BookingResult,
   CreateBookingPayload,
+  SiteConfigBookingHours,
+  SiteConfigResourceItem,
+  SiteConfigServiceItem,
 } from './types/mcp.types';
+import { BookingService } from '../booking/booking.service';
+import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { addMinutes } from 'date-fns';
 
 /**
  * MCP-002, MCP-003: Service backing all /api/internal/mcp/* endpoints.
@@ -41,6 +52,7 @@ export class McpService {
     @InjectRepository(Site)
     private readonly siteRepository: Repository<Site>,
     private readonly knowledgeRetrievalService: KnowledgeRetrievalService,
+    private readonly bookingService: BookingService,
   ) {}
 
   // ─── Auth ─────────────────────────────────────────────────────────────────
@@ -162,6 +174,36 @@ export class McpService {
       where: { id: siteId },
     });
 
+    let bookingHours: SiteConfigBookingHours = {};
+    let services: SiteConfigServiceItem[] = [];
+    let resources: SiteConfigResourceItem[] = [];
+    try {
+      const config = await this.bookingService.getSiteBookingConfig(siteId);
+      const dbServices = await this.bookingService.getServicesBySiteId(siteId);
+      const dbResources =
+        await this.bookingService.getResourcesBySiteId(siteId);
+      bookingHours = {
+        timezone: config.bookingTimezone,
+        availableDays: config.bookingAvailableDays,
+        startTime: config.bookingStartTime,
+        endTime: config.bookingEndTime,
+        slotDuration: config.bookingSlotDuration,
+      };
+      services = dbServices.map((s) => ({
+        id: s.id,
+        name: s.name,
+      }));
+      resources = dbResources.map((r) => ({
+        id: r.id,
+        name: r.name,
+      }));
+      this.logger.log(
+        `[MCP] getSiteConfig loaded services=${services.length}, resources=${resources.length}`,
+      );
+    } catch {
+      this.logger.warn(`Failed to fetch booking config for site ${siteId}`);
+    }
+
     if (!site) {
       return {
         siteId,
@@ -172,6 +214,9 @@ export class McpService {
         allowedDomains: ['*'],
         bookingEnabled: true,
         timezone: 'Asia/Ho_Chi_Minh',
+        bookingHours,
+        services,
+        resources,
       };
     }
 
@@ -184,6 +229,9 @@ export class McpService {
       allowedDomains: site.allowedDomains,
       bookingEnabled: true,
       timezone: 'Asia/Ho_Chi_Minh',
+      bookingHours,
+      services,
+      resources,
     };
   }
 
@@ -202,8 +250,8 @@ export class McpService {
    *
    * @param query - Natural language search query from the MCP tool consumer (LLM).
    * @param siteId - Tenant isolation — restricts search to this site's chunks.
-   * @param topK - Maximum number of chunks to return. Defaults to 4.
-   * @param minSimilarity - Minimum cosine similarity threshold. Defaults to 0.5.
+   * @param topK - Deprecated compatibility input. Site settings take precedence.
+   * @param minSimilarity - Deprecated compatibility input. Site settings take precedence.
    */
   async searchKnowledge(
     query: string,
@@ -215,6 +263,7 @@ export class McpService {
       content: string;
       documentId: string;
       filename: string;
+      sourceUrl: string | null;
       sectionTitle: string | null;
       similarity: number;
     }[];
@@ -226,8 +275,6 @@ export class McpService {
     const results = await this.knowledgeRetrievalService.searchRelevantChunks({
       siteId,
       query,
-      topK,
-      minSimilarity,
     });
 
     return {
@@ -235,6 +282,7 @@ export class McpService {
         content: item.content,
         documentId: item.documentId,
         filename: item.filename,
+        sourceUrl: item.sourceUrl ?? null,
         sectionTitle: item.sectionTitle,
         similarity: item.similarity,
       })),
@@ -277,7 +325,7 @@ export class McpService {
    */
   async listReadyDocuments(siteId: string): Promise<string[]> {
     const documents = await this.documentRepository.find({
-      where: { siteId, status: DocumentStatus.READY },
+      where: { siteId, status: DocumentStatus.READY, isActive: true },
       order: { processedAt: 'DESC' },
     });
 
@@ -292,24 +340,58 @@ export class McpService {
    *
    * ponytail: MOCK — real implementation wired in Phase 1C by BookingModule team.
    */
-  getAvailableSlots(
+  async getAvailableSlots(
     siteId: string,
     date: string,
     resourceId?: string,
-  ): AvailableSlot[] {
+    serviceId?: string,
+  ): Promise<AvailableSlot[]> {
     this.logger.log(
-      `[MCP] getAvailableSlots (MOCK): siteId=${siteId}, date=${date}, resourceId=${resourceId ?? 'any'}`,
+      `[MCP] getAvailableSlots: siteId=${siteId}, date=${date}, resourceId=${resourceId ?? 'any'}, serviceId=${serviceId ?? 'any'}`,
     );
 
-    const baseSlots = ['09:00', '10:00', '11:00', '14:00', '15:00', '16:00'];
-    return baseSlots.map((time, idx) => ({
-      slotId: `mock-slot-${date}-${idx}`,
-      date,
-      timeSlot: time,
-      resourceId: resourceId ?? 'mock-resource-001',
-      resourceName: 'Stylist Lan (Mock)',
-      available: true,
-    }));
+    const config = await this.bookingService.getSiteBookingConfig(siteId);
+    const timezone = config.bookingTimezone || 'UTC';
+
+    const result = await this.bookingService.getAvailableSlots(
+      siteId,
+      resourceId || null,
+      serviceId || null,
+      date, // startDate (ISO or local date string)
+      date, // endDate (same day)
+    );
+
+    return result.slots.map((slot, idx) => {
+      // slot.startAt is an ISO string in UTC
+      const localTime = formatInTimeZone(
+        new Date(slot.startAt),
+        timezone,
+        'HH:mm',
+      );
+      const slotId = `slot-${date}-${idx}`;
+
+      // Branch B: No Preference — slot has availableResources
+      if ('availableResources' in slot && slot.availableResources) {
+        return {
+          slotId,
+          date,
+          timeSlot: localTime,
+          availableResources: slot.availableResources,
+          available: slot.availableResources.length > 0,
+        };
+      }
+
+      // Branch A: Specific resource selected
+      const s = slot as { startAt: string; endAt: string; resourceId: string };
+      return {
+        slotId,
+        date,
+        timeSlot: localTime,
+        resourceId: s.resourceId ?? resourceId ?? 'any',
+        resourceName: s.resourceId ? undefined : 'Any Provider', // will not happen in Branch A
+        available: true,
+      };
+    });
   }
 
   /**
@@ -318,21 +400,73 @@ export class McpService {
    *
    * ponytail: MOCK — real implementation (with conflict detection) wired in Phase 1C.
    */
-  createBooking(siteId: string, payload: CreateBookingPayload): BookingResult {
+  async createBooking(
+    siteId: string,
+    payload: CreateBookingPayload,
+  ): Promise<BookingResult> {
     this.logger.log(
-      `[MCP] createBooking (MOCK): siteId=${siteId}, customer=${payload.customerName}, date=${payload.date}, time=${payload.timeSlot}`,
+      `[MCP] createBooking: siteId=${siteId}, customer=${payload.customerName}, date=${payload.date}, time=${payload.timeSlot}`,
     );
 
-    const bookingCode = `MOCK-${Date.now().toString(36).toUpperCase()}`;
-    return {
-      bookingCode,
-      status: 'confirmed',
+    const config = await this.bookingService.getSiteBookingConfig(siteId);
+    const timezone = config.bookingTimezone || 'UTC';
+    const duration = config.bookingSlotDuration || 30;
+
+    if (!payload.resourceId) {
+      throw new BadRequestException(
+        'A specific staff/resource must be selected before creating a booking.',
+      );
+    }
+
+    let resourceName = 'Staff';
+    const resource = await this.bookingService.getResourceById(
+      siteId,
+      payload.resourceId,
+    );
+    if (resource) {
+      resourceName = resource.name;
+    }
+
+    let serviceName = 'Service';
+    if (payload.serviceId) {
+      const service = await this.bookingService.getServiceById(
+        siteId,
+        payload.serviceId,
+      );
+      if (service) {
+        serviceName = service.name;
+      }
+    }
+
+    // Convert local date + timeSlot into UTC startAt / endAt
+    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
+    const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
+    const utcEndAt = addMinutes(utcStartAt, duration);
+
+    const booking = await this.bookingService.createBooking({
+      siteId,
+      resourceId: payload.resourceId,
+      serviceId: payload.serviceId,
+      startAt: utcStartAt.toISOString(),
+      endAt: utcEndAt.toISOString(),
+      timezone,
       customerName: payload.customerName,
+      phone: payload.phone,
+      customerEmail: payload.customerEmail,
+      templateFields: {},
+    });
+
+    return {
+      bookingCode: booking.code,
+      status: 'confirmed',
+      customerName: booking.customerName,
+      phone: booking.phone,
       date: payload.date,
       timeSlot: payload.timeSlot,
-      resourceName: 'Stylist Lan (Mock)',
+      resourceName,
       serviceId: payload.serviceId,
-      createdAt: new Date().toISOString(),
+      serviceName,
+      createdAt: booking.createdAt.toISOString(),
     };
   }
 
@@ -343,13 +477,19 @@ export class McpService {
    * ponytail: MOCK — real implementation wired in Phase 1C.
    * Required Phase 1B deliverable: must be demonstrable via MCP Inspector.
    */
-  cancelBooking(
+  async cancelBooking(
     siteId: string,
     bookingCode: string,
-  ): Pick<BookingResult, 'bookingCode' | 'status'> {
+  ): Promise<Pick<BookingResult, 'bookingCode' | 'status'>> {
     this.logger.log(
-      `[MCP] cancelBooking (MOCK): siteId=${siteId}, bookingCode=${bookingCode}`,
+      `[MCP] cancelBooking: siteId=${siteId}, bookingCode=${bookingCode}`,
     );
+
+    const booking = await this.bookingService.getBookingByCode(
+      siteId,
+      bookingCode,
+    );
+    await this.bookingService.cancelBooking(siteId, booking.id);
 
     return { bookingCode, status: 'cancelled' };
   }

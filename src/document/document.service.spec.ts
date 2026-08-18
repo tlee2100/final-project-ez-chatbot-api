@@ -2,7 +2,7 @@ jest.mock('@automapper/classes', () => ({
   AutoMap: () => () => {},
 }));
 
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { Repository } from 'typeorm';
 import type { Queue } from 'bull';
 import { DocumentService } from './document.service';
@@ -29,6 +29,7 @@ describe('DocumentService - Chunks & Stats', () => {
   };
   let mockSiteRepo: {
     findOne: jest.Mock;
+    save: jest.Mock;
   };
   let mockQueue: {
     add: jest.Mock;
@@ -61,7 +62,12 @@ describe('DocumentService - Chunks & Stats', () => {
       findOne: jest.fn().mockResolvedValue({
         id: mockSiteId,
         ownerId: mockUser.id,
+        kbChunkSize: 800,
+        kbChunkOverlap: 100,
+        kbRetrievalTopK: 4,
+        kbSimilarityThreshold: 0.5,
       }),
+      save: jest.fn(),
     };
 
     mockQueue = {
@@ -74,6 +80,19 @@ describe('DocumentService - Chunks & Stats', () => {
       mockSiteRepo as unknown as Repository<Site>,
       mockQueue as unknown as Queue<DocumentProcessingJobData>,
     );
+  });
+
+  describe('updateKnowledgeBaseSettings', () => {
+    it('rejects overlap that is not smaller than the merged chunk size', async () => {
+      await expect(
+        service.updateKnowledgeBaseSettings(
+          mockSiteId,
+          { chunkSize: 400, chunkOverlap: 400 },
+          mockUser,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockSiteRepo.save).not.toHaveBeenCalled();
+    });
   });
 
   describe('getDocumentChunks', () => {

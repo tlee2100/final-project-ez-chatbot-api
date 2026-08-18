@@ -161,7 +161,7 @@ export class McpController {
    * siteId from X-MCP-Context; date + optional resourceId as query params.
    */
   @Get('booking/slots')
-  @ApiOperation({ summary: 'Get available booking slots (MCP-006) [MOCK]' })
+  @ApiOperation({ summary: 'Get available booking slots (MCP-006)' })
   @ApiHeader({
     name: 'X-MCP-Context',
     description: 'Signed context carrying siteId',
@@ -177,13 +177,25 @@ export class McpController {
     description: 'Optional resource (staff) UUID',
     required: false,
   })
-  getAvailableSlots(
+  @ApiQuery({
+    name: 'serviceId',
+    description:
+      'Optional service UUID (reserved for future service-specific slot duration)',
+    required: false,
+  })
+  async getAvailableSlots(
     @Headers('x-mcp-context') mcpContext: string,
     @Query('date') date: string,
     @Query('resourceId') resourceId?: string,
+    @Query('serviceId') serviceId?: string,
   ) {
     const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.getAvailableSlots(siteId, date, resourceId);
+    return await this.mcpService.getAvailableSlots(
+      siteId,
+      date,
+      resourceId,
+      serviceId,
+    );
   }
 
   /**
@@ -192,18 +204,18 @@ export class McpController {
    * siteId from X-MCP-Context.
    */
   @Post('booking/create')
-  @ApiOperation({ summary: 'Create a booking (MCP-007) [MOCK]' })
+  @ApiOperation({ summary: 'Create a booking (MCP-007)' })
   @ApiHeader({
     name: 'X-MCP-Context',
     description: 'Signed context carrying siteId',
     required: true,
   })
-  createBooking(
+  async createBooking(
     @Headers('x-mcp-context') mcpContext: string,
     @Body() dto: McpCreateBookingDto,
   ) {
     const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.createBooking(siteId, dto);
+    return await this.mcpService.createBooking(siteId, dto);
   }
 
   /**
@@ -212,17 +224,17 @@ export class McpController {
    * siteId from X-MCP-Context.
    */
   @Post('booking/cancel')
-  @ApiOperation({ summary: 'Cancel a booking by code (MCP-008) [MOCK]' })
+  @ApiOperation({ summary: 'Cancel a booking by code (MCP-008)' })
   @ApiHeader({
     name: 'X-MCP-Context',
     description: 'Signed context carrying siteId',
     required: true,
   })
-  cancelBooking(
+  async cancelBooking(
     @Headers('x-mcp-context') mcpContext: string,
     @Body() dto: McpCancelBookingDto,
   ) {
     const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.cancelBooking(siteId, dto.bookingCode);
+    return await this.mcpService.cancelBooking(siteId, dto.bookingCode);
   }
 }

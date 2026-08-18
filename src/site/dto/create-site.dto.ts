@@ -7,7 +7,11 @@ import {
   IsUrl,
   IsUUID,
   IsBoolean,
+  IsNumber,
+  Min,
+  Max,
 } from 'class-validator';
+import { IsSmallerThan } from './is-smaller-than.validator';
 
 export class CreateSiteDto {
   @ApiProperty()
@@ -56,4 +60,123 @@ export class CreateSiteDto {
   @IsArray()
   @IsString({ each: true })
   allowedDomains?: string[];
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Enable automatic conversation timeout',
+  })
+  @IsOptional()
+  @IsBoolean()
+  enableConversationTimeout?: boolean;
+
+  @ApiPropertyOptional({
+    example: 15,
+    description: 'Inactivity timeout in minutes before closing conversation',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(60)
+  inactivityTimeoutMinutes?: number;
+
+  @ApiPropertyOptional({
+    example: 5,
+    description: 'Warning time in minutes before timeout',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(30)
+  @IsSmallerThan('inactivityTimeoutMinutes', {
+    message:
+      'warningTimeMinutes must be strictly less than inactivityTimeoutMinutes',
+  })
+  warningTimeMinutes?: number;
+
+  @ApiPropertyOptional({
+    example: 'Are you still there?',
+    description: 'Message sent when warning time is reached',
+  })
+  @IsOptional()
+  @IsString()
+  inactivityWarningMessage?: string;
+
+  @ApiPropertyOptional({
+    example: 'Conversation closed due to inactivity.',
+    description: 'Message sent when conversation times out',
+  })
+  @IsOptional()
+  @IsString()
+  timeoutMessage?: string;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Reset inactivity timer on bot response',
+  })
+  @IsOptional()
+  @IsBoolean()
+  resetTimerOnBotResponse?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Pause inactivity timer for agent-assigned chats',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pauseTimerForAgentChats?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Send email notification on timeout',
+  })
+  @IsOptional()
+  @IsBoolean()
+  sendEmailNotificationOnTimeout?: boolean;
+
+  // ── Appearance Settings ──
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  primaryColor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  backgroundColor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  botAvatar?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  launcherIcon?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  defaultGreetingMessage?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatButtonPosition?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatWindowTitle?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatButtonText?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  showAvatar?: boolean;
 }

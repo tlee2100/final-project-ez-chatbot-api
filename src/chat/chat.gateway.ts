@@ -29,7 +29,8 @@ type JwtPayload = {
 export type SocketData = {
   user?: JwtUser;
   visitor?: {
-    conversationId: string;
+    conversationId?: string;
+    siteId?: string;
   };
 };
 
@@ -81,9 +82,14 @@ export class ChatGateway
 
       if (!token) {
         const conversationId = this.extractVisitorConversationId(client);
-        if (conversationId) {
+        const siteId = client.handshake.query.siteId as string;
+
+        if (conversationId || siteId) {
           const socketData = client.data as SocketData;
-          socketData.visitor = { conversationId };
+          socketData.visitor = {
+            conversationId: conversationId || undefined,
+            siteId,
+          };
           next();
           return;
         }
@@ -241,6 +247,49 @@ export class ChatGateway
     this.server
       .to(`conversation-${conversationId}`)
       .emit('conversationStatusChanged', { conversationId, status });
+  }
+
+  broadcastSiteSettingsUpdated(
+    conversationIds: string[],
+    settings: unknown,
+  ): void {
+    for (const id of conversationIds) {
+      this.server
+        .to(`conversation-${id}`)
+        .emit('siteSettingsUpdated', settings);
+    }
+  }
+
+  // ─── Booking Emit Helpers ────────────────────────────────────────────────
+
+  emitBookingSlots(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSlots', payload);
+  }
+
+  emitBookingSummary(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSummary', payload);
+  }
+
+  emitBookingSuccess(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSuccess', payload);
+  }
+
+  emitBookingCancellation(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingCancellation', payload);
+  }
+
+  emitBookingCancelled(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingCancelled', payload);
   }
 
   // ─── Auth / Query extractors ─────────────────────────────────────────────

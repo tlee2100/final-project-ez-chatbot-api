@@ -100,4 +100,8 @@ export class AuthService {
   async activateAccount(dto: ActivateAccountDto) {
     return this.userService.activateAccount(dto);
   }
+
+  async validateActivationToken(token: string) {
+    return this.userService.validateActivationToken(token);
+  }
 }

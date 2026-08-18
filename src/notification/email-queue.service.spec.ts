@@ -1,6 +1,7 @@
 import {
   EmailQueueService,
   DEFAULT_EMAIL_JOB_OPTIONS,
+  type PasswordChangedEmailJobData,
   type UserActivationEmailJobData,
 } from './email-queue.service';
 
@@ -78,6 +79,31 @@ describe('EmailQueueService', () => {
     const key2 = service.getEncryptionKey();
 
     expect(key1).not.toEqual(key2);
+  });
+
+  it('enqueues password changed email with default retry/cleanup options', async () => {
+    const queue = {
+      add: jest.fn().mockResolvedValue({ id: 'job-password-changed-1' }),
+    };
+    const service = new EmailQueueService(queue as never);
+    const emailData: PasswordChangedEmailJobData = {
+      to: 'user@example.com',
+      userName: 'User',
+      changedAt: '2026-08-07T10:00:00.000Z',
+    };
+
+    await service.enqueuePasswordChangedEmail(emailData);
+
+    expect(queue.add).toHaveBeenCalledWith(
+      'send-password-changed',
+      emailData,
+      expect.objectContaining({
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 3000 },
+        removeOnComplete: 1000,
+        removeOnFail: 5000,
+      }),
+    );
   });
 
   it('fails decryption when auth tag or encrypted payload is tampered', () => {

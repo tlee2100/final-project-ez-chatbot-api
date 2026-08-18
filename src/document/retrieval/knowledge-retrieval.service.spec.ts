@@ -1,9 +1,13 @@
 import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { CHUNK_SEARCH_REPOSITORY } from '../constants/document.tokens';
 import { EmbeddingService } from '../embedding/embedding.service';
 import { KnowledgeRetrievalService } from './knowledge-retrieval.service';
 import type { KnowledgeSearchResult } from './types/knowledge-search.type';
+import { Site } from '../../site/entities/site.entity';
+
+jest.mock('@automapper/classes', () => ({ AutoMap: () => () => undefined }));
 
 describe('KnowledgeRetrievalService', () => {
   const siteId = '1b0d9f14-2cb6-4ca6-9eb1-54c29a1d03d6';
@@ -31,6 +35,16 @@ describe('KnowledgeRetrievalService', () => {
           provide: CHUNK_SEARCH_REPOSITORY,
           useValue: { searchSimilarChunks },
         },
+        {
+          provide: getRepositoryToken(Site),
+          useValue: {
+            findOne: jest.fn().mockResolvedValue({
+              id: siteId,
+              kbRetrievalTopK: 4,
+              kbSimilarityThreshold: 0.5,
+            }),
+          },
+        },
       ],
     }).compile();
 
@@ -52,19 +66,19 @@ describe('KnowledgeRetrievalService', () => {
       siteId,
       queryVector: vector,
       embeddingModel: model,
-      topK: 5,
+      topK: 4,
     });
   });
 
-  it('passes a valid custom topK to the repository', async () => {
+  it('ignores caller topK and enforces the site setting', async () => {
     await service.searchRelevantChunks({ siteId, query: 'shipping', topK: 12 });
 
     expect(searchSimilarChunks).toHaveBeenCalledWith(
-      expect.objectContaining({ topK: 12 }),
+      expect.objectContaining({ topK: 4 }),
     );
   });
 
-  it('uses a custom similarity threshold without changing ranking', async () => {
+  it('ignores caller similarity threshold and enforces the site setting', async () => {
     const candidates = [
       result('first', 0.95),
       result('second', 0.8),
@@ -78,10 +92,10 @@ describe('KnowledgeRetrievalService', () => {
         query: 'refund',
         minSimilarity: 0.8,
       }),
-    ).resolves.toEqual([candidates[0], candidates[1]]);
+    ).resolves.toEqual(candidates);
   });
 
-  it('accepts zero as a custom similarity threshold', async () => {
+  it('does not let callers lower the site similarity threshold', async () => {
     const candidates = [result('positive', 0.8), result('zero', 0)];
     searchSimilarChunks.mockResolvedValue(candidates);
 
@@ -91,7 +105,7 @@ describe('KnowledgeRetrievalService', () => {
         query: 'broad search',
         minSimilarity: 0,
       }),
-    ).resolves.toEqual(candidates);
+    ).resolves.toEqual([candidates[0]]);
   });
 
   it('does not query the repository when query embedding fails', async () => {
@@ -120,13 +134,13 @@ describe('KnowledgeRetrievalService', () => {
       expect.objectContaining({
         event: 'knowledge_retrieval_completed',
         siteId,
-        topK: 5,
-        minSimilarity: 0.7,
+        topK: 4,
+        minSimilarity: 0.5,
         embeddingDurationMs: expect.any(Number) as number,
         vectorSearchDurationMs: expect.any(Number) as number,
         totalDurationMs: expect.any(Number) as number,
         candidateCount: 2,
-        acceptedCount: 1,
+        acceptedCount: 2,
       }),
     );
 

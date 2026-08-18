@@ -19,13 +19,22 @@ export interface McpValidatedContext {
   expiresAt?: number;
 }
 
+/** A resource (staff member) that is available in a time slot */
+export interface AvailableResource {
+  resourceId: string;
+  resourceName: string;
+}
+
 /** Mock available slot shape returned before Phase 1C booking module is live. */
 export interface AvailableSlot {
   slotId: string;
   date: string;
   timeSlot: string;
-  resourceId: string;
-  resourceName: string;
+  /** Has a value when the customer has selected a specific staff member */
+  resourceId?: string;
+  resourceName?: string;
+  /** Has a value when the customer selects "No Preference" — an array of all available staff */
+  availableResources?: AvailableResource[];
   available: boolean;
 }
 
@@ -34,10 +43,12 @@ export interface BookingResult {
   bookingCode: string;
   status: 'confirmed' | 'cancelled';
   customerName: string;
+  phone: string;
   date: string;
   timeSlot: string;
   resourceName: string;
   serviceId: string;
+  serviceName: string;
   createdAt: string;
 }
 
@@ -47,7 +58,25 @@ export interface CreateBookingPayload {
   customerEmail?: string;
   phone: string;
   serviceId: string;
-  resourceId?: string;
+  resourceId: string;
   date: string;
   timeSlot: string;
+}
+
+export interface SiteConfigServiceItem {
+  id: string;
+  name: string;
+}
+
+export interface SiteConfigResourceItem {
+  id: string;
+  name: string;
+}
+
+export interface SiteConfigBookingHours {
+  timezone?: string;
+  availableDays?: number[];
+  startTime?: string;
+  endTime?: string;
+  slotDuration?: number;
 }

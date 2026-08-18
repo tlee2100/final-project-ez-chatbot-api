@@ -14,8 +14,8 @@ describe('validateSearchRelevantChunksInput', () => {
     ).toEqual({
       siteId,
       query: 'return policy',
-      topK: 5,
-      minSimilarity: 0.7,
+      topK: 4,
+      minSimilarity: 0.5,
     });
   });
 

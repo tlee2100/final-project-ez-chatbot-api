@@ -25,6 +25,8 @@ describe('ChatService saveMessage', () => {
       server: { to: jest.fn().mockReturnThis(), emit: jest.fn() },
     };
     const graphService = {};
+    const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
+    const aiService = { invoke: jest.fn() };
 
     const service = new ChatService(
       siteRepository as never,
@@ -34,6 +36,8 @@ describe('ChatService saveMessage', () => {
       notificationService as never,
       chatGateway as never,
       graphService as never,
+      emailQueueService as never,
+      aiService as never,
     );
 
     return {

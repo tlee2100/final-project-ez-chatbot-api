@@ -24,6 +24,7 @@ import {
   Conversation,
   ConversationStatus,
   HandlingStatus,
+  ClosedReason,
 } from './entities/conversation.entity';
 import {
   ChatMessage,
@@ -35,10 +36,13 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { JwtUser } from '../auth/types/jwt-user.type';
 import { NotificationService } from '../notification/notification.service';
 import { NotificationType } from '../notification/enums/notification-type.enum';
+import { EmailQueueService } from '../notification/email-queue.service';
 import { ChatGateway, SocketData, ChatMessagePayload } from './chat.gateway';
 import { GraphService } from './graph.service';
 import { CreateConversationResponseDto } from './dto/create-conversation-response.dto';
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
+import { AiService } from './ai.service';
+import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -57,8 +61,6 @@ const MAX_MESSAGE_LENGTH = 1000;
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
-  private inactiveConversationTimer: NodeJS.Timeout;
-  private readonly inactiveConversationMs = 15 * 60 * 1000;
   private readonly conversationsClosedListeners = new Set<
     (ids: string[]) => void
   >();
@@ -82,19 +84,22 @@ export class ChatService {
     private readonly chatGateway: ChatGateway,
     @Inject(forwardRef(() => GraphService))
     private readonly graphService: GraphService,
-  ) {}
+    private readonly emailQueueService: EmailQueueService,
+    private readonly aiService: AiService,
+  ) {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+  }
 
   onModuleInit() {
-    this.inactiveConversationTimer = setInterval(() => {
-      void this.closeInactiveConversations();
-    }, 60 * 1000);
-    this.inactiveConversationTimer.unref?.();
+    // Moved to chat-timeout.service.ts
   }
 
   onModuleDestroy() {
-    if (this.inactiveConversationTimer) {
-      clearInterval(this.inactiveConversationTimer);
-    }
+    // Moved to chat-timeout.service.ts
   }
 
   onConversationsClosed(listener: (ids: string[]) => void) {
@@ -150,25 +155,39 @@ export class ChatService {
     }
 
     if (visitor) {
-      this.logger.log(
-        `Visitor connected for conversation ${visitor.conversationId}`,
-      );
-      void client.join(`conversation-${visitor.conversationId}`);
-      this.trackConversationPresence(client, visitor.conversationId);
+      if (visitor.conversationId) {
+        this.logger.log(
+          `Visitor connected for conversation ${visitor.conversationId}`,
+        );
+        void client.join(`conversation-${visitor.conversationId}`);
+        this.trackConversationPresence(client, visitor.conversationId);
 
-      const receiverType = SenderType.VISITOR;
-      await this.markConversationDelivered(
-        visitor.conversationId,
-        receiverType,
-      );
-      this.chatGateway.server
-        .to(`conversation-${visitor.conversationId}`)
-        .emit('conversation-delivered', {
-          conversationId: visitor.conversationId,
+        const receiverType = SenderType.VISITOR;
+        await this.markConversationDelivered(
+          visitor.conversationId,
           receiverType,
-        });
+        );
+        this.chatGateway.server
+          .to(`conversation-${visitor.conversationId}`)
+          .emit('conversation-delivered', {
+            conversationId: visitor.conversationId,
+            receiverType,
+          });
 
-      client.emit('connected', { message: `Connected as visitor` });
+        client.emit('connected', { message: `Connected as visitor` });
+      }
+
+      if (visitor.siteId) {
+        this.logger.log(
+          `Visitor connected to site ${visitor.siteId} for realtime settings`,
+        );
+        void client.join(`site-${visitor.siteId}`);
+        if (!visitor.conversationId) {
+          client.emit('connected', {
+            message: `Connected to site ${visitor.siteId}`,
+          });
+        }
+      }
       return;
     }
 
@@ -389,7 +408,29 @@ export class ChatService {
       if (payload.senderType === SenderType.VISITOR) {
         // Run in background so we don't block the WebSocket response
         this.graphService
-          .handleVisitorMessage(payload.conversationId, conversation.siteId)
+          .handleVisitorMessage(
+            payload.conversationId,
+            conversation.siteId,
+            undefined,
+            async (text: string) => {
+              const fullSite = await this.siteRepository.findOne({
+                where: { id: conversation.siteId },
+                relations: { agents: true },
+              });
+              if (fullSite) {
+                const userIds = [
+                  fullSite.ownerId,
+                  ...fullSite.agents.map((a) => a.id),
+                ];
+                await this.notificationService.emitSentimentAlert(
+                  userIds,
+                  fullSite.id,
+                  payload.conversationId,
+                  text,
+                );
+              }
+            },
+          )
           .catch((err: unknown) =>
             this.logger.error(
               `AI stream error: ${err instanceof Error ? err.message : String(err)}`,
@@ -468,6 +509,19 @@ export class ChatService {
           conversation,
         );
 
+        if (site.defaultGreetingMessage) {
+          const greetingMessage = transactionalEntityManager.create(
+            ChatMessage,
+            {
+              conversationId: savedConversation.id,
+              content: site.defaultGreetingMessage,
+              senderType: SenderType.AI,
+              status: MessageStatus.DELIVERED,
+            },
+          );
+          await transactionalEntityManager.save(ChatMessage, greetingMessage);
+        }
+
         this.chatGateway.notifyAgentsOfNewConversation(savedConversation);
 
         return {
@@ -496,7 +550,7 @@ export class ChatService {
           recipientId: userId,
           type: NotificationType.CONVERSATION_WAITING,
           title: 'New Conversation Started',
-          message: `${dto.visitorName} has started a new conversation. The AI is currently handling it — you may take over anytime.`,
+          message: `${dto.visitorName && dto.visitorName !== '[NONE]' ? dto.visitorName : 'A visitor'} has started a new conversation. The AI is currently handling it — you may take over anytime.`,
           siteId: site.id,
           conversationId: result.conversationId,
         });
@@ -508,6 +562,69 @@ export class ChatService {
     }
 
     return result;
+  }
+
+  // ─── Admin: Create Test Conversation ──────────────────────────────────────
+
+  /**
+   * Creates a temporary "test" conversation for an authenticated admin/owner.
+   *
+   * Security checks (in order):
+   * 1. Site must exist.
+   * 2. Requesting user must be the site owner OR a SUPER_ADMIN.
+   *    (Agents are not permitted — they should use the live inbox.)
+   *
+   * The conversation is tagged with a synthetic visitor identity so the AI
+   * pipeline works normally, and it does NOT fire agent notifications (unlike
+   * the public createConversation) to avoid polluting the inbox.
+   */
+  async createAdminTestConversation(
+    siteId: string,
+    user: JwtUser,
+  ): Promise<CreateConversationResponseDto> {
+    const site = await this.siteRepository.findOne({
+      where: { id: siteId },
+      select: { id: true, ownerId: true, name: true },
+    });
+
+    if (!site) {
+      throw new NotFoundException(`Site ${siteId} not found`);
+    }
+
+    // Only the site owner or a super-admin may use the test endpoint.
+    const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
+    const isOwner = site.ownerId === user.id;
+    if (!isSuperAdmin && !isOwner) {
+      throw new ForbiddenException(
+        'Only the site owner or a super-admin may create a test conversation for this site',
+      );
+    }
+
+    const conversation = this.conversationRepository.create({
+      siteId,
+      visitorName: `Admin Test — ${user.email}`,
+      visitorEmail: user.email,
+      status: ConversationStatus.OPEN,
+      handlingStatus: HandlingStatus.AI_HANDLING,
+      lastActivityAt: new Date(),
+    });
+
+    const saved = await this.conversationRepository.save(conversation);
+
+    this.logger.log(
+      `[AdminTest] Test conversation ${saved.id} created for site ${siteId} by admin ${user.email}`,
+    );
+
+    // Intentionally NO agent notifications for test conversations.
+
+    return {
+      conversationId: saved.id,
+      siteId: saved.siteId,
+      visitorName: saved.visitorName,
+      visitorEmail: saved.visitorEmail,
+      status: saved.status,
+      handlingStatus: saved.handlingStatus,
+    };
   }
 
   // ─── Escalate to Agent ─────────────────────────────────────────────────────
@@ -552,9 +669,9 @@ export class ChatService {
         try {
           await this.notificationService.create({
             recipientId: userId,
-            type: NotificationType.CONVERSATION_WAITING,
+            type: NotificationType.AGENT_HANDOFF_REQUEST,
             title: 'Agent Requested',
-            message: `${conversation.visitorName} has requested to speak with a human agent.`,
+            message: `${conversation.visitorName && conversation.visitorName !== '[NONE]' ? conversation.visitorName : 'A visitor'} has requested to speak with a human agent.`,
             siteId: conversation.siteId,
             conversationId: conversation.id,
           });
@@ -767,6 +884,12 @@ export class ChatService {
         siteId: [FilterOperator.EQ],
         status: [FilterOperator.EQ, FilterSuffix.NOT],
         handlingStatus: [FilterOperator.EQ],
+        agentId: [FilterOperator.EQ, FilterOperator.IN, FilterOperator.NULL],
+        lastActivityAt: [
+          FilterOperator.GTE,
+          FilterOperator.LTE,
+          FilterOperator.BTW,
+        ],
       },
     });
 
@@ -940,6 +1063,7 @@ export class ChatService {
   async setConversationStatus(
     id: string,
     status: ConversationStatus,
+    reason?: ClosedReason,
   ): Promise<Conversation> {
     const conversation = await this.conversationRepository.findOne({
       where: { id },
@@ -954,6 +1078,9 @@ export class ChatService {
     }
 
     conversation.status = status;
+    if (status === ConversationStatus.CLOSED && reason) {
+      conversation.closedReason = reason;
+    }
     conversation.lastActivityAt = new Date();
 
     return this.conversationRepository.save(conversation);
@@ -963,20 +1090,25 @@ export class ChatService {
     id: string,
     dto: UpdateConversationStatusDto,
   ): Promise<Conversation> {
-    return this.updateStatusAndNotify(id, dto.status);
+    return this.updateStatusAndNotify(id, dto.status, ClosedReason.AGENT);
   }
 
   async updatePublicConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
   ): Promise<Conversation> {
-    return this.updateStatusAndNotify(id, dto.status);
+    return this.updateStatusAndNotify(id, dto.status, ClosedReason.VISITOR);
   }
 
   async getPublicConversationStatus(id: string) {
     const conversation = await this.conversationRepository.findOne({
       where: { id },
-      select: { id: true, status: true, handlingStatus: true },
+      select: {
+        id: true,
+        status: true,
+        handlingStatus: true,
+        closedReason: true,
+      },
     });
 
     if (!conversation) {
@@ -987,49 +1119,25 @@ export class ChatService {
       conversationId: conversation.id,
       status: conversation.status,
       handlingStatus: conversation.handlingStatus,
+      closedReason: conversation.closedReason,
     };
   }
 
   private async updateStatusAndNotify(
     id: string,
     status: ConversationStatus,
+    reason?: ClosedReason,
   ): Promise<Conversation> {
-    const conversation = await this.setConversationStatus(id, status);
+    if (status === ConversationStatus.CLOSED) {
+      const closedConv = await this.closeConversation(id, reason);
+      this.chatGateway.emitConversationStatusChanged(id, closedConv.status);
+      return closedConv;
+    }
+
+    const conversation = await this.setConversationStatus(id, status, reason);
     this.chatGateway.emitConversationStatusChanged(id, conversation.status);
 
-    if (conversation.status === ConversationStatus.CLOSED) {
-      this.chatGateway.notifyConversationClosed(id, conversation.siteId);
-    }
-
     return conversation;
-  }
-
-  async closeInactiveConversations(): Promise<number> {
-    const conversations = await this.conversationRepository.find({
-      where: {
-        status: ConversationStatus.OPEN,
-        lastActivityAt: LessThan(
-          new Date(Date.now() - this.inactiveConversationMs),
-        ),
-      },
-      select: { id: true, siteId: true },
-    });
-    const conversationIds = conversations.map((c) => c.id);
-
-    if (conversationIds.length === 0) {
-      return 0;
-    }
-
-    const result = await this.conversationRepository.update(
-      { id: In(conversationIds) },
-      { status: ConversationStatus.CLOSED },
-    );
-
-    for (const listener of this.conversationsClosedListeners) {
-      listener(conversationIds);
-    }
-
-    return result.affected ?? 0;
   }
 
   // ─── Messages ─────────────────────────────────────────────────────────────
@@ -1092,6 +1200,8 @@ export class ChatService {
       senderType,
       agentId: agentId ?? null,
     });
+
+    console.log(`Message::: ${JSON.stringify(message)}`);
     const savedMessage = await this.chatMessageRepository.save(message);
 
     if (agentId) {
@@ -1157,10 +1267,20 @@ export class ChatService {
 
   // ─── Close / Delete ────────────────────────────────────────────────────────
 
-  async closeConversation(id: string): Promise<Conversation> {
-    const conversation = await this.getConversationById(id);
+  async closeConversation(
+    id: string,
+    reason: ClosedReason = ClosedReason.VISITOR,
+  ): Promise<Conversation> {
+    const conversation = await this.conversationRepository.findOne({
+      where: { id },
+      relations: { site: { owner: true } },
+    });
+    if (!conversation) {
+      throw new NotFoundException(`Conversation ${id} not found`);
+    }
     await this.conversationRepository.update(id, {
       status: ConversationStatus.CLOSED,
+      closedReason: reason,
     });
 
     this.chatGateway.notifyConversationClosed(id, conversation.siteId);
@@ -1180,6 +1300,66 @@ export class ChatService {
           `Failed to notify agent ${conversation.agentId}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+
+    if (conversation.site && conversation.site.owner) {
+      const messageCount = await this.chatMessageRepository.count({
+        where: { conversationId: conversation.id },
+      });
+
+      let finalSummary = conversation.summary;
+
+      if (!finalSummary && messageCount > 0) {
+        const messages = await this.chatMessageRepository.find({
+          where: { conversationId: conversation.id },
+          order: { createdAt: 'ASC' },
+        });
+
+        const messagesToSummarize = messages
+          .map((m) => ({
+            role:
+              m.senderType === SenderType.VISITOR
+                ? 'user'
+                : m.senderType === SenderType.AI
+                  ? 'assistant'
+                  : 'system',
+            content: m.content || '',
+          }))
+          .filter((m) => m.role !== 'system');
+
+        if (messagesToSummarize.length > 0) {
+          const summaryPrompt = `Summarise the following conversation concisely:\n${JSON.stringify(messagesToSummarize)}`;
+          try {
+            const aiResponse = await this.aiService.invoke({
+              messages: [{ role: 'user', content: summaryPrompt }],
+            });
+            finalSummary = aiResponse.content;
+
+            await this.conversationRepository.update(conversation.id, {
+              summary: finalSummary,
+              summarizedMessageCount: messageCount,
+            });
+          } catch (err) {
+            this.logger.error(
+              'Failed to generate final summary: ' +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+        }
+      }
+
+      void this.emailQueueService.enqueueConversationSummaryEmail({
+        to: conversation.site.owner.email,
+        adminName: conversation.site.owner.name || 'Admin',
+        siteName: conversation.site.name,
+        conversationId: conversation.id,
+        visitorName: conversation.visitorName || undefined,
+        visitorEmail: conversation.visitorEmail || undefined,
+        messageCount,
+        startedAt: conversation.createdAt.toISOString(),
+        closedAt: new Date().toISOString(),
+        summaryText: finalSummary || 'No summary available.',
+      });
     }
 
     return this.getConversationById(id);
@@ -1321,5 +1501,25 @@ export class ChatService {
       },
       links: { first: '', previous: '', current: '', next: '', last: '' },
     };
+  }
+
+  // ─── Attachments ─────────────────────────────────────────────────────────
+
+  async uploadAttachment(file: Express.Multer.File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { folder: 'chat_attachments' },
+        (error, result: UploadApiResponse | undefined) => {
+          if (error) {
+            reject(new Error(error.message || 'Cloudinary upload failed'));
+          } else if (result) {
+            resolve(result.secure_url);
+          } else {
+            reject(new Error('Cloudinary upload failed'));
+          }
+        },
+      );
+      uploadStream.end(file.buffer);
+    });
   }
 }

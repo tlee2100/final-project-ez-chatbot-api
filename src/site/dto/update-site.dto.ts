@@ -1,11 +1,17 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { AutoMap } from '@automapper/classes';
 import {
   IsString,
   IsUrl,
   IsOptional,
   IsBoolean,
   IsArray,
+  IsInt,
+  IsNumber,
+  Min,
+  Max,
 } from 'class-validator';
+import { IsSmallerThan } from './is-smaller-than.validator';
 
 export class UpdateSiteDto {
   @ApiPropertyOptional({ example: 'My Site Updated' })
@@ -26,14 +32,191 @@ export class UpdateSiteDto {
   @IsBoolean()
   isAiActive?: boolean;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
+    description: 'Allowed domains for the chat widget',
     type: [String],
-    description:
-      'Allowed domains for the chat widget (e.g., example.com, *.example.com)',
-    example: ['example.com', '*.example.com'],
+    required: false,
   })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   allowedDomains?: string[];
+
+  @AutoMap()
+  @ApiProperty({ description: 'Max tokens per AI response', required: false })
+  @IsOptional()
+  @IsInt()
+  @Min(100)
+  @Max(4000)
+  maxTokensPerResponse?: number;
+
+  @AutoMap(() => String)
+  @ApiProperty({
+    description: 'Custom system prompt override for the site',
+    required: false,
+    nullable: true,
+  })
+  @IsOptional()
+  systemPromptOverride?: string | null;
+
+  @AutoMap()
+  @ApiProperty({
+    description: 'Whether to use current page content',
+    required: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  useCurrentPageContent?: boolean;
+
+  @AutoMap()
+  @ApiProperty({
+    description: 'Whether to summarize memory',
+    required: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  memorySummarization?: boolean;
+
+  @AutoMap()
+  @ApiProperty({
+    description: 'Whether to perform sentiment detection',
+    required: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  sentimentDetection?: boolean;
+
+  @AutoMap()
+  @ApiPropertyOptional({
+    example: 50,
+    description: 'Max messages per chat session',
+  })
+  @IsOptional()
+  maxMessagesPerSession?: number;
+
+  @ApiPropertyOptional({
+    example: 10,
+    description: 'Max chat sessions per IP in 24h',
+  })
+  @IsOptional()
+  maxSessionsPerIp?: number;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Enable automatic conversation timeout',
+  })
+  @IsOptional()
+  @IsBoolean()
+  enableConversationTimeout?: boolean;
+
+  @ApiPropertyOptional({
+    example: 15,
+    description: 'Inactivity timeout in minutes before closing conversation',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(60)
+  inactivityTimeoutMinutes?: number;
+
+  @ApiPropertyOptional({
+    example: 5,
+    description: 'Warning time in minutes before timeout',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(30)
+  @IsSmallerThan('inactivityTimeoutMinutes', {
+    message:
+      'warningTimeMinutes must be strictly less than inactivityTimeoutMinutes',
+  })
+  warningTimeMinutes?: number;
+
+  @ApiPropertyOptional({
+    example: 'Are you still there?',
+    description: 'Message sent when warning time is reached',
+  })
+  @IsOptional()
+  @IsString()
+  inactivityWarningMessage?: string;
+
+  @ApiPropertyOptional({
+    example: 'Conversation closed due to inactivity.',
+    description: 'Message sent when conversation times out',
+  })
+  @IsOptional()
+  @IsString()
+  timeoutMessage?: string;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Reset inactivity timer on bot response',
+  })
+  @IsOptional()
+  @IsBoolean()
+  resetTimerOnBotResponse?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Pause inactivity timer for agent-assigned chats',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pauseTimerForAgentChats?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Send email notification on timeout',
+  })
+  @IsOptional()
+  @IsBoolean()
+  sendEmailNotificationOnTimeout?: boolean;
+
+  // ── Appearance Settings ──
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  primaryColor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  backgroundColor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  botAvatar?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  launcherIcon?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  defaultGreetingMessage?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatButtonPosition?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatWindowTitle?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  chatButtonText?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  showAvatar?: boolean;
 }
