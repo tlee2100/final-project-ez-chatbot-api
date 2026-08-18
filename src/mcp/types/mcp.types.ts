@@ -62,6 +62,7 @@ export interface CreateBookingPayload {
   resourceId: string;
   date: string;
   timeSlot: string;
+  sessionId?: string;
 }
 
 export interface SiteConfigServiceItem {

@@ -359,6 +359,22 @@ export class BookingService {
 
   async holdSlot(siteId: string, dto: HoldSlotDto) {
     const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+
+    // If slot is already held, check if it belongs to the same session
+    const existing = await this.redis.get(key);
+    if (existing) {
+      try {
+        const parsed = JSON.parse(existing) as { sessionId?: string };
+        if (parsed.sessionId === dto.sessionId) {
+          await this.redis.expire(key, 600);
+          return { success: true };
+        }
+      } catch {
+        // invalid json, proceed to overwrite/set
+      }
+      throw new ConflictException('Slot is currently being held');
+    }
+
     const value = JSON.stringify({
       sessionId: dto.sessionId,
       createdAt: new Date().toISOString(),
@@ -409,6 +425,22 @@ export class BookingService {
     });
 
     return { success: true };
+  }
+
+  async getHold(
+    siteId: string,
+    resourceId: string,
+    startAt: string,
+    endAt: string,
+  ): Promise<{ sessionId: string } | null> {
+    const holdKey = `booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}`;
+    const holdDataStr = await this.redis.get(holdKey);
+    if (!holdDataStr) return null;
+    try {
+      return JSON.parse(holdDataStr) as { sessionId: string };
+    } catch {
+      return null;
+    }
   }
 
   async createBooking(dto: CreateBookingDto): Promise<Booking> {

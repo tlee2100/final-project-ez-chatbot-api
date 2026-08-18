@@ -397,6 +397,79 @@ export class McpService {
   }
 
   /**
+   * MCP-009 / holdSlot backend:
+   * Holds a slot.
+   */
+  async holdSlot(
+    siteId: string,
+    payload: {
+      resourceId: string;
+      serviceId?: string;
+      date: string;
+      timeSlot: string;
+    },
+  ): Promise<{ sessionId: string }> {
+    this.logger.log(
+      `[MCP] holdSlot: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}`,
+    );
+
+    const config = await this.bookingService.getSiteBookingConfig(siteId);
+    const timezone = config.bookingTimezone || 'UTC';
+    const duration = config.bookingSlotDuration || 30;
+
+    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
+    const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
+    const utcEndAt = addMinutes(utcStartAt, duration);
+
+    const sessionId = randomUUID();
+
+    await this.bookingService.holdSlot(siteId, {
+      resourceId: payload.resourceId,
+      serviceId: payload.serviceId,
+      startAt: utcStartAt.toISOString(),
+      endAt: utcEndAt.toISOString(),
+      sessionId,
+    });
+
+    return { sessionId };
+  }
+
+  /**
+   * MCP-010 / releaseHold backend:
+   * Releases a hold by reconstructing the holdKey and deleting it.
+   */
+  async releaseHold(
+    siteId: string,
+    payload: {
+      resourceId: string;
+      date: string;
+      timeSlot: string;
+    },
+  ): Promise<{ success: boolean }> {
+    this.logger.log(
+      `[MCP] releaseHold: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}`,
+    );
+
+    const config = await this.bookingService.getSiteBookingConfig(siteId);
+    const timezone = config.bookingTimezone || 'UTC';
+    const duration = config.bookingSlotDuration || 30;
+
+    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
+    const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
+    const utcEndAt = addMinutes(utcStartAt, duration);
+
+    // Call internal method to release
+    await this.bookingService.releaseHold(siteId, {
+      resourceId: payload.resourceId,
+      startAt: utcStartAt.toISOString(),
+      endAt: utcEndAt.toISOString(),
+      sessionId: '', // not used in releaseHold but required by HoldSlotDto
+    });
+
+    return { success: true };
+  }
+
+  /**
    * MCP-007 / createBooking backend:
    * Creates a booking and returns a booking code.
    *
@@ -445,16 +518,30 @@ export class McpService {
     const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
     const utcEndAt = addMinutes(utcStartAt, duration);
 
-    const sessionId = randomUUID();
+    let sessionId = payload.sessionId;
 
-    // Must hold the slot first since createBooking strictly validates it
-    await this.bookingService.holdSlot(siteId, {
-      resourceId: payload.resourceId,
-      serviceId: payload.serviceId,
-      startAt: utcStartAt.toISOString(),
-      endAt: utcEndAt.toISOString(),
-      sessionId,
-    });
+    if (!sessionId) {
+      const activeHold = await this.bookingService.getHold(
+        siteId,
+        payload.resourceId,
+        utcStartAt.toISOString(),
+        utcEndAt.toISOString(),
+      );
+
+      if (activeHold?.sessionId) {
+        sessionId = activeHold.sessionId;
+      } else {
+        sessionId = randomUUID();
+        // Only hold the slot if sessionId was not provided and slot is not already held
+        await this.bookingService.holdSlot(siteId, {
+          resourceId: payload.resourceId,
+          serviceId: payload.serviceId,
+          startAt: utcStartAt.toISOString(),
+          endAt: utcEndAt.toISOString(),
+          sessionId,
+        });
+      }
+    }
 
     const booking = await this.bookingService.createBooking({
       siteId,

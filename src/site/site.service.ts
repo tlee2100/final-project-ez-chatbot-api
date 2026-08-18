@@ -29,7 +29,10 @@ import type { JwtUser } from 'src/auth/types/jwt-user.type';
 import { SITE_PAGINATION_CONFIG } from './config/site-pagination.config';
 import { ChatGateway } from '../chat/chat.gateway';
 import { ChatTimeoutService } from '../chat/chat-timeout.service';
-
+import {
+  Conversation,
+  ConversationStatus,
+} from '../chat/entities/conversation.entity';
 type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
   data: SiteDto[];
 };
@@ -158,13 +161,18 @@ export class SiteService {
     const activeChatsMap: Record<string, number> = {};
 
     if (siteIds.length > 0) {
-      const activeChatsRows = await this.siteRepository.manager.query<
-        Array<{ siteId: string; count: string }>
-      >(
-        `SELECT "siteId", COUNT(id) as count FROM conversations WHERE "siteId" = ANY($1) AND status != 'CLOSED' GROUP BY "siteId"`,
-        [siteIds],
-      );
-      activeChatsRows.forEach((row: { siteId: string; count: string }) => {
+      const activeChatsRows = await this.siteRepository.manager
+        .createQueryBuilder(Conversation, 'conversation')
+        .select('conversation.siteId', 'siteId')
+        .addSelect('COUNT(conversation.id)', 'count')
+        .where('conversation.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('conversation.status != :closedStatus', {
+          closedStatus: ConversationStatus.CLOSED,
+        })
+        .groupBy('conversation.siteId')
+        .getRawMany<{ siteId: string; count: string }>();
+
+      activeChatsRows.forEach((row) => {
         activeChatsMap[row.siteId] = parseInt(row.count, 10);
       });
     }
@@ -208,13 +216,14 @@ export class SiteService {
     const site = await this.findOneEntity(id);
     const dto = this.mapper.map(site, Site, SiteDto);
 
-    const activeChatsRows = await this.siteRepository.manager.query<
-      Array<{ count: string }>
-    >(
-      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
-      [id],
-    );
-    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    const activeChatsCount = await this.siteRepository.manager
+      .createQueryBuilder(Conversation, 'conversation')
+      .where('conversation.siteId = :siteId', { siteId: id })
+      .andWhere('conversation.status != :closedStatus', {
+        closedStatus: ConversationStatus.CLOSED,
+      })
+      .getCount();
+    dto.activeChats = activeChatsCount;
     dto.updatedAt = new Date().toISOString();
 
     return dto;
@@ -225,13 +234,14 @@ export class SiteService {
     const site = await this.assertSiteAccess(id, user);
     const dto = this.mapper.map(site, Site, SiteDto);
 
-    const activeChatsRows = await this.siteRepository.manager.query<
-      Array<{ count: string }>
-    >(
-      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
-      [id],
-    );
-    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    const activeChatsCount = await this.siteRepository.manager
+      .createQueryBuilder(Conversation, 'conversation')
+      .where('conversation.siteId = :siteId', { siteId: id })
+      .andWhere('conversation.status != :closedStatus', {
+        closedStatus: ConversationStatus.CLOSED,
+      })
+      .getCount();
+    dto.activeChats = activeChatsCount;
     dto.updatedAt = new Date().toISOString();
 
     return dto;
@@ -329,57 +339,7 @@ export class SiteService {
     await this.assertSiteAccess(id, user);
 
     try {
-      await this.siteRepository.manager.transaction(async (manager) => {
-        // 1. Delete notifications related to the site directly
-        await manager.query(`DELETE FROM "notifications" WHERE "siteId" = $1`, [
-          id,
-        ]);
-
-        // 2. Delete conversations, their messages, and their notifications
-        const conversations: Array<{ id: string }> = await manager.query(
-          `SELECT id FROM "conversations" WHERE "siteId" = $1`,
-          [id],
-        );
-        if (conversations.length > 0) {
-          const conversationIds = conversations.map((c) => c.id);
-          await manager.query(
-            `DELETE FROM "notifications" WHERE "conversationId" = ANY($1)`,
-            [conversationIds],
-          );
-          await manager.query(
-            `DELETE FROM "chat_messages" WHERE "conversationId" = ANY($1)`,
-            [conversationIds],
-          );
-          await manager.query(
-            `DELETE FROM "conversations" WHERE "siteId" = $1`,
-            [id],
-          );
-        }
-
-        // 3. Delete documents and their chunks
-        const documents: Array<{ id: string }> = await manager.query(
-          `SELECT id FROM "documents" WHERE "siteId" = $1`,
-          [id],
-        );
-        if (documents.length > 0) {
-          const documentIds = documents.map((d) => d.id);
-          await manager.query(
-            `DELETE FROM "document_chunks" WHERE "documentId" = ANY($1)`,
-            [documentIds],
-          );
-          await manager.query(`DELETE FROM "documents" WHERE "siteId" = $1`, [
-            id,
-          ]);
-        }
-
-        // 4. Clean up many-to-many agent assignments
-        await manager.query(`DELETE FROM "site_agents" WHERE "siteId" = $1`, [
-          id,
-        ]);
-
-        // 5. Delete the site
-        await manager.delete(Site, id);
-      });
+      await this.siteRepository.delete(id);
     } catch (error) {
       const err = error as { code?: string };
       if (err?.code === '23503') {

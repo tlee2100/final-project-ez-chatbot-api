@@ -40,7 +40,7 @@ export class Conversation {
   @Column({ type: 'uuid' })
   siteId: string;
 
-  @ManyToOne(() => Site)
+  @ManyToOne(() => Site, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'siteId' })
   site: Site;
 

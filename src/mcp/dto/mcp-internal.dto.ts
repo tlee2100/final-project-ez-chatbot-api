@@ -56,6 +56,11 @@ export class McpCreateBookingDto {
   @IsString()
   @IsNotEmpty()
   timeSlot: string;
+
+  @ApiProperty({ example: 'uuid-session-id', required: false })
+  @IsString()
+  @IsOptional()
+  sessionId?: string;
 }
 
 /** DTO for POST /api/internal/mcp/booking/cancel */
@@ -64,4 +69,45 @@ export class McpCancelBookingDto {
   @IsString()
   @IsNotEmpty()
   bookingCode: string;
+}
+
+/** DTO for POST /api/internal/mcp/booking/hold */
+export class McpHoldSlotDto {
+  @ApiProperty({ example: 'uuid-of-service' })
+  @IsString()
+  @IsOptional()
+  serviceId?: string;
+
+  @ApiProperty({ example: 'uuid-of-resource' })
+  @IsString()
+  @IsNotEmpty()
+  resourceId: string;
+
+  @ApiProperty({ example: '2026-08-10' })
+  @IsString()
+  @IsNotEmpty()
+  date: string;
+
+  @ApiProperty({ example: '09:00' })
+  @IsString()
+  @IsNotEmpty()
+  timeSlot: string;
+}
+
+/** DTO for POST /api/internal/mcp/booking/release */
+export class McpReleaseHoldDto {
+  @ApiProperty({ example: 'uuid-of-resource' })
+  @IsString()
+  @IsNotEmpty()
+  resourceId: string;
+
+  @ApiProperty({ example: '2026-08-10' })
+  @IsString()
+  @IsNotEmpty()
+  date: string;
+
+  @ApiProperty({ example: '09:00' })
+  @IsString()
+  @IsNotEmpty()
+  timeSlot: string;
 }

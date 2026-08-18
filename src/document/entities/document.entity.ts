@@ -90,7 +90,7 @@ export class Document {
   @Column({ type: 'uuid' })
   siteId: string;
 
-  @ManyToOne(() => Site, (site) => site.documents)
+  @ManyToOne(() => Site, (site) => site.documents, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'siteId' })
   site: Site;
 

@@ -9,7 +9,7 @@ import {
   SystemMessage,
   ToolMessage,
 } from '@langchain/core/messages';
-import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
+import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
 import {
@@ -605,6 +605,14 @@ export class GraphService {
           book_appointment: [
             'getSiteConfig',
             'getAvailableSlots',
+            'holdSlot',
+            'releaseHold',
+            'createBooking',
+          ],
+          booking_slot_selected: [
+            'getSiteConfig',
+            'holdSlot',
+            'releaseHold',
             'createBooking',
           ],
           cancel_booking: ['getConversationContext', 'cancelBooking'],
@@ -1465,7 +1473,31 @@ export class GraphService {
         },
       );
 
-      workflow.addConditionalEdges('model_node', toolsCondition, {
+      const customToolsCondition = (
+        state: typeof AgentState.State,
+      ): 'tools' | typeof END => {
+        const lastMessage = state.messages[state.messages.length - 1];
+        const hasToolCalls =
+          lastMessage &&
+          'tool_calls' in lastMessage &&
+          Array.isArray((lastMessage as AIMessage).tool_calls) &&
+          ((lastMessage as AIMessage).tool_calls?.length ?? 0) > 0;
+
+        const toolCalls = hasToolCalls
+          ? (lastMessage as AIMessage).tool_calls
+          : [];
+
+        console.log('[toolsCondition] Evaluated after model_node:', {
+          hasToolCalls: !!hasToolCalls,
+          toolCallsCount: toolCalls?.length || 0,
+          toolNames: toolCalls?.map((tc) => tc.name) || [],
+          decision: hasToolCalls ? 'tools' : '__end__',
+        });
+
+        return hasToolCalls ? 'tools' : END;
+      };
+
+      workflow.addConditionalEdges('model_node', customToolsCondition, {
         tools: 'tools',
         __end__: 'summarize_memory',
       });
