@@ -4,6 +4,7 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -444,6 +445,17 @@ export class McpService {
     const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
     const utcEndAt = addMinutes(utcStartAt, duration);
 
+    const sessionId = randomUUID();
+
+    // Must hold the slot first since createBooking strictly validates it
+    await this.bookingService.holdSlot(siteId, {
+      resourceId: payload.resourceId,
+      serviceId: payload.serviceId,
+      startAt: utcStartAt.toISOString(),
+      endAt: utcEndAt.toISOString(),
+      sessionId,
+    });
+
     const booking = await this.bookingService.createBooking({
       siteId,
       resourceId: payload.resourceId,
@@ -455,6 +467,7 @@ export class McpService {
       phone: normalizePhoneNumber(payload.phone),
       customerEmail: payload.customerEmail,
       templateFields: {},
+      sessionId,
     });
 
     return {

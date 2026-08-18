@@ -45,8 +45,19 @@ export class OrganizationService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
-    const sortBy = query.sortBy ?? 'createdAt';
-    const order = query.order ?? 'DESC';
+    let sortBy = query.sortBy ?? 'createdAt';
+    let order = query.order ?? 'DESC';
+
+    if (sortBy.includes(':')) {
+      const parts = sortBy.split(':');
+      sortBy = parts[0];
+      order = parts[1].toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    }
+
+    const validSortFields = ['name', 'slug', 'createdAt', 'updatedAt'];
+    if (!validSortFields.includes(sortBy)) {
+      sortBy = 'createdAt';
+    }
 
     const qb = this.organizationRepository
       .createQueryBuilder('organization')

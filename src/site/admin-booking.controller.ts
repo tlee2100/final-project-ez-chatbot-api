@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -19,6 +20,7 @@ import {
   AdminBookingService,
   UpdateBookingConfigDto,
 } from './admin-booking.service';
+import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -102,6 +104,7 @@ export class AdminBookingController {
       customerPhone?: string;
       customerEmail?: string;
       notes?: string;
+      sessionId: string;
     },
     @Req() req: AuthRequest,
   ) {
@@ -123,5 +126,36 @@ export class AdminBookingController {
       status,
       req.user,
     );
+  }
+
+  @Post('hold')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.AGENT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Hold a booking slot temporarily' })
+  holdSlot(
+    @Param('siteId') siteId: string,
+    @Body() body: HoldSlotDto,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.holdSlot(siteId, body, req.user);
+  }
+
+  @Delete('hold')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.AGENT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Release a held booking slot' })
+  releaseHold(
+    @Param('siteId') siteId: string,
+    @Body() body: HoldSlotDto,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.releaseHold(siteId, body, req.user);
+  }
+
+  @Get('holds')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.AGENT)
+  @ApiOperation({ summary: 'Get all actively held slots for a site' })
+  getActiveHolds(@Param('siteId') siteId: string, @Req() req: AuthRequest) {
+    return this.adminBookingService.getActiveHolds(siteId, req.user);
   }
 }

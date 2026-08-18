@@ -28,14 +28,14 @@ export class QueryOrganizationDto {
     description: 'Items per page',
     example: 10,
     minimum: 1,
-    maximum: 100,
+    maximum: 1000,
     default: 10,
   })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(1000)
   limit?: number = 10;
 
   @ApiPropertyOptional({
@@ -63,13 +63,12 @@ export class QueryOrganizationDto {
   status?: string;
 
   @ApiPropertyOptional({
-    description: 'Sort field',
-    enum: ORGANIZATION_SORT_FIELDS,
-    example: 'name',
+    description: 'Sort field (can include :ASC or :DESC)',
+    example: 'createdAt:DESC',
   })
   @IsOptional()
-  @IsEnum(ORGANIZATION_SORT_FIELDS)
-  sortBy?: OrganizationSortField;
+  @IsString()
+  sortBy?: string;
 
   @ApiPropertyOptional({
     description: 'Sort order',

@@ -51,4 +51,8 @@ export class CreateBookingDto {
   @IsObject()
   @IsOptional()
   templateFields?: Record<string, unknown>;
+
+  @IsString()
+  @IsNotEmpty()
+  sessionId: string;
 }
