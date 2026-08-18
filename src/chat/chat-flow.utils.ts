@@ -1,5 +1,60 @@
 import { formatInTimeZone } from 'date-fns-tz';
 
+export type MultimodalPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export const parseMultimodalContent = (
+  text: string,
+  wrapUserInput = false,
+): string | MultimodalPart[] => {
+  if (!text || typeof text !== 'string') return text;
+
+  const imageRegex = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
+  const matches = [...text.matchAll(imageRegex)];
+
+  if (!matches.length) {
+    return wrapUserInput ? `<user_input>\n${text}\n</user_input>` : text;
+  }
+
+  const parts: MultimodalPart[] = [];
+  let lastIndex = 0;
+
+  for (const match of matches) {
+    const [fullMatch, url] = match;
+    const matchIndex = match.index ?? 0;
+
+    const beforeText = text.slice(lastIndex, matchIndex).trim();
+    if (beforeText) {
+      parts.push({
+        type: 'text',
+        text: wrapUserInput
+          ? `<user_input>\n${beforeText}\n</user_input>`
+          : beforeText,
+      });
+    }
+
+    parts.push({
+      type: 'image_url',
+      image_url: { url },
+    });
+
+    lastIndex = matchIndex + fullMatch.length;
+  }
+
+  const afterText = text.slice(lastIndex).trim();
+  if (afterText) {
+    parts.push({
+      type: 'text',
+      text: wrapUserInput
+        ? `<user_input>\n${afterText}\n</user_input>`
+        : afterText,
+    });
+  }
+
+  return parts;
+};
+
 export type BookingSlotSelection = {
   date: string;
   timeSlot: string;
