@@ -42,6 +42,7 @@ import {
   detectConversationLanguage,
   isBookingSlotSelection,
   parseBookingSlotSelection,
+  parseMultimodalContent,
   replacePseudoToolResponse,
   sanitizeBookingChips,
   sanitizeSmallTalkResponse,
@@ -439,7 +440,12 @@ export class GraphService {
     try {
       // ── 1. Build LangChain messages from raw LLMMessage array ──────────────
       const langchainMessages: BaseMessage[] = messages.map((m) => {
-        if (m.role === 'user') return new HumanMessage(m.content);
+        if (m.role === 'user') {
+          const parsed = parseMultimodalContent(m.content);
+          return typeof parsed === 'string'
+            ? new HumanMessage(parsed)
+            : new HumanMessage({ content: parsed });
+        }
         if (m.role === 'assistant') return new AIMessage(m.content);
         return new SystemMessage(m.content);
       });
@@ -595,10 +601,28 @@ export class GraphService {
           : aiTools;
       };
 
-      const messageText = (message: BaseMessage) =>
-        typeof message.content === 'string'
-          ? message.content
-          : JSON.stringify(message.content);
+      const messageText = (message: BaseMessage) => {
+        if (typeof message.content === 'string') return message.content;
+        if (Array.isArray(message.content)) {
+          return message.content
+            .map((c) => {
+              if (typeof c === 'string') return c;
+              if (
+                c &&
+                typeof c === 'object' &&
+                'text' in c &&
+                typeof (c as { text: string }).text === 'string'
+              ) {
+                return (c as { text: string }).text;
+              }
+              return '';
+            })
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+        }
+        return JSON.stringify(message.content);
+      };
 
       const activeConversationBookingCode = async (
         state: typeof AgentState.State,

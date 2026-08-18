@@ -13,6 +13,7 @@ import type { LLMResponse } from './interfaces/llm-response.interface';
 import {
   generateDateChips,
   detectConversationLanguage,
+  parseMultimodalContent,
 } from './chat-flow.utils';
 
 /**
@@ -34,10 +35,12 @@ export class AiService {
   private readonly apiKey: string;
   private readonly baseURL: string;
   private readonly defaultSystemPrompt: string;
-  private readonly modelName = 'deepseek-v4-flash';
+  private readonly modelName: string;
 
   constructor() {
     this.apiKey = process.env.DEEPSEEK_API_KEY ?? '';
+    this.modelName =
+      process.env.DEEPSEEK_MODEL || process.env.AI_MODEL || 'deepseek-v4-flash';
     this.baseURL = process.env.DEEPSEEK_BASE_URL ?? 'https://api.ai-box.vn/v1';
     this.defaultSystemPrompt =
       process.env.SYSTEM_PROMPT ??
@@ -146,8 +149,12 @@ export class AiService {
     const systemMessage = new SystemMessage(systemContent);
 
     const historyMessages = input.messages.map((m: LLMMessage) => {
-      if (m.role === 'user')
-        return new HumanMessage(`<user_input>\n${m.content}\n</user_input>`);
+      if (m.role === 'user') {
+        const parsed = parseMultimodalContent(m.content, true);
+        return typeof parsed === 'string'
+          ? new HumanMessage(parsed)
+          : new HumanMessage({ content: parsed });
+      }
       if (m.role === 'assistant') return new AIMessage(m.content);
       return new SystemMessage(m.content);
     });
