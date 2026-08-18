@@ -117,6 +117,9 @@ export class SiteController {
     return {
       id: site.id,
       name: site.name,
+      isEnabled: site.isAiActive,
+      isAiActive: site.isAiActive,
+      allowedDomains: site.allowedDomains ?? [],
       enableConversationTimeout: site.enableConversationTimeout,
       inactivityTimeoutMinutes: site.inactivityTimeoutMinutes,
       warningTimeMinutes: site.warningTimeMinutes,

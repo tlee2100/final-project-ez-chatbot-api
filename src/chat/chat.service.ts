@@ -500,6 +500,11 @@ export class ChatService {
     if (!site) {
       throw new NotFoundException(`Site ${dto.siteId} not found`);
     }
+    if (!site.isAiActive) {
+      throw new ForbiddenException(
+        'Chatbot is currently disabled for this site',
+      );
+    }
 
     const result = await this.conversationRepository.manager.transaction(
       async (transactionalEntityManager) => {
