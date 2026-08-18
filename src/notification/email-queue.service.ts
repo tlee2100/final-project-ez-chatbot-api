@@ -194,7 +194,9 @@ export class EmailQueueService {
     const secret =
       process.env.EMAIL_TOKEN_ENCRYPTION_KEY || process.env.JWT_SECRET;
     if (!secret) {
-      throw new Error('Missing JWT_SECRET environment variable');
+      throw new Error(
+        'Missing EMAIL_TOKEN_ENCRYPTION_KEY or JWT_SECRET environment variable',
+      );
     }
 
     return createHash('sha256')

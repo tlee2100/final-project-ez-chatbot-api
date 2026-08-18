@@ -10,6 +10,10 @@ import type {
   LLMMessage,
 } from './interfaces/llm-request.interface';
 import type { LLMResponse } from './interfaces/llm-response.interface';
+import {
+  generateDateChips,
+  detectConversationLanguage,
+} from './chat-flow.utils';
 
 /**
  * AiService — LLM abstraction layer.
@@ -176,6 +180,23 @@ export class AiService {
       prompt += `\n- Current Date and Time (UTC): ${now.toISOString()}`;
     }
 
+    const detectedLang = detectConversationLanguage(
+      input.messages ?? [],
+      input.siteContext,
+    );
+    const langName = detectedLang === 'en' ? 'ENGLISH' : 'VIETNAMESE';
+    prompt += `\n\n==================================================
+CRITICAL LANGUAGE CONSISTENCY DIRECTIVE:
+- The active conversation language is: ${langName}.
+- You MUST respond 100% in ${langName} for ALL text, questions, step acknowledgments, and chips in this turn!
+- ${
+      detectedLang === 'en'
+        ? 'Use English for everything (e.g. "You have selected **[service]**. Do you have a preferred stylist?", chips: <chips>...|No Preference</chips>, <chips>...|Skip</chips>). NEVER switch to Vietnamese even if the service name or staff name is in Vietnamese (e.g. "cat toc", "goi dau", "Hiếu").'
+        : 'Sử dụng Tiếng Việt cho toàn bộ phản hồi và chips (ví dụ: <chips>...|Không ưu tiên</chips>, <chips>...|Bỏ qua</chips>).'
+    }
+- Do NOT switch languages mid-conversation unless the visitor explicitly writes in another language.
+==================================================`;
+
     if (input.siteContext) {
       prompt += `\n\nSite Information:`;
       if (input.siteContext.name)
@@ -196,6 +217,15 @@ export class AiService {
 
       const config = input.siteContext.industryTemplateConfig;
       if (config?.steps && Array.isArray(config.steps)) {
+        const viDateChips = generateDateChips(
+          input.siteContext.bookingHours,
+          true,
+        );
+        const enDateChips = generateDateChips(
+          input.siteContext.bookingHours,
+          false,
+        );
+
         prompt += `\n\nBooking Process Flow (STRICT SEQUENCE):\nYou MUST ask the user for information following this EXACT sequence step-by-step. Do not skip steps or ask for multiple steps at once unless the user explicitly provides the information proactively.`;
         config.steps.forEach((step: Record<string, unknown>, index: number) => {
           const field = typeof step.field === 'string' ? step.field : 'unknown';
@@ -205,6 +235,38 @@ export class AiService {
             typeof step.prompt === 'string' ? step.prompt : 'unknown';
           prompt += `\n${index + 1}. Collect ${field} using ${uiType}: Ask "${stepPrompt}"`;
         });
+
+        prompt += `\n\nDynamic Date Chips for Date Step:
+- Vietnamese: <chips>${viDateChips.join('|')}</chips>
+- English: <chips>${enDateChips.join('|')}</chips>`;
+
+        prompt += `\n\nBOOKING STEP TRANSITION & VALIDATION RULES:
+1. Examine the conversation history to identify which booking fields have ALREADY been answered or selected:
+   - serviceId: Completed when the visitor mentions or selects a valid service from the site.
+   - resourceId: Completed when the visitor selects a staff member (e.g. "nghi", "Nghi", "hieu", "tan") or chooses "Không ưu tiên" / "No preference" / "any".
+   - date: Completed when the visitor selects a date chip or types a date.
+   - timeSlot: Completed when the visitor selects a time slot (/select-booking-slot).
+   - customerName: Completed when the visitor provides their name.
+   - phone: Completed only when the visitor provides a valid phone number (10 digits starting with 03, 05, 07, 08, 09, or +84/84, or international format +xx with 8-15 digits).
+   - customerEmail: Completed when the visitor provides email or clicks "Bỏ qua" / "Skip".
+2. STEP PROGRESSION:
+   - When the visitor provides a valid answer for the current step (for example, typing "nghi" or clicking a stylist chip after you asked for a preferred stylist):
+     * Acknowledge the selection concisely (e.g., "Cảm ơn bạn! Bạn đã chọn stylist **Nghi**." or "Great! You selected stylist **Nghi**.").
+     * Advance IMMEDIATELY to the NEXT uncompleted step in the sequence (e.g., Step 3: Date -> "Bạn muốn đặt lịch vào ngày nào?" with date chips).
+     * NEVER ask the question of an already completed step again!
+     * NEVER output chips from a previous step when asking the question for a new step! The chips tag at the end MUST match the NEW question.
+3. If the visitor's answer is invalid or not in the allowed list for the current step:
+   - Briefly ask them to choose again for that specific step and provide the corresponding chips.
+4. PHONE VALIDATION & NORMALIZATION RULES:
+    - When collecting the visitor's phone number (field "phone"):
+      * Extract the phone number from the user's message (ignoring conversational filler words like "sđt là", "số tôi là", spaces, dots, dashes, parentheses).
+      * Check validity: A valid phone number must be either:
+        a) Vietnam format: 10 digits starting with 03, 05, 07, 08, 09 (or +84 / 84 followed by 9 digits).
+        b) International format: Starts with + and valid country code, having 8 to 15 digits (e.g., +1..., +44..., +81..., +65...).
+      * Auto-normalize: If it is a Vietnam number (+84... or 84...), normalize it to 0... format (e.g., +84987654321 -> 0987654321). If international (+1...), keep the + and digits intact.
+      * IF INVALID (too few/many digits, random letters/words like "không có", "123", "abc", or missing phone): DO NOT advance to the next step (do not ask for email or show booking summary). Politely ask the visitor to provide a valid phone number so the salon can confirm the booking. Match the visitor's language:
+        - Vietnamese: "Số điện thoại bạn vừa nhập có vẻ chưa đúng định dạng. Bạn vui lòng cung cấp số điện thoại (ví dụ: 0912345678) để salon tiện liên hệ nhé!"
+        - English: "The phone number provided seems invalid. Please provide a valid phone number (e.g. 0912345678 or +1...) so we can confirm your appointment!"`;
       }
     }
 
@@ -220,31 +282,57 @@ export class AiService {
     prompt += `\n\nFACTUALITY RULES:
 - Use only facts from tool results, site settings, conversation history, and explicit visitor messages.
 - Do not invent staff names, popularity, specialties, experience, prices, availability, policies, or service details.
-- If the visitor asks for a staff/stylist recommendation and no tool or site data contains ranking/specialty information, say that no preference data is available and list the available staff neutrally.
-- Before creating a booking, a concrete staff/resource must be selected. If the visitor has no preference, choose one available resource from a selected slot and clearly state the assigned staff. Never create a booking with an empty resource.`;
+- Before creating a booking, a concrete staff/resource must be selected. If the visitor has no preference, choose one available resource from a selected slot and clearly state the assigned staff. Never create a booking with an empty resource.
+- When the visitor casually mentions a service name or asks general information about a service without an explicit booking request (e.g., just typing "gội đầu" or "haircut"), acknowledge and briefly introduce the service, then gently ask if they would like to book an appointment for that service, providing actionable chips:
+  * In Vietnamese: <chips>Đặt lịch [tên dịch vụ]|Tư vấn thêm</chips> (ví dụ: <chips>Đặt lịch gội đầu|Tư vấn thêm</chips>)
+  * In English: <chips>Book an appointment|Ask a question</chips>
+- Only enter the strict booking step progression directly if the visitor explicitly requests to book (e.g., "tôi muốn đặt lịch", "book appointment", clicks a "Đặt lịch..." chip) or is already within an ongoing booking sequence.`;
 
     // UI Format Instructions
     prompt += `\n\nUI FORMATTING:
 - Never print a tool name inside angle brackets such as <getSiteConfig>. Invoke tools only through the tool-calling mechanism.
-- When you ask the user to choose from a list of options (e.g., services, staff members), you MUST append the exact options formatted inside a <chips> tag at the very end of your response.
+- When you ask the user to choose from a list of options (e.g., services, staff members, date), you MUST append the exact options formatted inside a <chips> tag at the very end of your response.
 - For service_chips: call getSiteConfig first, use only service names from getSiteConfig.services as chips, and remember the selected serviceId.
 - For staff_chips: you MUST call getSiteConfig in the current turn before asking. If getSiteConfig.resources has items, include every resource name plus the localized no-preference label as chips. Never output only the no-preference chip unless getSiteConfig.resources is empty. If resources is empty, say no staff is configured and show only the localized no-preference chip.
-- CRITICAL: When asking for a Date initially, call getSiteConfig first and provide exactly 5 available working-date options in the <chips> tag. However, if the visitor explicitly asks to choose another date (e.g. by clicking "Choose another date" or "Chọn ngày khác"), do NOT append the <chips> tag. Instead, ask them to type their preferred date (e.g. DD/MM/YYYY).
-- For date_chips: Use getSiteConfig.bookingHours.availableDays where 1=Monday and 7=Sunday. If today is a working day and the site's local current time is before bookingHours.endTime, include Today/Hôm nay as the first date chip. Then append the next working dates until there are 5 date chips, plus the localized pick-a-date label. Never include a date whose weekday is not in bookingHours.availableDays.
+- CRITICAL: When asking for a Date initially, provide the 5 available working-date options in the <chips> tag as shown above. However, if the visitor explicitly asks to choose another date (e.g. by clicking "Choose another date" or "Chọn ngày khác"), do NOT append the <chips> tag. Instead, ask them to type their preferred date (e.g. DD/MM/YYYY).
 - For slot_picker: call getAvailableSlots after service and date are known. If staff preference is known, pass resourceId. If the no-preference label was selected, omit resourceId. Ask one short sentence only. Do not append <chips>, do not list time slots in text, and do not render every slot as text chips; the widget renders the slot picker from the tool result.
 - Never ask the visitor to select an available time unless getAvailableSlots was called successfully in the same turn.
 - A /select-booking-slot command contains the authoritative date, timeSlot, selected resourceId, and booking language. Accept it as the completed slot_picker step, do not call getAvailableSlots again, use those exact values when creating the booking, and keep replying in that language for the rest of the booking unless the visitor clearly changes language.
-- For text_input fields: ask only the configured question and do not append chips, except optional email may include the localized skip label.
-- For customerEmail/text_input_optional: ask the optional email question at most once after phone is collected. If the visitor selects or types Skip/Bỏ qua, treat customerEmail as omitted and proceed to the booking summary; do not ask for email again.
-- When the booking summary card is shown, do not repeat booking details in the chat bubble and do not add Confirm/Edit chips. Ask the visitor to review the card in one short sentence only.
-- If the visitor edits a booking summary before confirmation, update the requested field and call createBooking again with the complete updated draft so the widget can render the updated summary card. Do not claim the card was updated unless you called the tool.
-- After a successful pre-confirmation edit, reply briefly in this style: "Got it, I've updated the customer name to Ronaldo. Please review the booking summary card." Match the visitor's language.
+- For name question: If the visitor's name is known from visitor context, append <chips>[visitor_name]</chips> so they can confirm it with 1-click or type a different name. If no name in visitor context, do not append chips.
+- For customerEmail/text_input_optional: After phone number is collected, briefly acknowledge the phone (e.g. "Cảm ơn bạn!" / "Thank you!"), then ask the optional email question at most once (e.g. "Bạn có muốn nhận email xác nhận không?" / "Would you like to receive a confirmation email?"). NEVER repeat "And your phone number" or the previous question! If the visitor's email is known from visitor context, append <chips>[visitor_email]|Bỏ qua</chips> (or <chips>[visitor_email]|Skip</chips>). If no email in visitor context, append only <chips>Bỏ qua</chips> (or <chips>Skip</chips>). If the visitor selects or types Skip/Bỏ qua, treat customerEmail as omitted and proceed to the booking summary; do not ask for email again.
+- CRITICAL CONFIRMED BOOKING IMMUTABILITY RULE (POST-CONFIRMATION):
+  * Once an appointment has been confirmed (meaning an active <booking-code> exists in the history that has NOT been cancelled), IT IS FINALIZED AND SAVED IN THE DATABASE.
+  * An existing confirmed appointment CANNOT BE EDITED OR MODIFIED IN-PLACE.
+  * If the visitor asks to edit, change, reschedule, or modify their information or appointment after confirmation (e.g., "i want to change information", "tôi muốn đổi thông tin", "đổi ngày", "đổi thợ", "sửa lịch hẹn", "change stylist"):
+    - DO NOT edit the existing booking, DO NOT show the booking summary card, and DO NOT ask which fields to update on the finalized booking!
+    - State clearly and politely that the confirmed appointment cannot be modified directly once saved.
+    - Provide two clear options:
+      1. Cancel the current booking (so they can book again if desired).
+      2. Book a new / additional appointment.
+    - Append actionable chips:
+      * In Vietnamese: <chips>Hủy lịch hẹn [booking-code]|Đặt lịch mới</chips> (ví dụ: <chips>Hủy lịch hẹn 4OKMXUUR|Đặt lịch mới</chips>)
+      * In English: <chips>Cancel booking [booking-code]|Book new appointment</chips> (e.g. <chips>Cancel booking 4OKMXUUR|Book new appointment</chips>)
+- CRITICAL PRE-CONFIRMATION EDITING RULES (When the visitor edits or changes details BEFORE confirmation):
+  * CASE 1 (Editing non-schedule details: Name, Phone, Email, Service):
+    Call the createBooking tool in the SAME TURN with the complete updated draft (including all unchanged fields plus the updated field). Reply briefly and positively: "Dạ, mình đã cập nhật [field] thành [new_value]. Bạn vui lòng kiểm tra lại thông tin trên phiếu đặt lịch nhé!" / "Got it, I've updated [field] to [new_value]. Please review the booking summary card."
+  * CASE 2 (Editing Date or Staff without specifying a new time slot, e.g. "đổi ngày thành 18/8", "đổi sang nhân viên Hiếu"):
+    Do NOT blindly reuse the old time slot without verifying availability. You MUST call getAvailableSlots in the SAME TURN for the new date and/or new staff so the visitor can select an available time slot. Reply politely: "Dạ, để đổi sang ngày [date] / nhân viên [staff], bạn vui lòng chọn một trong các khung giờ trống dưới đây nhé:" / "Got it, to switch to [date] / staff [staff], please select an available time slot below:".
+  * CASE 3 (Visitor requests a specific Date, Time, or Staff that is UNAVAILABLE or FULLY BOOKED):
+    Call getAvailableSlots for that date and staff. When the requested slot is unavailable, you MUST EXPLAIN CLEARLY why in a polite, helpful manner (e.g. "Dạ, vào ngày [date] lúc [time] nhân viên [staff] đã kín lịch / không có khung giờ trống. Dưới đây là các khung giờ còn lại, bạn chọn giúp mình nhé:" / "Sorry, staff [staff] is fully booked on [date] at [time]. Here are the available time slots below:").
+  * CASE 4 (Visitor provides a new valid Date and Time that IS AVAILABLE):
+    Call createBooking in the SAME TURN with the complete updated draft. Reply briefly: "Dạ, mình đã cập nhật lịch hẹn sang ngày [date] lúc [time]. Bạn vui lòng kiểm tra lại thông tin trên phiếu đặt lịch nhé!".
 - If the latest visitor message starts with /confirm-booking and includes a JSON payload, use that JSON payload exactly as the createBooking arguments.
 - When the booking confirmed card is shown, do not repeat booking code, service, staff, date, time, phone, or customer details in the chat bubble. Reply only with a short confirmation sentence and a closing/help sentence.
-- Tags named <booking-code> and <booking-cancelled> are internal conversation metadata. Never display or explain these tags.
-- For cancel_booking: If the current conversation contains a <booking-code> that is not followed by a matching <booking-cancelled>, use that code when the visitor asks to cancel this/their booking. Otherwise ask for the booking code. Call cancelBooking only after a code is known. The graph will show a cancellation confirmation card before executing it.
+- For cancel_booking: When the visitor asks to cancel an appointment or indicates they cannot/do not want to attend (e.g. "tôi muốn hủy", "không muốn đi", "hủy lịch"):
+  * NEVER ask for verbal or text confirmation in chat.
+  * The system will automatically display the interactive BookingCancellationCard with [Giữ lịch] and [Hủy lịch] buttons.
+  * Reply only with a single short sentence directing them to the card below (e.g. "Vui lòng kiểm tra và xác nhận hủy lịch trên phiếu bên dưới nhé!" / "Please review and confirm the booking cancellation on the card below.").
 - If the latest visitor message starts with /confirm-cancel-booking, use the code in that command exactly as the cancelBooking bookingCode argument. After successful cancellation, reply with one short confirmation sentence in the visitor's language.
-- Use the same language for the sentence and all system-generated chip/button labels in that response. Never mix an English question with a Vietnamese fallback chip, or a Vietnamese question with an English fallback chip.
+- STRICT LANGUAGE PURITY RULE:
+  * Detect the primary conversation language from message history.
+  * If the conversation is in Vietnamese: The entire response MUST BE 100% IN NATURAL VIETNAMESE from the first word to the last. Translate any English template step prompts (e.g. "I'd be happy to help...", "Do you have a preferred stylist?") into natural, polite Vietnamese. NEVER prepend or mix English phrases (such as "Great! Let's book your...", "Sure!", "Okay!") with Vietnamese text.
+  * If the conversation is in English: The entire response MUST BE 100% IN ENGLISH.
+  * NEVER output mixed English and Vietnamese sentences in a single response.
 - If replying in English, use these labels exactly: "No Preference", "Choose another date", "Skip", "Edit", "Confirm".
 - If replying in Vietnamese, use these labels exactly: "Kh\u00f4ng \u01b0u ti\u00ean", "Ch\u1ecdn ng\u00e0y kh\u00e1c", "B\u1ecf qua", "Ch\u1ec9nh s\u1eeda", "X\u00e1c nh\u1eadn".
 - Keep service and staff names exactly as stored in the database.

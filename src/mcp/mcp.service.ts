@@ -23,6 +23,7 @@ import type {
   SiteConfigServiceItem,
 } from './types/mcp.types';
 import { BookingService } from '../booking/booking.service';
+import { normalizePhoneNumber } from '../chat/chat-flow.utils';
 import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 import { addMinutes } from 'date-fns';
 
@@ -451,7 +452,7 @@ export class McpService {
       endAt: utcEndAt.toISOString(),
       timezone,
       customerName: payload.customerName,
-      phone: payload.phone,
+      phone: normalizePhoneNumber(payload.phone),
       customerEmail: payload.customerEmail,
       templateFields: {},
     });
@@ -460,6 +461,7 @@ export class McpService {
       bookingCode: booking.code,
       status: 'confirmed',
       customerName: booking.customerName,
+      customerEmail: booking.customerEmail || payload.customerEmail,
       phone: booking.phone,
       date: payload.date,
       timeSlot: payload.timeSlot,

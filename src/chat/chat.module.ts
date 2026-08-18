@@ -46,6 +46,6 @@ import { SiteModule } from '../site/site.module';
       useExisting: McpToolProviderFactory,
     },
   ],
-  exports: [ChatGateway, ChatService, GraphService],
+  exports: [ChatGateway, ChatService, GraphService, ChatTimeoutService],
 })
 export class ChatModule {}

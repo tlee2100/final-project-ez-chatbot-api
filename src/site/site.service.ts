@@ -28,6 +28,7 @@ import { UserRole } from '../user/enums/user-role.enum';
 import type { JwtUser } from 'src/auth/types/jwt-user.type';
 import { SITE_PAGINATION_CONFIG } from './config/site-pagination.config';
 import { ChatGateway } from '../chat/chat.gateway';
+import { ChatTimeoutService } from '../chat/chat-timeout.service';
 
 type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
   data: SiteDto[];
@@ -45,6 +46,8 @@ export class SiteService {
     private readonly notificationService: NotificationService,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
+    @Inject(forwardRef(() => ChatTimeoutService))
+    private readonly chatTimeoutService: ChatTimeoutService,
     @InjectRepository(Booking)
     private readonly bookingRepository: Repository<Booking>,
   ) {
@@ -189,6 +192,8 @@ export class SiteService {
         agents: true,
         documents: true,
         bookingConfig: true,
+        bookingServices: true,
+        bookingResources: true,
       },
     });
     if (!site) {
@@ -287,6 +292,17 @@ export class SiteService {
 
     await this.siteRepository.update(id, updateData);
     const updatedSite = await this.findOne(id);
+
+    // Refresh conversation timeout timers if timeout settings were modified
+    if (
+      dto.enableConversationTimeout !== undefined ||
+      dto.inactivityTimeoutMinutes !== undefined ||
+      dto.warningTimeMinutes !== undefined ||
+      dto.pauseTimerForAgentChats !== undefined ||
+      dto.resetTimerOnBotResponse !== undefined
+    ) {
+      void this.chatTimeoutService.refreshSiteTimers(id);
+    }
 
     // Broadcast updated settings to active conversations
 

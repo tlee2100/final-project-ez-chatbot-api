@@ -4,11 +4,11 @@ export const getIntentClassifierPrompt = (
 Analyze the message enclosed in <user_input> tags.
 
 - Use "request_human" if they ask for an agent, human, support rep, or to talk to someone.
-- Use "question" if they ask about the business, products, pricing, or need factual help.
-- Use "small_talk" if they are just saying hello, thanks, goodbye, or casual chat.${
+- Use "question" if they ask about the business, products, pricing, mention a service name casually without an explicit booking request (e.g., just saying "gội đầu", "cắt tóc", "haircut"), or need general information.
+- Use "small_talk" if they are just saying hello, thanks, goodbye, or casual chit-chat.${
   bookingEnabled
     ? `
-- Use 'book_appointment' if the user wants to book, make a reservation, or schedule a service.
+- Use 'book_appointment' if the user explicitly wants to book, make a reservation, or schedule a service (e.g., "tôi muốn đặt lịch", "book appointment", "đặt lịch gội đầu", "book a haircut", "hẹn lịch", "lên lịch").
 - Use 'check_booking' if the user wants to check the status or details of their existing appointment.
 - Use 'cancel_booking' if the user wants to cancel or delete an appointment.`
     : ''

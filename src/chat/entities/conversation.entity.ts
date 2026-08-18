@@ -29,6 +29,7 @@ export enum ClosedReason {
   TIMEOUT = 'TIMEOUT',
   AGENT = 'AGENT',
   ERROR = 'ERROR',
+  CLEARED = 'CLEARED',
 }
 
 @Entity('conversations')

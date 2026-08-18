@@ -8,6 +8,7 @@ export function createRepositoryMock() {
     create: jest.fn((data) => data),
     remove: jest.fn(),
     softRemove: jest.fn(),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
     delete: jest.fn().mockResolvedValue({ affected: 1 }),
     count: jest.fn().mockResolvedValue(0),
     createQueryBuilder: jest.fn(),

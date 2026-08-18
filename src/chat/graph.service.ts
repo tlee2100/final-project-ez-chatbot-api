@@ -38,9 +38,12 @@ import {
   latestActiveBookingCode,
 } from './booking-cancellation.utils';
 import {
+  cleanMixedLanguageResponse,
+  detectConversationLanguage,
   isBookingSlotSelection,
   parseBookingSlotSelection,
   replacePseudoToolResponse,
+  sanitizeBookingChips,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
 // ─── Agent State ──────────────────────────────────────────────────────────────
@@ -192,57 +195,6 @@ export interface GraphRunResult {
   newSummary?: string;
   newSummarizedMessageCount?: number;
 }
-
-const isVietnameseText = (text: string) =>
-  /[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]|(bạn|tôi|mình|không|ưu tiên|ngày|giờ|dịch vụ|đặt lịch|hủy lịch|nhân viên|vui lòng|chọn|thời gian|phù hợp|cảm ơn)/i.test(
-    text,
-  );
-
-const sanitizeBookingChips = (
-  text: string,
-  siteContext?: GraphRunOptions['siteContext'],
-) => {
-  if (!text.includes('<chips>') || siteContext?.bookingEnabled !== true) {
-    return text;
-  }
-
-  const noPreference = isVietnameseText(text)
-    ? 'Không ưu tiên'
-    : 'No Preference';
-  const services =
-    siteContext.bookingServices?.map((service) => service.name) ?? [];
-  const resources =
-    siteContext.bookingResources?.map((resource) => resource.name) ?? [];
-
-  if (
-    /(what'?s your name|may i have your name|your phone number|phone number|tên.*bạn|bạn.*tên|số điện thoại)/i.test(
-      text,
-    )
-  ) {
-    return text.replace(/\s*<chips>.*?<\/chips>/g, '').trim();
-  }
-
-  if (/(preferred stylist|stylist|staff|nhân viên)/i.test(text)) {
-    const options = [...resources, noPreference].filter(Boolean);
-    return options.length
-      ? text.replace(
-          /<chips>.*?<\/chips>/,
-          `<chips>${options.join('|')}</chips>`,
-        )
-      : text;
-  }
-
-  if (/(which service|dịch vụ)/i.test(text)) {
-    return services.length
-      ? text.replace(
-          /<chips>.*?<\/chips>/,
-          `<chips>${services.join('|')}</chips>`,
-        )
-      : text;
-  }
-
-  return text;
-};
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
@@ -543,10 +495,10 @@ export class GraphService {
 
                 toolArgs = {
                   ...args,
-                  serviceId: service?.id,
-                  resourceId: resource?.id,
-                  date: slotSelection?.date ?? args.date,
-                  timeSlot: slotSelection?.timeSlot ?? args.timeSlot,
+                  serviceId: service?.id ?? args.serviceId,
+                  resourceId: resource?.id ?? args.resourceId,
+                  date: args.date ?? slotSelection?.date,
+                  timeSlot: args.timeSlot ?? slotSelection?.timeSlot,
                 };
 
                 if (!resource) {
@@ -579,13 +531,13 @@ export class GraphService {
                   );
                   this.chatGateway.emitBookingSummary(conversationId, {
                     ...toolArgs,
-                    serviceName: service.name,
-                    resourceName: resource.name,
+                    serviceName: service?.name ?? args.serviceName,
+                    resourceName: resource?.name ?? args.resourceName,
                   });
                   return JSON.stringify({
                     error: 'ACTION_REQUIRED',
                     message:
-                      'Do not execute. The widget already displayed the booking summary card. Do not repeat booking details, do not add Confirm/Edit chips, and ask the user to review the card in one short sentence only.',
+                      'Do not execute. The widget already displayed the updated booking summary card. Do not repeat booking details, do not explain internal logic or apologize, do not add Confirm/Edit chips, and ask the user to review the updated card in one short, polite sentence.',
                   });
                 }
               }
@@ -628,7 +580,9 @@ export class GraphService {
             'getSiteConfig',
             'getAvailableSlots',
             'createBooking',
+            'cancelBooking',
           ],
+          cancel_booking: ['getConversationContext', 'cancelBooking'],
           check_booking: ['getConversationContext'],
         };
 
@@ -666,11 +620,34 @@ export class GraphService {
         );
       };
 
+      const isCancelBookingPhrase = (text: string) =>
+        /(?:hủy|cancel|không\s+(?:muốn\s+)?(?:đi|đến|làm|tới)|không\s+(?:đi|đến|tới)\s+được|bỏ\s+lịch|bỏ\s+hẹn|ngưng|dừng)/i.test(
+          text,
+        );
+
+      const isAffirmativePhrase = (text: string) =>
+        /^(?:ừ|u|uh|uk|ừm|um|uhm|dạ|da|vâng|vang|yep|yeah|ye|ok|oke|okay|đồng ý|dong y|dong tinh|đồng tình|xác nhận|xac nhan|hủy|cancel|chắc chắn|yes|y|cứ hủy|chuẩn|đúng|dung|chính xác)[\s!.]*$/i.test(
+          text.trim(),
+        );
+
+      const isAskingCancellationConfirmation = (text: string) =>
+        /(?:hủy lịch|xác nhận hủy|xác nhận muốn hủy|muốn hủy|tiến hành hủy|confirm.*cancel|kiểm tra và xác nhận hủy)/i.test(
+          text,
+        );
+
       const isBookingContinuation = (
         state: typeof AgentState.State,
         userText: string,
       ) => {
         if (state.siteContext.bookingEnabled !== true) return false;
+
+        // If user wants to cancel, DO NOT treat as booking continuation
+        if (
+          /^\/(?:confirm-)?cancel-booking\b/i.test(userText) ||
+          isCancelBookingPhrase(userText)
+        ) {
+          return false;
+        }
 
         const previousAssistant = state.messages
           .slice(0, -1)
@@ -679,21 +656,47 @@ export class GraphService {
         if (!previousAssistant) return false;
 
         const assistantText = messageText(previousAssistant);
+
+        // If assistant was asking about cancellation and user affirms, NOT booking continuation
+        if (
+          isAskingCancellationConfirmation(assistantText) &&
+          isAffirmativePhrase(userText)
+        ) {
+          return false;
+        }
+
         const chips = assistantText
           .match(/<chips>(.*?)<\/chips>/)?.[1]
           .split('|')
           .map((chip) => chip.trim().toLowerCase());
         if (chips?.includes(userText.trim().toLowerCase())) return true;
+
+        // User expresses intent to change/edit
         if (
-          /\b(change|update|set)\b.*\b(booking|name|phone|email|date|time|staff|stylist|service)\b/i.test(
-            userText,
-          ) ||
-          /what details.*change|details.*change/i.test(assistantText)
+          /\b(change|update|set|edit|sửa|thay đổi|đổi)\b/i.test(userText) ||
+          /^\b(service|stylist|staff|date|time|name|phone|email|dịch vụ|nhân viên|ngày|giờ|tên|sđt|số điện thoại)\b$/i.test(
+            userText.trim(),
+          )
         ) {
           return true;
         }
 
-        return /(which service|preferred stylist|what date|available time|select.*time|phone number|confirmation email|what'?s your name|bạn muốn.*dịch vụ|bạn.*stylist|bạn muốn.*ngày|chọn.*giờ|khung giờ|số điện thoại|tên.*bạn|email xác nhận)/i.test(
+        // Assistant was asking what to change or asking for field values during edit
+        if (
+          /(?:what would you like to change|what.*change|bạn muốn.*(thay đổi|đổi|sửa)|which detail|enter.*email|nhập.*email|email mới|new email|số điện thoại mới|new phone|tên mới|new name|ngày mới|new date|giờ mới|new time)/i.test(
+            assistantText,
+          )
+        ) {
+          return true;
+        }
+
+        // If the previous assistant message contained chips (e.g. services, stylists, dates, skip)
+        // or was asking any booking step questions:
+        if (assistantText.includes('<chips>')) {
+          return true;
+        }
+
+        return /(which service|service|stylist|staff|resource|what date|date|available time|select.*time|time slot|phone number|phone|confirmation email|email|what'?s your name|name|dịch vụ|thợ|nhân viên|ngày|giờ|khung giờ|số điện thoại|sđt|tên|email xác nhận|summary card|booking summary|thông tin đặt lịch|review.*card|xem lại)/i.test(
           assistantText,
         );
       };
@@ -710,6 +713,61 @@ export class GraphService {
             ? lastMessage.content
             : JSON.stringify(lastMessage.content);
         const bookingEnabled = state.siteContext.bookingEnabled === true;
+
+        // ── 1. Fast-Path Check (Deterministic routing without LLM call) ──
+        const previousAssistantText = state.messages
+          .slice(0, -1)
+          .reverse()
+          .find((message) => message.constructor?.name?.includes('AIMessage'));
+        const previousAssistantContent = previousAssistantText
+          ? messageText(previousAssistantText)
+          : '';
+        const isCancelCodeReply =
+          !!extractBookingCode(contentStr) &&
+          !!previousAssistantText &&
+          /(booking code|confirmation code|mã.*(?:đặt lịch|xác nhận))/i.test(
+            previousAssistantContent,
+          );
+
+        if (isBookingSlotSelection(contentStr)) {
+          this.logger.log('[Fast-Path Intent] booking_slot_selected');
+          return { intent: 'booking_slot_selected' as IntentType };
+        }
+
+        const isCancelIntent =
+          /^\/(?:confirm-)?cancel-booking\b/i.test(contentStr) ||
+          isCancelBookingPhrase(contentStr) ||
+          (isAskingCancellationConfirmation(previousAssistantContent) &&
+            isAffirmativePhrase(contentStr)) ||
+          isCancelCodeReply;
+
+        if (isCancelIntent) {
+          this.logger.log('[Fast-Path Intent] cancel_booking');
+          return { intent: 'cancel_booking' as IntentType };
+        }
+
+        // Check if user is explicitly asking for a human agent
+        const isAskingForHuman =
+          /\b(?:human|agent|support|tư vấn viên|gặp người|nói chuyện với người|trợ giúp trực tiếp)\b/i.test(
+            contentStr,
+          );
+
+        if (!isAskingForHuman && isBookingContinuation(state, contentStr)) {
+          this.logger.log('[Fast-Path Intent] book_appointment');
+          return { intent: 'book_appointment' as IntentType };
+        }
+
+        // Fast-path for common greetings and small talk
+        const isGreetingOrThanks =
+          /^(?:hi|hello|hey|hola|chào|chào bạn|chào shop|chào ad|alo|cảm ơn|cảm ơn bạn|thanks|thank you)[\s!.]*$/i.test(
+            contentStr.trim(),
+          );
+        if (isGreetingOrThanks) {
+          this.logger.log('[Fast-Path Intent] small_talk');
+          return { intent: 'small_talk' as IntentType };
+        }
+
+        // ── 2. LLM Intent Classifier (Fallback for open questions & ambiguous messages) ──
         const intents = bookingEnabled
           ? ([
               'question',
@@ -835,16 +893,17 @@ export class GraphService {
             message.constructor?.name?.includes('HumanMessage'),
           );
         const userText = latestUserText ? messageText(latestUserText) : '';
-        const isVietnamese = isVietnameseText(userText);
-        if (/^\/keep-booking\b/i.test(userText)) {
-          return {
-            messages: [
-              new AIMessage(
-                isVietnamese ? 'Xác nhận giữ lịch!' : 'Keep booking confirmed!',
-              ),
-            ],
-          };
-        }
+        const convertedMessages = state.messages.map((m) => ({
+          role: m.constructor?.name?.includes('HumanMessage')
+            ? 'user'
+            : 'assistant',
+          content: messageText(m),
+        }));
+        const detectedLang = detectConversationLanguage(
+          convertedMessages,
+          state.siteContext,
+        );
+        const isVietnamese = detectedLang === 'vi';
         const bookingCode =
           extractBookingCode(userText) ??
           (await activeConversationBookingCode(state));
@@ -898,7 +957,20 @@ export class GraphService {
           ),
         };
 
-        if (!/^\/confirm-cancel-booking\b/i.test(userText)) {
+        const previousAssistant = state.messages
+          .slice(0, -1)
+          .reverse()
+          .find((message) => message.constructor?.name?.includes('AIMessage'));
+        const previousAssistantText = previousAssistant
+          ? messageText(previousAssistant)
+          : '';
+
+        const isExplicitConfirm =
+          /^\/confirm-cancel-booking\b/i.test(userText) ||
+          (isAskingCancellationConfirmation(previousAssistantText) &&
+            isAffirmativePhrase(userText));
+
+        if (!isExplicitConfirm) {
           this.chatGateway.emitBookingCancellation(
             conversationId,
             cancellationPayload,
@@ -907,8 +979,8 @@ export class GraphService {
             messages: [
               new AIMessage(
                 isVietnamese
-                  ? 'Vui lòng kiểm tra và xác nhận hủy lịch.'
-                  : 'Please review and confirm the booking cancellation.',
+                  ? 'Vui lòng kiểm tra và xác nhận hủy lịch trên phiếu bên dưới.'
+                  : 'Please review and confirm the booking cancellation on the card below.',
               ),
             ],
           };
@@ -951,28 +1023,25 @@ export class GraphService {
       };
 
       const bookingSlotSelectedNode = (state: typeof AgentState.State) => {
-        const latestUserText = [...state.messages]
-          .reverse()
-          .find((message) =>
-            message.constructor?.name?.includes('HumanMessage'),
-          );
-        const userText = latestUserText ? messageText(latestUserText) : '';
-        const slotSelection = parseBookingSlotSelection(userText);
-        const previousAssistantText = [...state.messages]
-          .reverse()
-          .find((message) => message.constructor?.name?.includes('AIMessage'));
-        const isVietnamese =
-          slotSelection?.language === 'vi' ||
-          (slotSelection?.language !== 'en' &&
-            isVietnameseText(
-              `${previousAssistantText ? messageText(previousAssistantText) : ''}\n${userText}`,
-            ));
+        const convertedMessages = state.messages.map((m) => ({
+          role: m.constructor?.name?.includes('HumanMessage')
+            ? 'user'
+            : 'assistant',
+          content: messageText(m),
+        }));
+        const detectedLang = detectConversationLanguage(
+          convertedMessages,
+          state.siteContext,
+        );
+        const isVietnamese = detectedLang === 'vi';
+        const nameQuestion = isVietnamese
+          ? 'Bạn tên là gì?'
+          : "What's your name?";
+        const nameChips = state.visitorContext?.name
+          ? `\n\n<chips>${state.visitorContext.name}</chips>`
+          : '';
         return {
-          messages: [
-            new AIMessage(
-              isVietnamese ? 'Bạn tên là gì?' : "What's your name?",
-            ),
-          ],
+          messages: [new AIMessage(`${nameQuestion}${nameChips}`)],
         };
       };
 
@@ -988,8 +1057,14 @@ export class GraphService {
               domains: state.siteContext.domains,
             }
           : state.siteContext;
+        const convertedMessages: LLMMessage[] = state.messages.map((m) => ({
+          role: m.constructor?.name?.includes('HumanMessage')
+            ? ('user' as const)
+            : ('assistant' as const),
+          content: messageText(m),
+        }));
         let systemPrompt = this.aiService.buildSystemPrompt({
-          messages: [],
+          messages: convertedMessages,
           summary: state.summary,
           siteId: state.siteId,
           conversationId: state.conversationId,
@@ -1010,9 +1085,7 @@ export class GraphService {
         this.logger.log(
           `[Tool Binding] intent=${state.intent ?? 'unknown'} tools=${visibleTools.map((tool) => tool.name).join(', ')}`,
         );
-        const shouldStream = !['book_appointment', 'small_talk'].includes(
-          state.intent ?? '',
-        );
+        const shouldStream = state.intent !== 'book_appointment';
         const boundModel = this.aiService
           .buildModel(0.2, shouldStream, options.maxTokensPerResponse)
           .bindTools(visibleTools);
@@ -1064,14 +1137,18 @@ export class GraphService {
             if (lastMessage.name?.includes('getAvailableSlots')) {
               this.chatGateway.emitBookingSlots(conversationId, parsed);
             } else if (lastMessage.name?.includes('createBooking')) {
-              const isActionRequired =
-                (parsed as Record<string, unknown>)?.error ===
-                'ACTION_REQUIRED';
-              if (!isActionRequired) {
-                const bookingCode = (parsed as Record<string, unknown>)
-                  ?.bookingCode;
-                createdBookingCode =
-                  typeof bookingCode === 'string' ? bookingCode : undefined;
+              const p =
+                parsed && typeof parsed === 'object'
+                  ? (parsed as Record<string, unknown>)
+                  : null;
+              const hasError = !!p?.error;
+              const bookingCode = p?.bookingCode;
+              if (
+                !hasError &&
+                typeof bookingCode === 'string' &&
+                bookingCode.trim().length > 0
+              ) {
+                createdBookingCode = bookingCode;
                 this.chatGateway.emitBookingSuccess(conversationId, parsed);
               }
             }
@@ -1129,12 +1206,12 @@ export class GraphService {
        * Calls the LLM to produce a rolling summary and trims the active message
        * list to the most recent 2. Persists the new summary to the database.
        */
-      const SUMMARIZE_THRESHOLD = 10;
-      const summarizeMemory = async (state: typeof AgentState.State) => {
+      const SUMMARIZE_THRESHOLD = 25;
+      const summarizeMemory = (state: typeof AgentState.State) => {
         if (state.messages.length <= SUMMARIZE_THRESHOLD) return {};
 
         this.logger.log(
-          `Message threshold (${SUMMARIZE_THRESHOLD}) exceeded. Summarising...`,
+          `Message threshold (${SUMMARIZE_THRESHOLD}) exceeded. Summarising memory in background...`,
         );
 
         const messagesToSummarize = state.messages.slice(
@@ -1146,24 +1223,32 @@ export class GraphService {
           ? `Update the following conversation summary with the new messages. Keep it concise.\n\nCurrent Summary: ${state.summary}\n\nNew Messages:\n${JSON.stringify(messagesToSummarize)}`
           : `Summarise the following conversation concisely:\n${JSON.stringify(messagesToSummarize)}`;
 
-        const response = await this.aiService.invoke({
-          messages: [{ role: 'user', content: summaryPrompt }],
-        });
-
-        const newSummary = response.content;
-        const newCount =
-          state.summarizedMessageCount + messagesToSummarize.length;
-
-        // Persist to DB so the next graph run picks up the compressed context
-        await this.conversationRepo.update(conversationId, {
-          summary: newSummary,
-          summarizedMessageCount: newCount,
-        });
+        // Background execution — do not await to keep visitor response instantaneous
+        this.aiService
+          .invoke({
+            messages: [{ role: 'user', content: summaryPrompt }],
+          })
+          .then(async (response) => {
+            const newSummary = response.content;
+            const newCount =
+              state.summarizedMessageCount + messagesToSummarize.length;
+            await this.conversationRepo.update(conversationId, {
+              summary: newSummary,
+              summarizedMessageCount: newCount,
+            });
+            this.logger.log(
+              `Background memory summary updated for conversation ${conversationId}`,
+            );
+          })
+          .catch((err: unknown) => {
+            this.logger.error(
+              `Background summarisation failed for conversation ${conversationId}`,
+              err,
+            );
+          });
 
         return {
           messages: state.messages.slice(state.messages.length - 2),
-          summary: newSummary,
-          summarizedMessageCount: newCount,
         };
       };
 
@@ -1249,11 +1334,11 @@ export class GraphService {
                 .map((c) => c.text ?? '')
                 .join('');
 
-        const latestUserText = messages
-          .slice()
-          .reverse()
-          .find((message) => message.role === 'user')?.content;
-        const isVietnamese = isVietnameseText(latestUserText ?? '');
+        const detectedLang = detectConversationLanguage(
+          messages,
+          options.siteContext,
+        );
+        const isVietnamese = detectedLang === 'vi';
         const intentSafeText =
           finalState.intent === 'small_talk'
             ? sanitizeSmallTalkResponse(
@@ -1261,9 +1346,18 @@ export class GraphService {
                 isVietnamese,
                 options.siteContext,
               )
-            : sanitizeBookingChips(textContent, options.siteContext);
-        const sanitizedText = replacePseudoToolResponse(
+            : sanitizeBookingChips(
+                textContent,
+                options.siteContext,
+                options.visitorContext,
+                detectedLang,
+              );
+        const cleanLangText = cleanMixedLanguageResponse(
           intentSafeText,
+          isVietnamese,
+        );
+        const sanitizedText = replacePseudoToolResponse(
+          cleanLangText,
           isVietnamese,
         );
         if (sanitizedText.trim()) {
