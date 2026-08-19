@@ -39,7 +39,6 @@ describe('ChatService saveMessage', () => {
     };
     const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
     const aiService = { invoke: jest.fn() };
-
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,

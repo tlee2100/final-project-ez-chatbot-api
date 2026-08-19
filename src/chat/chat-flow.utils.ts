@@ -92,6 +92,71 @@ export const isBookingSlotSelection = (text: string) =>
   !!parseBookingSlotSelection(text) ||
   /^(?:I choose|Tôi chọn)\s+\d{1,2}:\d{2}\b/i.test(text.trim());
 
+export const extractRequestedTimeSlot = (text: string) => {
+  const meridiemMatch = text.match(
+    /\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)\b/i,
+  );
+  if (meridiemMatch) {
+    let hour = Number(meridiemMatch[1]) % 12;
+    if (meridiemMatch[3].toLowerCase() === 'pm') hour += 12;
+    return `${String(hour).padStart(2, '0')}:${meridiemMatch[2] ?? '00'}`;
+  }
+
+  const timeMatch = text.match(/\b([01]?\d|2[0-3])(?::|h)([0-5]\d)\b/i);
+  return timeMatch ? `${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}` : null;
+};
+
+export const isTimeSlotAvailable = (
+  payload: unknown,
+  timeSlot: string,
+): boolean | undefined => {
+  const record =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  const slots = Array.isArray(payload)
+    ? payload
+    : [record?.slots, record?.result, record?.output, record?.data].find(
+        Array.isArray,
+      );
+
+  if (!slots) return undefined;
+  return slots.some(
+    (slot) =>
+      !!slot &&
+      typeof slot === 'object' &&
+      (slot as Record<string, unknown>).timeSlot === timeSlot &&
+      (slot as Record<string, unknown>).available !== false,
+  );
+};
+
+export const isDraftBookingAbandonment = (text: string) =>
+  /^(?:never\s*mind|thôi(?:\s+nhé)?|bỏ\s+đi)[\s!.]*$/i.test(text.trim()) ||
+  /\b(?:stop|quit)\s+(?:the\s+)?booking\b|\b(?:do not|don't|no longer)\s+want\s+to\s+book\b|(?:thôi|dừng|ngừng|không muốn|không cần).*(?:đặt(?:\s+lịch)?|book)/i.test(
+    text,
+  );
+
+export const bookAppointmentToolNames = (latestUserText: string) => {
+  if (/^\/confirm-booking\b/i.test(latestUserText.trim())) {
+    return ['createBooking'];
+  }
+
+  if (/^\/update-draft-booking\b/i.test(latestUserText.trim())) {
+    return ['draftBooking'];
+  }
+
+  return [
+    'getSiteConfig',
+    'getAvailableSlots',
+    'holdSlot',
+    'releaseHold',
+    'draftBooking',
+  ];
+};
+
+export const bookingCodeText = (code: string, isVietnamese: boolean) =>
+  `\n\n${isVietnamese ? 'Mã đặt lịch' : 'Booking code'}: **${code}**`;
+
 export const replacePseudoToolResponse = (text: string, vietnamese: boolean) =>
   /^<(?:getSiteConfig|getAvailableSlots|createBooking|cancelBooking|getConversationContext|searchKnowledge)>$/i.test(
     text.trim(),
@@ -160,6 +225,7 @@ export const detectConversationLanguage = (
     bookingServices?: { name: string }[];
     bookingResources?: { name: string }[];
   },
+  preferLatestUserLanguage = false,
 ): 'vi' | 'en' => {
   const entityNames = [
     ...(siteContext?.bookingServices?.map((s) => s.name.trim().toLowerCase()) ??
@@ -169,40 +235,94 @@ export const detectConversationLanguage = (
     ) ?? []),
   ].filter(Boolean);
 
-  // Scan user messages from most recent to oldest
-  for (let i = messages.length - 1; i >= 0; i--) {
+  const explicitLanguage = (content: string) => {
+    const languageText = entityNames.reduce(
+      (text, name) => text.split(name).join(''),
+      content.toLowerCase(),
+    );
+    if (isVietnameseText(languageText)) return 'vi';
+    if (isEnglishText(languageText)) return 'en';
+    return null;
+  };
+
+  if (preferLatestUserLanguage) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role !== 'user' && msg.role !== 'human') continue;
+      const content = msg.content.trim();
+      if (
+        content.startsWith('/') ||
+        entityNames.includes(content.toLowerCase())
+      )
+        continue;
+      const language = explicitLanguage(content);
+      if (language) return language;
+    }
+  }
+
+  const lastCompletedBookingIndex = messages.reduce(
+    (latest, message, index) =>
+      (message.role === 'assistant' || message.role === 'ai') &&
+      (/<booking-code>.*?<\/booking-code>/i.test(message.content) ||
+        /\bbooking code\s*:/i.test(message.content) ||
+        /\bm\u00e3 \u0111\u1eb7t l\u1ecbch\s*:/i.test(message.content))
+        ? index
+        : latest,
+    -1,
+  );
+
+  // A completed booking ends the language lock. Honor the visitor's next
+  // explicit language while keeping the booking flow itself consistent.
+  for (let i = messages.length - 1; i > lastCompletedBookingIndex; i--) {
+    if (lastCompletedBookingIndex === -1) break;
+    const msg = messages[i];
+    if (msg.role !== 'user' && msg.role !== 'human') continue;
+    const content = msg.content.trim();
+    if (content.startsWith('/') || entityNames.includes(content.toLowerCase()))
+      continue;
+    const language = explicitLanguage(content);
+    if (language) return language;
+  }
+
+  // 1. Scan user messages from OLDEST to NEWEST to lock the conversation language from the start
+  for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== 'user' && msg.role !== 'human') continue;
     const content = msg.content.trim();
     const lower = content.toLowerCase();
 
-    // Ignore exact entity clicks (services, staff) or chip selections
+    // Ignore exact entity clicks (services, staff) or system commands
     if (entityNames.includes(lower)) continue;
-    if (/^\/select-booking-slot\b/i.test(content)) {
-      if (content.includes('"language":"vi"')) return 'vi';
-      if (content.includes('"language":"en"')) return 'en';
-      continue;
-    }
-    if (/^(hôm nay|thứ|ngày khác|chọn ngày khác)/i.test(lower)) return 'vi';
+    if (/^\/select-booking-slot\b/i.test(content)) continue;
+    if (/^\/confirm-booking\b/i.test(content)) continue;
+
+    // Check specific booking chips / keywords
     if (
-      /^(today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|other date|choose another date)/i.test(
+      /^(today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|other date|choose another date|skip|no preference|book|booking|book an appointment)/i.test(
         lower,
       )
-    )
+    ) {
       return 'en';
-    if (/^(bỏ qua|không ưu tiên)/i.test(lower)) return 'vi';
-    if (/^(skip|no preference)/i.test(lower)) return 'en';
+    }
+    if (
+      /^(hôm nay|thứ|ngày khác|chọn ngày khác|bỏ qua|không ưu tiên|đặt lịch|đặt hẹn)/i.test(
+        lower,
+      )
+    ) {
+      return 'vi';
+    }
 
-    // Check natural language text in user's message
-    if (isVietnameseText(content)) return 'vi';
+    // Check natural language text
+    // Prioritize English detection first so Vietnamese entity names with accents (e.g. Sửu, Dần) in English messages don't cause false Vietnamese detection
     if (isEnglishText(content)) return 'en';
+    if (isVietnameseText(content)) return 'vi';
   }
 
-  // If no clear user message yet, check assistant messages from oldest (greeting)
+  // 2. If no user message was definitive, check assistant messages from oldest (greeting)
   for (const msg of messages) {
     const content = msg.content.trim();
-    if (isVietnameseText(content)) return 'vi';
     if (isEnglishText(content)) return 'en';
+    if (isVietnameseText(content)) return 'vi';
   }
 
   return 'vi';
@@ -318,6 +438,25 @@ export type BookingVisitorContext = {
   email?: string;
 };
 
+export const isBookingPhonePrompt = (text: string) => {
+  const lastLine = text
+    .replace(/<chips>.*?<\/chips>/gis, '')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .at(-1);
+  const normalized = (lastLine ?? '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/đ/gi, 'd')
+    .toLowerCase();
+
+  return (
+    !normalized.includes('email') &&
+    /\b(?:phone(?: number)?|so dien thoai|sdt)\b/.test(normalized)
+  );
+};
+
 export const sanitizeBookingChips = (
   text: string,
   siteContext?: BookingSiteContext,
@@ -328,7 +467,21 @@ export const sanitizeBookingChips = (
     return text;
   }
 
-  const isVietnamese = language ? language === 'vi' : isVietnameseText(text);
+  const entityNames = [
+    ...(siteContext.bookingServices?.map((service) => service.name) ?? []),
+    ...(siteContext.bookingResources?.map((resource) => resource.name) ?? []),
+  ];
+  const languageText = entityNames.reduce(
+    (content, name) => content.split(name.toLowerCase()).join(''),
+    text.toLowerCase(),
+  );
+  const isVietnamese = isVietnameseText(languageText)
+    ? true
+    : isEnglishText(languageText)
+      ? false
+      : language
+        ? language === 'vi'
+        : false;
   const noPreference = isVietnamese ? 'Không ưu tiên' : 'No Preference';
   const skipLabel = isVietnamese ? 'Bỏ qua' : 'Skip';
   const services =
@@ -339,6 +492,9 @@ export const sanitizeBookingChips = (
   // Extract text without chips to analyze the current prompt/question being asked
   const textWithoutChips = text
     .replace(/\s*<chips>.*?<*\/?chips>/gis, '')
+    .replace(/\s*<[^>\n]*?\|[^>\n]*?<\/chips>/gis, '')
+    .replace(/\s*<[^>\n]*?\|[^>\n]*?>/gis, '')
+    .replace(/\s*\[[^\]\n]*?\|[^\]\n]*?\]/gis, '')
     .trim();
   const lines = textWithoutChips
     .split('\n')
@@ -446,7 +602,13 @@ export const sanitizeSmallTalkResponse = (
   const normalizedText = text.toLowerCase();
   const exposesBookingData =
     /<chips>.*?<\/chips>/i.test(text) ||
-    bookingNames.some((name) => normalizedText.includes(name));
+    bookingNames.some((name) => {
+      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(
+        `(^|[^\\p{L}\\p{N}])${escapedName}(?=$|[^\\p{L}\\p{N}])`,
+        'iu',
+      ).test(normalizedText);
+    });
 
   if (!exposesBookingData) return text;
 

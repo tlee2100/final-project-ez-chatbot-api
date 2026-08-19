@@ -1368,7 +1368,12 @@ export class ChatService {
       }
     }
 
-    if (conversation.site && conversation.site.owner) {
+    // Only send summary & transcript emails if the conversation was closed normally (not just cleared/reset by visitor)
+    if (
+      reason !== ClosedReason.CLEARED &&
+      conversation.site &&
+      conversation.site.owner
+    ) {
       const messageCount = await this.chatMessageRepository.count({
         where: { conversationId: conversation.id },
       });

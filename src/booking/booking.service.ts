@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
   Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
@@ -68,6 +69,7 @@ export class BookingService {
     private resourceRepository: Repository<BookingResource>,
     @InjectRepository(BookingServiceEntity)
     private serviceEntityRepository: Repository<BookingServiceEntity>,
+    @Inject(forwardRef(() => SiteService))
     private siteService: SiteService,
     private emailQueueService: EmailQueueService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
