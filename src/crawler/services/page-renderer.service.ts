@@ -1,9 +1,5 @@
-import {
-  Injectable,
-  OnModuleDestroy,
-  ServiceUnavailableException,
-} from '@nestjs/common';
-import type { Browser, HTTPResponse } from 'puppeteer-core';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import type { Browser, BrowserContext, HTTPResponse } from 'puppeteer-core';
 import {
   CRAWLER_NAVIGATION_TIMEOUT_MS,
   CRAWLER_USER_AGENT,
@@ -19,18 +15,18 @@ export type RenderedPage = {
 };
 
 @Injectable()
-export class PageRendererService implements OnModuleDestroy {
-  private browserPromise?: Promise<Browser>;
+export class PageRendererService {
   private readonly safeHostCache = new Map<string, number>();
 
   constructor(private readonly urlService: CrawlerUrlService) {}
 
   async render(rawUrl: string): Promise<RenderedPage> {
     const target = await this.urlService.assertPublicUrl(rawUrl);
-    const browser = await this.getBrowser();
-    const context = await browser.createBrowserContext();
-    const page = await context.newPage();
+    const browser = await this.connectBrowser();
+    let context: BrowserContext | undefined;
     try {
+      context = await browser.createBrowserContext();
+      const page = await context.newPage();
       await page.setUserAgent(CRAWLER_USER_AGENT);
       await page.setRequestInterception(true);
       page.on('request', (request) => {
@@ -120,46 +116,26 @@ export class PageRendererService implements OnModuleDestroy {
             : null,
       };
     } finally {
-      await context.close();
+      await context?.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
     }
   }
 
-  async onModuleDestroy(): Promise<void> {
-    if (this.browserPromise) {
-      const browser = await this.browserPromise.catch(() => undefined);
-      await browser?.close();
+  private async connectBrowser(): Promise<Browser> {
+    const browserWSEndpoint = process.env.BROWSER_WS_ENDPOINT?.trim();
+    if (!browserWSEndpoint) {
+      throw new ServiceUnavailableException(
+        'BROWSER_WS_ENDPOINT is required for crawler rendering',
+      );
     }
-  }
-
-  private async getBrowser(): Promise<Browser> {
-    if (!this.browserPromise) {
-      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
-      if (!executablePath) {
-        throw new ServiceUnavailableException(
-          'PUPPETEER_EXECUTABLE_PATH is required for crawler rendering',
-        );
-      }
-      const noSandbox = process.env.CRAWLER_CHROMIUM_NO_SANDBOX === 'true';
+    try {
       const { default: puppeteer } = await import('puppeteer-core');
-      this.browserPromise = puppeteer.launch({
-        executablePath,
-        headless: true,
-        args: [
-          '--disable-dev-shm-usage',
-          ...(noSandbox ? ['--no-sandbox', '--disable-setuid-sandbox'] : []),
-        ],
-      });
-      this.browserPromise
-        .then((browser) => {
-          browser.once('disconnected', () => {
-            this.browserPromise = undefined;
-          });
-        })
-        .catch(() => {
-          this.browserPromise = undefined;
-        });
+      return await puppeteer.connect({ browserWSEndpoint });
+    } catch {
+      throw new ServiceUnavailableException(
+        'Browser rendering service is unavailable',
+      );
     }
-    return this.browserPromise;
   }
 
   private async assertCachedPublicUrl(rawUrl: string): Promise<void> {
