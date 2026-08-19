@@ -504,11 +504,10 @@ existing chunking, embedding, and pgvector pipeline. The configured sitemap,
 nested sitemaps, and listed pages may use public hostnames that differ from the
 site's primary URL.
 
-Production deployment is feature-flagged. Set `CRAWLER_ENABLED=true` only after
-Chromium has been verified in the production image. The provided Dockerfile
-installs Alpine Chromium and sets `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
-The browser sandbox stays enabled unless `CRAWLER_CHROMIUM_NO_SANDBOX=true` is
-explicitly set in a hardened container.
+Production deployment is feature-flagged. Set `CRAWLER_ENABLED=true` and provide
+a Browserless WebSocket URL through `BROWSER_WS_ENDPOINT`. Keep the Browserless
+token in deployment secrets; do not commit or log the endpoint. The API opens
+one remote browser session per rendered page and closes it after use.
 
 Crawler management endpoints require `ADMIN` or `SUPER_ADMIN` and tenant access
 to `siteId`:
@@ -540,10 +539,10 @@ so the legacy non-null file-path constraint can be restored; back up crawler
 content before a migration rollback.
 
 Run `npm test -- --runInBand src/crawler` for the crawler unit suite. For the
-local CSR render fixture, set `RUN_CRAWLER_INTEGRATION=true`, set
-`PUPPETEER_EXECUTABLE_PATH` to an installed Chromium or Chrome binary, and run
-`npm run test:crawler:integration`. The fixture injects the URL guard so it can
-bind to a random localhost port; production requests still reject localhost.
+Browserless smoke test, set `RUN_CRAWLER_INTEGRATION=true`,
+`BROWSER_WS_ENDPOINT`, and `CRAWLER_INTEGRATION_URL` to a public test page, then
+run `npm run test:crawler:integration`. Browserless cannot access a fixture on
+the API process's localhost.
 
 ## WebSocket Chat
 
