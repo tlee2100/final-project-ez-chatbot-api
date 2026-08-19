@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtModule } from '@nestjs/jwt';
 import { Booking } from './entities/booking.entity';
+import { BookingBlockout } from './entities/booking-blockout.entity';
 import { BookingService } from './booking.service';
 import { BookingGateway } from './booking.gateway';
 import { SiteModule } from '../site/site.module';
@@ -15,6 +16,7 @@ import { SharedModule } from '../shared/shared.module';
   imports: [
     TypeOrmModule.forFeature([
       Booking,
+      BookingBlockout,
       SiteBookingConfig,
       BookingResource,
       BookingServiceEntity,

@@ -14,6 +14,7 @@ import { BookingService } from './site/entities/booking-service.entity';
 import { BookingResource } from './site/entities/booking-resources.entity';
 import { IndustryTemplate } from './site/entities/industry-template.entity';
 import { Booking } from './booking/entities/booking.entity';
+import { BookingBlockout } from './booking/entities/booking-blockout.entity';
 import { BookingModule } from './booking/booking.module';
 import { AuthModule } from './auth/auth.module';
 import { AutomapperModule } from '@automapper/nestjs';
@@ -54,6 +55,7 @@ import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
         BookingResource,
         IndustryTemplate,
         Booking,
+        BookingBlockout,
         Document,
         DocumentChunk,
         Organization,

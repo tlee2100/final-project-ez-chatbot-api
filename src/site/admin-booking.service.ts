@@ -18,6 +18,7 @@ import type { PaginateQuery } from 'nestjs-paginate';
 import { BookingService as CoreBookingService } from '../booking/booking.service';
 import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { CreateBookingDto } from '../booking/dto/create-booking.dto';
+import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
 import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 
 import { IsArray, IsBoolean, IsNumber, IsString } from 'class-validator';
@@ -298,5 +299,31 @@ export class AdminBookingService {
   async holdSlot(siteId: string, dto: HoldSlotDto, user: JwtUser) {
     await this.siteService.assertSiteAccess(siteId, user);
     return this.coreBookingService.holdSlot(siteId, dto);
+  }
+
+  async getBlockouts(
+    siteId: string,
+    user: JwtUser,
+    startDate?: string,
+    endDate?: string,
+    resourceId?: string,
+  ) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.getBlockouts(
+      siteId,
+      startDate,
+      endDate,
+      resourceId,
+    );
+  }
+
+  async createBlockout(siteId: string, dto: CreateBlockoutDto, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.createBlockout(siteId, dto);
+  }
+
+  async deleteBlockout(siteId: string, blockoutId: string, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.deleteBlockout(siteId, blockoutId);
   }
 }

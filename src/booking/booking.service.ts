@@ -7,11 +7,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
+import { BookingBlockout } from './entities/booking-blockout.entity';
 import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
 import { BookingResource } from '../site/entities/booking-resources.entity';
 import { BookingService as BookingServiceEntity } from '../site/entities/booking-service.entity';
 import { Repository } from 'typeorm';
 import { CreateBookingDto } from './dto/create-booking.dto';
+import { CreateBlockoutDto } from './dto/create-blockout.dto';
 import { SiteService } from '../site/site.service';
 import { EmailQueueService } from '../notification/email-queue.service';
 import { BookingStatus } from './enums/booking-status.enum';
@@ -58,6 +60,8 @@ export class BookingService {
   constructor(
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
+    @InjectRepository(BookingBlockout)
+    private blockoutRepository: Repository<BookingBlockout>,
     @InjectRepository(SiteBookingConfig)
     private configRepository: Repository<SiteBookingConfig>,
     @InjectRepository(BookingResource)
@@ -115,6 +119,11 @@ export class BookingService {
     startDate: string,
     endDate: string,
   ) {
+    const site = await this.siteService.findOne(siteId);
+    if (!site.bookingEnabled) {
+      return { slots: [] };
+    }
+
     const config = await this.configRepository.findOne({ where: { siteId } });
     if (!config) {
       throw new NotFoundException('Site booking configuration not found');
@@ -137,6 +146,12 @@ export class BookingService {
       endBoundary,
       resourceId,
     );
+    const blockouts = await this.fetchBlockouts(
+      siteId,
+      startBoundary,
+      endBoundary,
+      resourceId,
+    );
     const slotTimes = this.generateSlotTimeBlocks(
       config,
       startBoundary,
@@ -154,9 +169,31 @@ export class BookingService {
       resourceId,
       allResources,
       bookings,
+      blockouts,
       slotTimes,
       redisMap,
     );
+  }
+
+  private async fetchBlockouts(
+    siteId: string,
+    startBoundary: Date,
+    endBoundary: Date,
+    resourceId?: string | null,
+  ) {
+    const query = this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId })
+      .andWhere('b.endAt >= :startBoundary', { startBoundary })
+      .andWhere('b.startAt <= :endBoundary', { endBoundary });
+
+    if (resourceId) {
+      query.andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId,
+      });
+    }
+
+    return query.getMany();
   }
 
   private resolveTimeBoundaries(
@@ -289,6 +326,7 @@ export class BookingService {
     resourceId: string | null,
     allResources: BookingResource[],
     bookings: Booking[],
+    blockouts: BookingBlockout[],
     slotTimes: { slotStart: Date; slotEnd: Date; isPast: boolean }[],
     redisMap: Map<string, boolean>,
   ) {
@@ -307,7 +345,15 @@ export class BookingService {
           return slotStart < bEnd && slotEnd > bStart;
         });
 
-        if (!isOverlapping) {
+        const isBlocked = blockouts.some((bo) => {
+          const boStart = new Date(bo.startAt);
+          const boEnd = new Date(bo.endAt);
+          const matchesResource =
+            !bo.resourceId || bo.resourceId === resourceId;
+          return matchesResource && slotStart < boEnd && slotEnd > boStart;
+        });
+
+        if (!isOverlapping && !isBlocked) {
           const key = `booking_hold:site:${siteId}:resource:${resourceId}:time:${slotStart.toISOString()}_${slotEnd.toISOString()}`;
           const isHolding = redisMap.has(key);
 
@@ -329,7 +375,16 @@ export class BookingService {
               b.resourceId === resource.id
             );
           });
-          return !isOverlapping;
+          if (isOverlapping) return false;
+
+          const isBlocked = blockouts.some((bo) => {
+            const boStart = new Date(bo.startAt);
+            const boEnd = new Date(bo.endAt);
+            const matchesResource =
+              !bo.resourceId || bo.resourceId === resource.id;
+            return matchesResource && slotStart < boEnd && slotEnd > boStart;
+          });
+          return !isBlocked;
         });
 
         if (freeResources.length > 0) {
@@ -358,6 +413,35 @@ export class BookingService {
   }
 
   async holdSlot(siteId: string, dto: HoldSlotDto) {
+    const site = await this.siteService.findOne(siteId);
+    if (!site.bookingEnabled) {
+      throw new BadRequestException('Booking is disabled for this site');
+    }
+
+    // Check if slot overlaps with any active blockout
+    const overlappingBlockout = await this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId })
+      .andWhere(
+        'tstzrange("b"."startAt", "b"."endAt") && tstzrange(:startAt::timestamptz, :endAt::timestamptz)',
+        {
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+        },
+      )
+      .andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId: dto.resourceId,
+      })
+      .getOne();
+
+    if (overlappingBlockout) {
+      throw new ConflictException(
+        overlappingBlockout.reason
+          ? `Selected time is blocked: ${overlappingBlockout.reason}`
+          : 'Selected time is blocked (holiday or staff leave)',
+      );
+    }
+
     const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
 
     // If slot is already held, check if it belongs to the same session
@@ -444,12 +528,42 @@ export class BookingService {
   }
 
   async createBooking(dto: CreateBookingDto): Promise<Booking> {
+    const site = await this.siteService.findOne(dto.siteId);
+    if (!site.bookingEnabled) {
+      throw new BadRequestException('Booking is disabled for this site');
+    }
+
     const bookingDate = new Date(dto.startAt);
 
     // Prevent booking for days before today
     if (isBefore(startOfDay(bookingDate), startOfDay(new Date()))) {
       throw new BadRequestException('Cannot create a booking for a past day');
     }
+
+    // Check if slot overlaps with any active blockout
+    const overlappingBlockout = await this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId: dto.siteId })
+      .andWhere(
+        'tstzrange("b"."startAt", "b"."endAt") && tstzrange(:startAt::timestamptz, :endAt::timestamptz)',
+        {
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+        },
+      )
+      .andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId: dto.resourceId || null,
+      })
+      .getOne();
+
+    if (overlappingBlockout) {
+      throw new ConflictException(
+        overlappingBlockout.reason
+          ? `Selected time is blocked: ${overlappingBlockout.reason}`
+          : 'Selected time is blocked (holiday or staff leave)',
+      );
+    }
+
     // Layer 2 Security: Pre-check SELECT for overlaps
     const conflictQuery = this.bookingRepository
       .createQueryBuilder('booking')
@@ -715,5 +829,81 @@ export class BookingService {
         },
       ],
     };
+  }
+
+  // ── Blockout Management ──────────────────────────────────────────────────
+
+  async getBlockouts(
+    siteId: string,
+    startDate?: string,
+    endDate?: string,
+    resourceId?: string,
+  ): Promise<BookingBlockout[]> {
+    const query = this.blockoutRepository
+      .createQueryBuilder('b')
+      .leftJoinAndSelect('b.resource', 'resource')
+      .where('b.siteId = :siteId', { siteId });
+
+    if (startDate) {
+      query.andWhere('b.endAt >= :startDate', { startDate });
+    }
+    if (endDate) {
+      query.andWhere('b.startAt <= :endDate', { endDate });
+    }
+    if (resourceId) {
+      query.andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId,
+      });
+    }
+
+    query.orderBy('b.startAt', 'ASC');
+    return query.getMany();
+  }
+
+  async createBlockout(
+    siteId: string,
+    dto: CreateBlockoutDto,
+  ): Promise<BookingBlockout> {
+    const start = new Date(dto.startAt);
+    const end = new Date(dto.endAt);
+
+    if (isAfter(start, end) || isEqual(start, end)) {
+      throw new BadRequestException('endAt must be after startAt');
+    }
+
+    if (dto.resourceId) {
+      const resource = await this.getResourceById(siteId, dto.resourceId);
+      if (!resource) {
+        throw new NotFoundException(
+          `Staff resource ${dto.resourceId} not found`,
+        );
+      }
+    }
+
+    const blockout = this.blockoutRepository.create({
+      siteId,
+      resourceId: dto.resourceId || null,
+      startAt: start,
+      endAt: end,
+      reason: dto.reason?.trim() || null,
+    });
+
+    const saved = await this.blockoutRepository.save(blockout);
+    return this.blockoutRepository.findOneOrFail({
+      where: { id: saved.id },
+      relations: { resource: true },
+    });
+  }
+
+  async deleteBlockout(siteId: string, blockoutId: string): Promise<void> {
+    const blockout = await this.blockoutRepository.findOne({
+      where: { id: blockoutId, siteId },
+    });
+
+    if (!blockout) {
+      throw new NotFoundException(`Blockout with ID ${blockoutId} not found`);
+    }
+
+    await this.blockoutRepository.remove(blockout);
   }
 }

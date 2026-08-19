@@ -21,6 +21,7 @@ import {
   UpdateBookingConfigDto,
 } from './admin-booking.service';
 import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
+import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -157,5 +158,54 @@ export class AdminBookingController {
   @ApiOperation({ summary: 'Get all actively held slots for a site' })
   getActiveHolds(@Param('siteId') siteId: string, @Req() req: AuthRequest) {
     return this.adminBookingService.getActiveHolds(siteId, req.user);
+  }
+
+  @Get('blockouts')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.AGENT)
+  @ApiOperation({ summary: 'Get all blockouts for a site' })
+  getBlockouts(
+    @Param('siteId') siteId: string,
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+    @Query('resourceId') resourceId: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.getBlockouts(
+      siteId,
+      req.user,
+      startDate,
+      endDate,
+      resourceId,
+    );
+  }
+
+  @Post('blockouts')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Create a blockout period (holiday or staff leave)',
+  })
+  createBlockout(
+    @Param('siteId') siteId: string,
+    @Body() body: CreateBlockoutDto,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.createBlockout(siteId, body, req.user);
+  }
+
+  @Delete('blockouts/:blockoutId')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete a blockout period' })
+  deleteBlockout(
+    @Param('siteId') siteId: string,
+    @Param('blockoutId') blockoutId: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.deleteBlockout(
+      siteId,
+      blockoutId,
+      req.user,
+    );
   }
 }
