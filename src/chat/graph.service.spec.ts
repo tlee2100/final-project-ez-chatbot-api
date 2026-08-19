@@ -5,9 +5,15 @@ import {
   normalizePhone,
 } from './booking-cancellation.utils';
 import {
+  bookingCodeText,
+  bookAppointmentToolNames,
   detectConversationLanguage,
+  extractRequestedTimeSlot,
   generateDateChips,
+  isBookingPhonePrompt,
   isBookingSlotSelection,
+  isDraftBookingAbandonment,
+  isTimeSlotAvailable,
   parseBookingSlotSelection,
   replacePseudoToolResponse,
   sanitizeBookingChips,
@@ -31,6 +37,15 @@ describe('booking cancellation code resolution', () => {
     ].join('\n');
 
     expect(latestActiveBookingCode(history)).toBe('AB12CD34');
+  });
+
+  it('reads booking codes from bold display text while supporting old messages', () => {
+    const history = [
+      '<booking-code>AB12CD34</booking-code>',
+      'Booking code: **ON11204M**',
+    ].join('\n');
+
+    expect(latestActiveBookingCode(history)).toBe('ON11204M');
   });
 });
 
@@ -86,6 +101,59 @@ describe('booking cancellation prompts', () => {
 });
 
 describe('booking chat flow guards', () => {
+  it('extracts a requested time and checks it against MCP slot output', () => {
+    expect(extractRequestedTimeSlot('Book on 29/08/2026 at 2:30 PM')).toBe(
+      '14:30',
+    );
+    expect(extractRequestedTimeSlot('đặt lúc 9h05')).toBe('09:05');
+
+    const output = {
+      result: [
+        { timeSlot: '09:00', available: true },
+        { timeSlot: '14:30', available: true },
+      ],
+    };
+    expect(isTimeSlotAvailable(output, '14:30')).toBe(true);
+    expect(isTimeSlotAvailable(output, '15:00')).toBe(false);
+    expect(isTimeSlotAvailable({ error: 'failed' }, '14:30')).toBeUndefined();
+  });
+
+  it('formats the booking code as bold display text', () => {
+    expect(bookingCodeText('ON11204M', false)).toBe(
+      '\n\nBooking code: **ON11204M**',
+    );
+    expect(bookingCodeText('ON11204M', true)).toContain(
+      'Mã đặt lịch: **ON11204M**',
+    );
+  });
+
+  it('marks phone prompts without depending on the widget language', () => {
+    expect(isBookingPhonePrompt('Please provide your phone number.')).toBe(
+      true,
+    );
+    expect(isBookingPhonePrompt('Bạn cho mình xin số điện thoại nhé?')).toBe(
+      true,
+    );
+    expect(isBookingPhonePrompt('Would you like a confirmation email?')).toBe(
+      false,
+    );
+  });
+
+  it('only exposes createBooking for an explicit confirmation command', () => {
+    expect(bookAppointmentToolNames('customer@example.com')).toContain(
+      'draftBooking',
+    );
+    expect(bookAppointmentToolNames('customer@example.com')).not.toContain(
+      'createBooking',
+    );
+    expect(
+      bookAppointmentToolNames('/update-draft-booking {"phone":"0912345678"}'),
+    ).toEqual(['draftBooking']);
+    expect(
+      bookAppointmentToolNames('/confirm-booking {"phone":"0912345678"}'),
+    ).toEqual(['createBooking']);
+  });
+
   it('detects conversation language without false triggers from service or staff names', () => {
     const siteContext = {
       bookingServices: [{ name: 'cat toc' }, { name: 'goi dau' }],
@@ -112,6 +180,54 @@ describe('booking chat flow guards', () => {
       { role: 'user', content: 'cat toc' },
     ];
     expect(detectConversationLanguage(viMessages, siteContext)).toBe('vi');
+
+    const afterEnglishBooking = [
+      ...messages,
+      {
+        role: 'assistant',
+        content: 'Your appointment is confirmed!\n\nBooking code: **AB12CD34**',
+      },
+      {
+        role: 'user',
+        content: 'b\u1ea1n th\u1ea5y t\u00f4i th\u1ebf n\u00e0o',
+      },
+    ];
+    expect(detectConversationLanguage(afterEnglishBooking, siteContext)).toBe(
+      'vi',
+    );
+
+    const switchedDuringDraft = [
+      ...messages,
+      {
+        role: 'user',
+        content: 'b\u1ea1n th\u1ea5y t\u00f4i th\u1ebf n\u00e0o',
+      },
+    ];
+    expect(detectConversationLanguage(switchedDuringDraft, siteContext)).toBe(
+      'en',
+    );
+    expect(
+      detectConversationLanguage(switchedDuringDraft, siteContext, true),
+    ).toBe('vi');
+
+    const vietnameseCancellation = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'Hello! How can I assist you today?' },
+      { role: 'user', content: 'hủy lịch EZHOS1J8' },
+      { role: 'assistant', content: 'Vui lòng nhập số điện thoại.' },
+      { role: 'user', content: '0963258741' },
+    ];
+    expect(
+      detectConversationLanguage(vietnameseCancellation, siteContext, true),
+    ).toBe('vi');
+  });
+
+  it('recognizes abandoning an unfinished booking without treating cancellation as abandonment', () => {
+    expect(isDraftBookingAbandonment('thôi tôi không muốn đặt nữa')).toBe(true);
+    expect(isDraftBookingAbandonment("I don't want to book anymore")).toBe(
+      true,
+    );
+    expect(isDraftBookingAbandonment('cancel booking AB12CD34')).toBe(false);
   });
 
   it('parses a widget slot selection as authoritative booking data', () => {
@@ -143,6 +259,17 @@ describe('booking chat flow guards', () => {
     expect(result).toBe(
       'Xin chào! Chào mừng bạn đến với EZ Salon. Tôi có thể giúp gì cho bạn?',
     );
+  });
+
+  it('does not match a short resource name inside another word', () => {
+    const text =
+      "I'm just an AI assistant. Is there anything else I can help with?";
+
+    expect(
+      sanitizeSmallTalkResponse(text, false, {
+        bookingResources: [{ name: 'tan' }],
+      }),
+    ).toBe(text);
   });
 
   it('generates date chips correctly', () => {
@@ -187,6 +314,18 @@ describe('booking chat flow guards', () => {
     );
     expect(sanitizedDateResponse).toContain('Chọn ngày khác');
     expect(sanitizedDateResponse).not.toContain('Không ưu tiên');
+
+    const mismatchedDateResponse = sanitizeBookingChips(
+      'Cảm ơn bạn! Bạn đã chọn stylist **Dần**.\n\nBạn muốn đặt lịch vào ngày nào?\n\n<chips>Today|Choose another date</chips>',
+      {
+        ...siteContext,
+        bookingResources: [...siteContext.bookingResources, { name: 'Dần' }],
+      },
+      undefined,
+      'en',
+    );
+    expect(mismatchedDateResponse).toContain('Chọn ngày khác');
+    expect(mismatchedDateResponse).not.toContain('Choose another date');
 
     // 2. Acknowledging service and asking for stylist -> Should have STAFF chips
     const staffQuestion =

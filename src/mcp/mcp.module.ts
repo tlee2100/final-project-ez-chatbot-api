@@ -33,5 +33,6 @@ import { McpService } from './mcp.service';
   ],
   controllers: [McpController],
   providers: [McpService],
+  exports: [McpService],
 })
 export class McpModule {}

@@ -13,8 +13,10 @@ export const latestActiveBookingCode = (
     ),
   );
   return Array.from(
-    content.matchAll(/<booking-code>(.*?)<\/booking-code>/g),
-    (match) => match[1],
+    content.matchAll(
+      /<booking-code>(.*?)<\/booking-code>|(?:Booking code|Mã đặt lịch):\s*\*\*([A-Z0-9]{8})\*\*/gi,
+    ),
+    (match) => match[1] ?? match[2],
   )
     .reverse()
     .find((code) => !cancelledCodes.has(code));

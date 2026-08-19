@@ -47,9 +47,15 @@ import {
   normalizePhone,
 } from './booking-cancellation.utils';
 import {
+  bookingCodeText,
+  bookAppointmentToolNames,
   cleanMixedLanguageResponse,
   detectConversationLanguage,
+  extractRequestedTimeSlot,
+  isDraftBookingAbandonment,
+  isBookingPhonePrompt,
   isBookingSlotSelection,
+  isTimeSlotAvailable,
   parseBookingSlotSelection,
   parseMultimodalContent,
   replacePseudoToolResponse,
@@ -349,6 +355,7 @@ export class GraphService {
     };
 
     const onFinish = async (text: string) => {
+      console.log(`text to save ${text}`);
       const savedMessage = await this.chatService.saveMessage(
         conversationId,
         text,
@@ -381,7 +388,7 @@ export class GraphService {
       .emit('ai-stream-start', { conversationId });
 
     try {
-      await this.runStream({
+      const result = await this.runStream({
         messages,
         siteId,
         conversationId,
@@ -427,6 +434,7 @@ export class GraphService {
         hasNegativeSentiment: conversation.hasNegativeSentiment,
         initialCancelState,
       });
+      console.log(`result::: ${JSON.stringify(result)}`);
     } finally {
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
@@ -456,6 +464,14 @@ export class GraphService {
     let toolProvider: IToolProvider | undefined;
     let createdBookingCode: string | undefined;
     let cancelledBookingCode: string | undefined;
+    const latestUserText =
+      messages
+        .slice()
+        .reverse()
+        .find((message) => message.role === 'user')?.content ?? '';
+    const requestedTimeSlot = extractRequestedTimeSlot(latestUserText);
+    const selectedFromWidget = isBookingSlotSelection(latestUserText);
+    let requestedSlotAvailability: boolean | undefined;
 
     try {
       // ── 1. Build LangChain messages from raw LLMMessage array ──────────────
@@ -489,7 +505,45 @@ export class GraphService {
 
               let toolArgs: Record<string, unknown> = args;
 
-              if (def.name === 'createBooking') {
+              if (
+                def.name === 'holdSlot' &&
+                requestedTimeSlot &&
+                !selectedFromWidget
+              ) {
+                if (args.timeSlot !== requestedTimeSlot) {
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message: `Hold the visitor's exact requested time ${requestedTimeSlot}, not another slot.`,
+                  });
+                }
+                if (requestedSlotAvailability !== true) {
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message:
+                      requestedSlotAvailability === false
+                        ? 'The requested time slot is unavailable. Do not continue this booking.'
+                        : 'Call getAvailableSlots and verify the requested time before holding it.',
+                  });
+                }
+              }
+
+              if (def.name === 'draftBooking' || def.name === 'createBooking') {
+                const lastUserMessage = messages
+                  .slice()
+                  .reverse()
+                  .find((message) => message.role === 'user')?.content;
+
+                if (
+                  def.name === 'createBooking' &&
+                  !/^\/confirm-booking\b/i.test(lastUserMessage?.trim() ?? '')
+                ) {
+                  return JSON.stringify({
+                    error: 'ACTION_REQUIRED',
+                    message:
+                      'Do not execute. Display the booking draft for visitor confirmation first.',
+                  });
+                }
+
                 const userMessages = messages
                   .filter((message) => message.role === 'user')
                   .map((message) => message.content.trim().toLowerCase());
@@ -543,27 +597,28 @@ export class GraphService {
                   });
                 }
 
-                const lastUserMessage = messages
-                  .slice()
-                  .reverse()
-                  .find((m) => m.role === 'user')?.content as string;
-
-                const isConfirmed =
-                  lastUserMessage?.includes('/confirm-booking');
-
-                if (!isConfirmed) {
+                if (def.name === 'draftBooking') {
+                  const bookingLanguage = detectConversationLanguage(
+                    messages,
+                    options.siteContext,
+                  );
                   this.logger.log(
-                    `[Tool Node] Intercepting tool: ${def.name} for confirmation gate`,
+                    `[Tool Node] Executing tool: draftBooking -> emitting bookingSummary card`,
                   );
                   this.chatGateway.emitBookingSummary(conversationId, {
                     ...toolArgs,
                     serviceName: service?.name ?? args.serviceName,
                     resourceName: resource?.name ?? args.resourceName,
+                    saveChangesLabel:
+                      bookingLanguage === 'vi'
+                        ? 'Lưu thay đổi'
+                        : 'Save changes',
                   });
                   return JSON.stringify({
-                    error: 'ACTION_REQUIRED',
+                    success: true,
+                    draftReady: true,
                     message:
-                      'Do not execute. The widget already displayed the updated booking summary card. Do not repeat booking details, do not explain internal logic or apologize, do not add Confirm/Edit chips, and ask the user to review the updated card in one short, polite sentence.',
+                      'The booking summary card has been displayed on the widget for customer review and confirmation. Ask the visitor in one short, polite sentence to review and confirm on the card below.',
                   });
                 }
               }
@@ -573,6 +628,12 @@ export class GraphService {
                 name: def.name,
                 arguments: toolArgs,
               });
+              if (def.name === 'getAvailableSlots' && requestedTimeSlot) {
+                requestedSlotAvailability = isTimeSlotAvailable(
+                  result.output,
+                  requestedTimeSlot,
+                );
+              }
               return JSON.stringify(result.output);
             },
           }),
@@ -592,7 +653,7 @@ export class GraphService {
       );
       const toolNode = new ToolNode(aiTools);
 
-      const toolsForIntent = (intent: IntentType) => {
+      const toolsForIntent = (intent: IntentType, latestUserText: string) => {
         const allowedToolNamesByIntent: Partial<
           Record<NonNullable<IntentType>, string[]>
         > = {
@@ -602,18 +663,12 @@ export class GraphService {
             'getSiteConfig',
             'searchKnowledge',
           ],
-          book_appointment: [
-            'getSiteConfig',
-            'getAvailableSlots',
-            'holdSlot',
-            'releaseHold',
-            'createBooking',
-          ],
+          book_appointment: bookAppointmentToolNames(latestUserText),
           booking_slot_selected: [
             'getSiteConfig',
             'holdSlot',
             'releaseHold',
-            'createBooking',
+            'draftBooking',
           ],
           cancel_booking: ['getConversationContext', 'cancelBooking'],
           check_booking: ['getConversationContext'],
@@ -657,6 +712,8 @@ export class GraphService {
         const metadataMessages = await this.chatMessageRepo.find({
           where: [
             { conversationId, content: Like('%<booking-code>%') },
+            { conversationId, content: Like('%Booking code:%') },
+            { conversationId, content: Like('%Mã đặt lịch:%') },
             { conversationId, content: Like('%<booking-cancelled>%') },
           ],
           select: { content: true },
@@ -796,9 +853,19 @@ export class GraphService {
             previousAssistantContent,
           );
 
+        if (/^\/(?:update-draft-booking|confirm-booking)\b/i.test(contentStr)) {
+          this.logger.log('[Fast-Path Intent] book_appointment');
+          return { intent: 'book_appointment' as IntentType };
+        }
+
         if (isBookingSlotSelection(contentStr)) {
           this.logger.log('[Fast-Path Intent] booking_slot_selected');
           return { intent: 'booking_slot_selected' as IntentType };
+        }
+
+        if (isDraftBookingAbandonment(contentStr)) {
+          this.logger.log('[Fast-Path Intent] abandoned booking -> small_talk');
+          return { intent: 'small_talk' as IntentType };
         }
 
         const isCancelIntent =
@@ -1201,6 +1268,7 @@ export class GraphService {
         const detectedLang = detectConversationLanguage(
           convertedMessages,
           state.siteContext,
+          true,
         );
         const isVietnamese = detectedLang === 'vi';
         const prompts = getCancelPrompts(isVietnamese);
@@ -1256,15 +1324,18 @@ export class GraphService {
             : ('assistant' as const),
           content: messageText(m),
         }));
-        let systemPrompt = this.aiService.buildSystemPrompt({
-          messages: convertedMessages,
-          summary: state.summary,
-          siteId: state.siteId,
-          conversationId: state.conversationId,
-          visitorContext: state.visitorContext,
-          siteContext: promptSiteContext,
-          systemPromptOverride: options.systemPromptOverride,
-        });
+        let systemPrompt = this.aiService.buildSystemPrompt(
+          {
+            messages: convertedMessages,
+            summary: state.summary,
+            siteId: state.siteId,
+            conversationId: state.conversationId,
+            visitorContext: state.visitorContext,
+            siteContext: promptSiteContext,
+            systemPromptOverride: options.systemPromptOverride,
+          },
+          state.intent !== 'book_appointment',
+        );
         if (isSmallTalk) {
           systemPrompt +=
             '\n\nCurrent intent: small talk. Reply briefly to the user message. Do not mention or list booking services, staff, resources, availability, or booking options. Do not output chips or call tools.';
@@ -1274,13 +1345,17 @@ export class GraphService {
           new SystemMessage(systemPrompt),
           ...state.messages,
         ];
-        const visibleTools = toolsForIntent(state.intent);
+        const visibleTools = toolsForIntent(
+          state.intent,
+          getLatestUserText(state),
+        );
         this.logger.log(
           `[Tool Binding] intent=${state.intent ?? 'unknown'} tools=${visibleTools.map((tool) => tool.name).join(', ')}`,
         );
         const shouldStream = state.intent !== 'book_appointment';
+        const temperature = state.intent === 'book_appointment' ? 0.0 : 0.2;
         const boundModel = this.aiService
-          .buildModel(0.2, shouldStream, options.maxTokensPerResponse)
+          .buildModel(temperature, shouldStream, options.maxTokensPerResponse)
           .bindTools(visibleTools);
 
         const response = await boundModel.invoke(messagesWithSystem, {
@@ -1328,7 +1403,9 @@ export class GraphService {
 
             // Handle booking tools interception
             if (lastMessage.name?.includes('getAvailableSlots')) {
-              this.chatGateway.emitBookingSlots(conversationId, parsed);
+              if (!requestedTimeSlot) {
+                this.chatGateway.emitBookingSlots(conversationId, parsed);
+              }
             } else if (lastMessage.name?.includes('createBooking')) {
               const p =
                 parsed && typeof parsed === 'object'
@@ -1530,6 +1607,9 @@ export class GraphService {
       });
 
       // ── 7. Extract last meaningful AI message and persist via onFinish ────────
+      console.log(
+        `finalState.messages::: ${JSON.stringify(finalState.messages)}`,
+      );
       const lastAiMessage = finalState.messages
         .slice()
         .reverse()
@@ -1548,6 +1628,7 @@ export class GraphService {
         });
 
       if (lastAiMessage?.content) {
+        console.log(`lastAiMessage::: ${JSON.stringify(lastAiMessage)}`);
         const textContent =
           typeof lastAiMessage.content === 'string'
             ? lastAiMessage.content
@@ -1563,6 +1644,8 @@ export class GraphService {
         const detectedLang = detectConversationLanguage(
           convertedMessages,
           options.siteContext,
+          finalState.intent !== 'book_appointment' &&
+            finalState.intent !== 'booking_slot_selected',
         );
         const isVietnamese = detectedLang === 'vi';
         const strippedText = textContent
@@ -1582,7 +1665,6 @@ export class GraphService {
                 options.visitorContext,
                 detectedLang,
               );
-
         const cleanLangText = cleanMixedLanguageResponse(
           intentSafeText,
           isVietnamese,
@@ -1593,10 +1675,25 @@ export class GraphService {
         );
 
         if (sanitizedText.trim()) {
+          const finalResponseText =
+            requestedTimeSlot && requestedSlotAvailability === false
+              ? isVietnamese
+                ? 'Khung giờ bạn chọn hiện không khả dụng. Vui lòng bắt đầu đặt lịch lại từng bước để chọn khung giờ khác.'
+                : 'The requested time slot is unavailable. Please restart the booking step by step to choose another time.'
+              : createdBookingCode
+                ? isVietnamese
+                  ? 'Lịch hẹn của bạn đã được xác nhận!'
+                  : 'Your appointment is confirmed!'
+                : sanitizedText;
           const bookingMetadata = createdBookingCode
-            ? `\n<booking-code>${createdBookingCode}</booking-code>`
+            ? bookingCodeText(createdBookingCode, isVietnamese)
             : cancelledBookingCode
               ? `\n<booking-cancelled>${cancelledBookingCode}</booking-cancelled>`
+              : '';
+          const bookingInputMetadata =
+            finalState.intent === 'book_appointment' &&
+            isBookingPhonePrompt(sanitizedText)
+              ? '\n<booking-input>phone</booking-input>'
               : '';
 
           const cancelMetadata =
@@ -1606,7 +1703,7 @@ export class GraphService {
               : '';
 
           await onFinish(
-            `${sanitizedText}${bookingMetadata}${cancelMetadata}`,
+            `${finalResponseText}${bookingInputMetadata}${bookingMetadata}${cancelMetadata}`,
             finalState.knowledgeSources,
           );
         }
