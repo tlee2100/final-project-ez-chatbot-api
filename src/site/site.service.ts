@@ -6,6 +6,7 @@ import {
   ConflictException,
   forwardRef,
   Inject,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
@@ -15,6 +16,7 @@ import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
 import type { Mapper } from '@automapper/core';
 import { InjectMapper } from '@automapper/nestjs';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
+import { Redis } from 'ioredis';
 
 import { CreateSiteDto } from './dto/create-site.dto';
 import { UpdateSiteDto } from './dto/update-site.dto';
@@ -33,17 +35,24 @@ import {
   Conversation,
   ConversationStatus,
 } from '../chat/entities/conversation.entity';
+import { Document } from '../document/entities/document.entity';
+import { CrawlerService } from '../crawler/crawler.service';
+
 type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
   data: SiteDto[];
 };
 
 @Injectable()
 export class SiteService {
+  private readonly logger = new Logger(SiteService.name);
+
   constructor(
     @InjectRepository(Site)
     private readonly siteRepository: Repository<Site>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(Document)
+    private readonly documentRepository: Repository<Document>,
     @InjectMapper()
     private readonly mapper: Mapper,
     private readonly notificationService: NotificationService,
@@ -51,8 +60,12 @@ export class SiteService {
     private readonly chatGateway: ChatGateway,
     @Inject(forwardRef(() => ChatTimeoutService))
     private readonly chatTimeoutService: ChatTimeoutService,
+    @Inject(forwardRef(() => CrawlerService))
+    private readonly crawlerService: CrawlerService,
     @InjectRepository(Booking)
     private readonly bookingRepository: Repository<Booking>,
+    @Inject('REDIS_CLIENT')
+    private readonly redis: Redis,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -338,6 +351,84 @@ export class SiteService {
   async remove(id: string, user: JwtUser): Promise<void> {
     await this.assertSiteAccess(id, user);
 
+    // 1. Cancel in-memory conversation timers
+    try {
+      await this.chatTimeoutService.cancelAllTimersForSite(id);
+    } catch (timerErr) {
+      this.logger.warn(
+        `Failed to cancel timers for site ${id}:`,
+        timerErr instanceof Error ? timerErr.stack : timerErr,
+      );
+    }
+
+    // 2. Remove any scheduled Bull repeatable jobs for crawler
+    try {
+      if (this.crawlerService) {
+        await this.crawlerService.removeSiteRepeatableJob(id);
+      }
+    } catch (crawlerErr) {
+      this.logger.warn(
+        `Failed to remove crawler job for site ${id}:`,
+        crawlerErr instanceof Error ? crawlerErr.stack : crawlerErr,
+      );
+    }
+
+    // 3. Clean up Cloudinary assets (Documents and site images)
+    try {
+      const documents = await this.documentRepository.find({
+        where: { siteId: id },
+        select: { id: true, cloudinaryPublicId: true },
+      });
+
+      for (const doc of documents) {
+        if (doc.cloudinaryPublicId) {
+          await cloudinary.uploader
+            .destroy(doc.cloudinaryPublicId, {
+              resource_type: 'raw',
+            })
+            .catch(() => {});
+        }
+      }
+
+      await cloudinary.api
+        .delete_resources_by_prefix(`sites/${id}/`, {
+          resource_type: 'raw',
+        })
+        .catch(() => {});
+
+      await cloudinary.api
+        .delete_resources_by_prefix(`sites/${id}/`, {
+          resource_type: 'image',
+        })
+        .catch(() => {});
+
+      await cloudinary.api
+        .delete_folder(`sites/${id}/documents`)
+        .catch(() => {});
+      await cloudinary.api.delete_folder(`sites/${id}`).catch(() => {});
+    } catch (cloudinaryErr) {
+      this.logger.warn(
+        `Failed to clean up Cloudinary assets for site ${id}:`,
+        cloudinaryErr instanceof Error ? cloudinaryErr.stack : cloudinaryErr,
+      );
+    }
+
+    // 4. Clean up any temporary Redis slot hold keys for this site
+    try {
+      if (this.redis) {
+        const holdKeys = await this.redis.keys(`hold:${id}:*`);
+        if (holdKeys.length > 0) {
+          await this.redis.del(...holdKeys);
+        }
+      }
+    } catch (redisErr) {
+      this.logger.warn(
+        `Failed to clear Redis hold keys for site ${id}:`,
+        redisErr instanceof Error ? redisErr.stack : redisErr,
+      );
+    }
+
+    // 5. Database deletion (DB CASCADE handles all child entities)
     try {
       await this.siteRepository.delete(id);
     } catch (error) {

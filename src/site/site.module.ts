@@ -15,6 +15,8 @@ import { BookingModule } from '../booking/booking.module';
 import { ChatModule } from '../chat/chat.module';
 import { Booking } from '../booking/entities/booking.entity';
 import { BookingBlockout } from '../booking/entities/booking-blockout.entity';
+import { Document } from '../document/entities/document.entity';
+import { CrawlerModule } from '../crawler/crawler.module';
 
 @Module({
   imports: [
@@ -26,10 +28,12 @@ import { BookingBlockout } from '../booking/entities/booking-blockout.entity';
       SiteBookingConfig,
       Booking,
       BookingBlockout,
+      Document,
     ]),
     NotificationModule,
     forwardRef(() => BookingModule),
     forwardRef(() => ChatModule),
+    forwardRef(() => CrawlerModule),
   ],
   controllers: [SiteController, AdminBookingController],
   providers: [SiteService, SiteProfile, AdminBookingService],

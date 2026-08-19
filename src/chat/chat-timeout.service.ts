@@ -214,6 +214,23 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Cancel and remove all timers for all conversations belonging to a site.
+   */
+  async cancelAllTimersForSite(siteId: string): Promise<void> {
+    try {
+      const conversations = await this.conversationRepository.find({
+        where: { siteId },
+        select: { id: true },
+      });
+      for (const conv of conversations) {
+        this.cancelTimer(conv.id);
+      }
+    } catch (err) {
+      this.logger.error(`Failed to cancel timers for site ${siteId}:`, err);
+    }
+  }
+
+  /**
    * Refreshes timers for all OPEN conversations of a site (e.g. after site settings update).
    */
   async refreshSiteTimers(siteId: string) {

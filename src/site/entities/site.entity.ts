@@ -129,6 +129,7 @@ export class Site {
   @Column({ name: 'llmModel', type: 'varchar', default: 'deepseek-v4-flash' })
   llmModel: string;
 
+  @AutoMap()
   @Column({ type: 'boolean', default: false })
   bookingEnabled: boolean;
 

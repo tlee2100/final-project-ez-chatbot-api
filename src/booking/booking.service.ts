@@ -121,7 +121,7 @@ export class BookingService {
     startDate: string,
     endDate: string,
   ) {
-    const site = await this.siteService.findOne(siteId);
+    const site = await this.siteService.findOneEntity(siteId);
     if (!site.bookingEnabled) {
       return { slots: [] };
     }
@@ -415,7 +415,7 @@ export class BookingService {
   }
 
   async holdSlot(siteId: string, dto: HoldSlotDto) {
-    const site = await this.siteService.findOne(siteId);
+    const site = await this.siteService.findOneEntity(siteId);
     if (!site.bookingEnabled) {
       throw new BadRequestException('Booking is disabled for this site');
     }
@@ -530,7 +530,7 @@ export class BookingService {
   }
 
   async createBooking(dto: CreateBookingDto): Promise<Booking> {
-    const site = await this.siteService.findOne(dto.siteId);
+    const site = await this.siteService.findOneEntity(dto.siteId);
     if (!site.bookingEnabled) {
       throw new BadRequestException('Booking is disabled for this site');
     }

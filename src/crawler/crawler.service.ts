@@ -4,6 +4,8 @@ import {
   NotFoundException,
   OnModuleInit,
   ServiceUnavailableException,
+  forwardRef,
+  Inject,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -56,6 +58,7 @@ export class CrawlerService implements OnModuleInit {
     private readonly queue: Queue<
       CrawlSitemapJobData | CrawlPageJobData | ScheduledCrawlJobData
     >,
+    @Inject(forwardRef(() => SiteService))
     private readonly siteService: SiteService,
     private readonly documentService: DocumentService,
     private readonly urlService: CrawlerUrlService,
@@ -486,6 +489,22 @@ export class CrawlerService implements OnModuleInit {
           removeOnComplete: true,
         },
       );
+    }
+  }
+
+  async removeSiteRepeatableJob(siteId: string): Promise<void> {
+    try {
+      const config = await this.configRepository.findOne({ where: { siteId } });
+      if (config) {
+        const repeatable = await this.queue.getRepeatableJobs();
+        for (const job of repeatable) {
+          if (job.id === `crawler-config-${config.id}`) {
+            await this.queue.removeRepeatableByKey(job.key);
+          }
+        }
+      }
+    } catch {
+      // Ignore errors if crawler queue or config is missing during deletion
     }
   }
 
