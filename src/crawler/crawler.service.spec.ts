@@ -25,6 +25,8 @@ describe('CrawlerService external sources', () => {
     };
     const runRepository = {
       findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       create: jest.fn((value: Record<string, unknown>) => value),
       save: jest.fn((value: Record<string, unknown>) =>
         Promise.resolve({ id: 'run-id', ...value }),
@@ -32,13 +34,17 @@ describe('CrawlerService external sources', () => {
       update: jest.fn().mockResolvedValue(undefined),
     };
     const itemRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       create: jest.fn((value: Record<string, unknown>) => value),
       save: jest.fn((value: Record<string, unknown>) =>
         Promise.resolve({ id: 'item-id', ...value }),
       ),
+      update: jest.fn().mockResolvedValue(undefined),
     };
     const queue = {
       add: jest.fn().mockResolvedValue(undefined),
+      getJob: jest.fn().mockResolvedValue(null),
       getRepeatableJobs: jest.fn().mockResolvedValue([]),
       removeRepeatableByKey: jest.fn().mockResolvedValue(undefined),
     };
@@ -126,7 +132,7 @@ describe('CrawlerService external sources', () => {
     expect(subject.queue.add).toHaveBeenCalledWith(
       'crawl-page',
       { runItemId: 'item-id' },
-      expect.objectContaining({ jobId: 'item-id' }),
+      expect.objectContaining({ jobId: 'item-id', removeOnFail: false }),
     );
   });
 
@@ -151,7 +157,7 @@ describe('CrawlerService external sources', () => {
     expect(subject.queue.add).toHaveBeenCalledWith(
       'crawl-sitemap',
       { runId: 'run-id' },
-      expect.objectContaining({ jobId: 'sitemap-run-id' }),
+      expect.objectContaining({ jobId: 'sitemap-run-id', removeOnFail: false }),
     );
   });
 
@@ -171,5 +177,92 @@ describe('CrawlerService external sources', () => {
 
     expect(subject.runRepository.save).not.toHaveBeenCalled();
     expect(subject.queue.add).not.toHaveBeenCalled();
+  });
+
+  describe('recoverOrphanedRuns', () => {
+    it('re-enqueues sitemap job when run is in DISCOVERING and job is missing from queue', async () => {
+      const subject = createSubject();
+      subject.runRepository.find.mockResolvedValue([
+        {
+          id: 'run-1',
+          status: CrawlRunStatus.DISCOVERING,
+          trigger: 'manual_sitemap',
+          totalPages: 0,
+        },
+      ]);
+      subject.queue.getJob.mockResolvedValue(null);
+
+      await subject.service.recoverOrphanedRuns();
+
+      expect(subject.queue.add).toHaveBeenCalledWith(
+        'crawl-sitemap',
+        { runId: 'run-1' },
+        expect.objectContaining({
+          jobId: 'sitemap-run-1',
+          removeOnFail: false,
+        }),
+      );
+    });
+
+    it('re-enqueues pending page items when run is in PROCESSING and jobs are missing', async () => {
+      const subject = createSubject();
+      subject.runRepository.find.mockResolvedValue([
+        {
+          id: 'run-2',
+          status: CrawlRunStatus.PROCESSING,
+          trigger: 'manual_sitemap',
+          totalPages: 2,
+        },
+      ]);
+      subject.itemRepository.find.mockResolvedValue([
+        { id: 'item-1', runId: 'run-2', status: CrawlRunItemStatus.RENDERING },
+        { id: 'item-2', runId: 'run-2', status: CrawlRunItemStatus.QUEUED },
+      ]);
+      subject.queue.getJob.mockResolvedValue(null);
+
+      await subject.service.recoverOrphanedRuns();
+
+      expect(subject.itemRepository.update).toHaveBeenCalledWith('item-1', {
+        status: CrawlRunItemStatus.QUEUED,
+      });
+      expect(subject.queue.add).toHaveBeenCalledWith(
+        'crawl-page',
+        { runItemId: 'item-1' },
+        expect.objectContaining({ jobId: 'item-1', removeOnFail: false }),
+      );
+      expect(subject.queue.add).toHaveBeenCalledWith(
+        'crawl-page',
+        { runItemId: 'item-2' },
+        expect.objectContaining({ jobId: 'item-2', removeOnFail: false }),
+      );
+    });
+
+    it('does not re-enqueue when jobs are already active or waiting in queue', async () => {
+      const subject = createSubject();
+      subject.runRepository.find.mockResolvedValue([
+        {
+          id: 'run-3',
+          status: CrawlRunStatus.PROCESSING,
+          trigger: 'manual_url',
+          totalPages: 1,
+        },
+      ]);
+      subject.itemRepository.find.mockResolvedValue([
+        {
+          id: 'item-active',
+          runId: 'run-3',
+          status: CrawlRunItemStatus.RENDERING,
+        },
+      ]);
+      const mockJob = {
+        isFailed: jest.fn().mockResolvedValue(false),
+        isCompleted: jest.fn().mockResolvedValue(false),
+      };
+      subject.queue.getJob.mockResolvedValue(mockJob);
+
+      await subject.service.recoverOrphanedRuns();
+
+      expect(subject.queue.add).not.toHaveBeenCalled();
+    });
   });
 });

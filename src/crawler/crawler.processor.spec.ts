@@ -57,6 +57,11 @@ describe('CrawlerProcessor external sources', () => {
     const itemRepository = {
       findOne: jest.fn().mockResolvedValue(item),
       update: jest.fn().mockResolvedValue(undefined),
+      delete: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((val: Record<string, unknown>) => val),
+      save: jest.fn((val: Record<string, unknown>[]) =>
+        Promise.resolve(val.map((item, i) => ({ id: `item-${i}`, ...item }))),
+      ),
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
     };
     const siteRepository = {
@@ -64,6 +69,18 @@ describe('CrawlerProcessor external sources', () => {
         id: 'site-id',
         url: 'https://primary.example.com',
       }),
+    };
+    const queue = {
+      addBulk: jest.fn().mockResolvedValue(undefined),
+    };
+    const sitemapService = {
+      discover: jest.fn().mockResolvedValue([
+        {
+          url: 'https://external.example/p1',
+          normalizedUrl: 'https://external.example/p1',
+          lastModified: null,
+        },
+      ]),
     };
     const renderer = {
       render: jest.fn().mockResolvedValue({
@@ -114,9 +131,9 @@ describe('CrawlerProcessor external sources', () => {
       itemRepository as never,
       documentRepository as never,
       siteRepository as never,
+      queue as never,
       {} as never,
-      {} as never,
-      {} as never,
+      sitemapService as never,
       {
         isAllowed: jest.fn().mockResolvedValue(true),
         crawlDelayMs: jest.fn().mockResolvedValue(0),
@@ -133,6 +150,9 @@ describe('CrawlerProcessor external sources', () => {
       processor,
       indexing,
       itemRepository,
+      runRepository,
+      queue,
+      sitemapService,
       renderer,
       urlService,
       documentRepository,
@@ -197,5 +217,30 @@ describe('CrawlerProcessor external sources', () => {
       'document-id',
       expect.objectContaining({ reindexStatus: 'idle', reindexError: null }),
     );
+  });
+
+  it('cleans up previous items and queues page jobs with removeOnFail: false in handleSitemap', async () => {
+    const subject = createSubject(CrawlRunTrigger.MANUAL_SITEMAP);
+
+    await subject.processor.handleSitemap({
+      data: { runId: 'run-id' },
+    } as never);
+
+    expect(subject.itemRepository.delete).toHaveBeenCalledWith({
+      runId: 'run-id',
+    });
+    expect(subject.queue.addBulk).toHaveBeenCalledWith([
+      {
+        name: 'crawl-page',
+        data: { runItemId: 'item-0' },
+        opts: {
+          jobId: 'item-0',
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5_000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      },
+    ]);
   });
 });
