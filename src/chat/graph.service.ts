@@ -824,17 +824,29 @@ export class GraphService {
               }
 
               this.logger.log(`[Tool Node] Executing tool: ${def.name}`);
-              const result = await currentProvider.execute({
-                name: def.name,
-                arguments: toolArgs,
-              });
-              if (def.name === 'getAvailableSlots' && requestedTimeSlot) {
-                requestedSlotAvailability = isTimeSlotAvailable(
-                  result.output,
-                  requestedTimeSlot,
+              try {
+                const result = await currentProvider.execute({
+                  name: def.name,
+                  arguments: toolArgs,
+                });
+                if (def.name === 'getAvailableSlots' && requestedTimeSlot) {
+                  requestedSlotAvailability = isTimeSlotAvailable(
+                    result.output,
+                    requestedTimeSlot,
+                  );
+                }
+                return typeof result.output === 'string'
+                  ? result.output
+                  : JSON.stringify(result.output ?? {});
+              } catch (err) {
+                this.logger.error(
+                  `[Tool Node] Tool execution error for ${def.name}:`,
+                  err,
                 );
+                return JSON.stringify({
+                  error: err instanceof Error ? err.message : String(err),
+                });
               }
-              return JSON.stringify(result.output);
             },
           }),
       );
@@ -1651,7 +1663,20 @@ export class GraphService {
 
         if (lastMessage instanceof ToolMessage) {
           try {
-            const parsed = JSON.parse(lastMessage.content as string) as unknown;
+            const rawContent =
+              typeof lastMessage.content === 'string'
+                ? lastMessage.content
+                : JSON.stringify(lastMessage.content);
+            let parsed: unknown = null;
+            try {
+              parsed = JSON.parse(rawContent);
+            } catch {
+              parsed = null;
+            }
+
+            if (!parsed) {
+              return {};
+            }
 
             // Handle booking tools interception
             if (lastMessage.name?.includes('getAvailableSlots')) {
