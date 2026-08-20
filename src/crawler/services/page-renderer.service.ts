@@ -1,4 +1,8 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type { Browser, BrowserContext, HTTPResponse } from 'puppeteer-core';
 import {
   CRAWLER_BROWSER_CONNECT_TIMEOUT_MS,
@@ -17,6 +21,7 @@ export type RenderedPage = {
 
 @Injectable()
 export class PageRendererService {
+  private readonly logger = new Logger(PageRendererService.name);
   private readonly safeHostCache = new Map<string, number>();
 
   constructor(private readonly urlService: CrawlerUrlService) {}
@@ -139,9 +144,11 @@ export class PageRendererService {
         }, CRAWLER_BROWSER_CONNECT_TIMEOUT_MS);
       });
       return await Promise.race([connectPromise, timeoutPromise]);
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Browser connection failed: ${detail}`);
       throw new ServiceUnavailableException(
-        'Browser rendering service is unavailable',
+        `Browser rendering service is unavailable: ${detail}`,
       );
     } finally {
       if (timer) clearTimeout(timer);
