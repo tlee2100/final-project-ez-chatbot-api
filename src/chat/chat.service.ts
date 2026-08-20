@@ -4,6 +4,8 @@ import {
   NotFoundException,
   UnauthorizedException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   forwardRef,
   Inject,
 } from '@nestjs/common';
@@ -46,6 +48,8 @@ import { AiService } from './ai.service';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import { Booking } from '../booking/entities/booking.entity';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
+import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
+import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -61,6 +65,12 @@ type ChatMessageDto = Pick<
 };
 const MAX_MESSAGE_LENGTH = 1000;
 
+/** In-memory state for WS rate limiting (SEC-005) */
+interface WsRateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
@@ -72,6 +82,17 @@ export class ChatService {
     string,
     { agent: Set<string>; visitor: Set<string> }
   >();
+
+  /**
+   * SEC-005 — WebSocket Rate Limiter
+   * Key = `${siteId}-${clientIp}`. Enforces WS_LIMIT requests per WS_WINDOW_MS.
+   * Entries are lazily cleaned up on the next request from the same key.
+   */
+  private readonly wsRateLimitMap = new Map<string, WsRateLimitEntry>();
+  private readonly WS_LIMIT = 30; // max messages per window
+  private readonly WS_WINDOW_MS = 60_000; // 1 minute
+  /** Active IP session tracking: `${siteId}-${clientIp}` -> Set<conversationId> */
+  private readonly ipActiveSessionsMap = new Map<string, Set<string>>();
 
   constructor(
     @InjectRepository(Site)
@@ -93,6 +114,8 @@ export class ChatService {
     private readonly chatTimeoutService: ChatTimeoutService,
     private readonly emailQueueService: EmailQueueService,
     private readonly aiService: AiService,
+    @Inject(AI_MODERATION_SERVICE)
+    private readonly moderationService: IAIModerationServiceType,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -364,6 +387,77 @@ export class ChatService {
         return;
       }
       payload.senderType = SenderType.VISITOR;
+
+      // ── SEC-005: WebSocket Rate Limit ──────────────────────────────────────
+      const siteIdForLimit = visitor.siteId ?? 'unknown';
+      const clientIp =
+        (client.handshake.headers['x-forwarded-for'] as string | undefined)
+          ?.split(',')[0]
+          ?.trim() ??
+        client.handshake.address ??
+        'unknown';
+      const rlKey = `${siteIdForLimit}-${clientIp}`;
+      const now = Date.now();
+      const entry = this.wsRateLimitMap.get(rlKey);
+
+      if (entry && now < entry.resetAt) {
+        if (entry.count >= this.WS_LIMIT) {
+          this.logger.warn(`WS rate limit exceeded — key: ${rlKey}`);
+          client.emit('messageError', {
+            message: 'Rate limit exceeded. Please slow down.',
+            code: 429,
+          });
+          return;
+        }
+        entry.count += 1;
+      } else {
+        // New window or expired entry
+        this.wsRateLimitMap.set(rlKey, {
+          count: 1,
+          resetAt: now + this.WS_WINDOW_MS,
+        });
+      }
+
+      // ── SEC-005: Max Messages Per Session Enforcement ──────────────────────
+      if (!payload.conversationId.startsWith('admin-test-')) {
+        const conversation = await this.conversationRepository.findOne({
+          where: { id: payload.conversationId },
+          relations: { site: true },
+        });
+        if (conversation?.site?.maxMessagesPerSession) {
+          const msgCount = await this.chatMessageRepository.count({
+            where: {
+              conversationId: payload.conversationId,
+              senderType: SenderType.VISITOR,
+            },
+          });
+          if (msgCount >= conversation.site.maxMessagesPerSession) {
+            this.logger.warn(
+              `Max messages per session cap reached (${msgCount}/${conversation.site.maxMessagesPerSession}) for conv ${payload.conversationId}`,
+            );
+            client.emit('messageError', {
+              message:
+                'Session message limit reached. Please start a new conversation.',
+              code: 429,
+            });
+            return;
+          }
+        }
+      }
+
+      // ── SEC-006: Content Moderation ────────────────────────────────────────
+      const isSafe = await this.moderationService.isSafe(payload.content);
+      if (!isSafe) {
+        this.logger.warn(
+          `Message blocked by moderation for conversation ${payload.conversationId}`,
+        );
+        client.emit('messageError', {
+          message:
+            'Your message was blocked because it violates our content policy.',
+          code: 403,
+        });
+        return;
+      }
     } else if (user) {
       payload.senderType = SenderType.AGENT;
     }
@@ -532,6 +626,7 @@ export class ChatService {
 
   async createConversation(
     dto: CreateConversationDto,
+    clientIp?: string,
   ): Promise<CreateConversationResponseDto> {
     const site = await this.siteRepository.findOne({
       where: { id: dto.siteId },
@@ -544,6 +639,18 @@ export class ChatService {
       throw new ForbiddenException(
         'Chatbot is currently disabled for this site',
       );
+    }
+
+    // ── SEC-005: Max Sessions Per IP Enforcement ────────────────────────────
+    if (clientIp && site.maxSessionsPerIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      if (sessions.size >= site.maxSessionsPerIp) {
+        throw new HttpException(
+          'Maximum active chat sessions reached for your IP address. Please continue existing conversation or try again later.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
     }
 
     const result = await this.conversationRepository.manager.transaction(
@@ -586,6 +693,13 @@ export class ChatService {
         };
       },
     );
+
+    if (clientIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      sessions.add(result.conversationId);
+      this.ipActiveSessionsMap.set(rlKey, sessions);
+    }
 
     this.logger.log(
       `New conversation ${result.conversationId} created for site ${dto.siteId}`,
@@ -1183,6 +1297,7 @@ export class ChatService {
     if (status === ConversationStatus.CLOSED) {
       if (reason) conversation.closedReason = reason;
       this.chatTimeoutService.cancelTimer(id);
+      this.ipActiveSessionsMap.forEach((sessions) => sessions.delete(id));
     }
     conversation.lastActivityAt = new Date();
 

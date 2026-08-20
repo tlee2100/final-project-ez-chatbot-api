@@ -212,6 +212,11 @@ export interface GraphRunOptions {
   hasNegativeSentiment?: boolean;
   /** Initial cancel state parsed from last AI message or explicit state */
   initialCancelState?: CancelState;
+  /**
+   * The Site entity — used by AiService.buildModelForSite() to resolve BYOK key.
+   * When provided and site.useCustomOpenAiKey is true, the per-site encrypted key is used.
+   */
+  site?: { useCustomOpenAiKey?: boolean; encryptedOpenAiKey?: string | null };
 }
 
 export interface GraphRunResult {
@@ -401,6 +406,7 @@ export class GraphService {
           onFinish,
           onRequestHandoff,
           sentimentDetection: false,
+          site: site ?? undefined,
         });
       } finally {
         this.chatGateway.server
@@ -530,6 +536,7 @@ export class GraphService {
         onNegativeSentiment,
         hasNegativeSentiment: conversation.hasNegativeSentiment,
         initialCancelState,
+        site: site ?? undefined,
       });
       console.log(`result::: ${JSON.stringify(result)}`);
     } finally {
@@ -1138,7 +1145,7 @@ export class GraphService {
         });
 
         const model = this.aiService
-          .buildModel(0, false)
+          .buildModelForSite(options.site ?? {}, 0, false)
           .withStructuredOutput(intentSchema);
 
         try {
@@ -1618,7 +1625,12 @@ export class GraphService {
         const shouldStream = state.intent !== 'book_appointment';
         const temperature = state.intent === 'book_appointment' ? 0.0 : 0.2;
         const boundModel = this.aiService
-          .buildModel(temperature, shouldStream, options.maxTokensPerResponse)
+          .buildModelForSite(
+            options.site ?? {},
+            temperature,
+            shouldStream,
+            options.maxTokensPerResponse,
+          )
           .bindTools(visibleTools);
 
         const response = await boundModel.invoke(messagesWithSystem, {

@@ -247,4 +247,21 @@ export class Site {
   @AutoMap(() => Boolean)
   @Column({ name: 'showAvatar', type: 'boolean', default: true })
   showAvatar: boolean;
+
+  // ── BYOK — Bring Your Own Key (SEC-001 / CE-004) ──
+
+  /**
+   * When true, use the site's own encrypted OpenAI key instead of the master env key.
+   * The key is stored encrypted via AES-256-GCM in encryptedOpenAiKey.
+   */
+  @AutoMap(() => Boolean)
+  @Column({ name: 'useCustomOpenAiKey', type: 'boolean', default: false })
+  useCustomOpenAiKey: boolean;
+
+  /**
+   * AES-256-GCM encrypted OpenAI API key. Format: "<iv>:<authTag>:<ciphertext>" (hex).
+   * NEVER returned to the client — only decrypted inside the AI proxy layer.
+   */
+  @Column({ name: 'encryptedOpenAiKey', type: 'text', nullable: true })
+  encryptedOpenAiKey: string | null;
 }

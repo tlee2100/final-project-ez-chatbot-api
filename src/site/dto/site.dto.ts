@@ -242,4 +242,21 @@ export class SiteDto {
   @ApiProperty({ default: true })
   @AutoMap(() => Boolean)
   showAvatar: boolean;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Whether the site is actively using a custom encrypted OpenAI API key (BYOK).',
+    default: false,
+  })
+  @AutoMap(() => Boolean)
+  useCustomOpenAiKey: boolean;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Whether the site has a custom OpenAI API key saved in the database.',
+    default: false,
+  })
+  hasCustomApiKey: boolean;
 }

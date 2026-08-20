@@ -39,6 +39,8 @@ describe('ChatService saveMessage', () => {
     };
     const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
     const aiService = { invoke: jest.fn() };
+    // Mock moderation service — always safe so existing test behaviour is unchanged
+    const moderationService = { isSafe: jest.fn().mockResolvedValue(true) };
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,
@@ -51,6 +53,7 @@ describe('ChatService saveMessage', () => {
       chatTimeoutService as never,
       emailQueueService as never,
       aiService as never,
+      moderationService,
     );
 
     return {
