@@ -36,6 +36,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { validateAndGetImageFile } from '../utils/file-signature.util';
 import { ClosedReason } from './entities/conversation.entity';
 import { CreateAdminTestConversationDto } from './dto/create-admin-test-conversation.dto';
+import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
 
 @Controller('chat')
 export class ChatController {
@@ -75,6 +76,33 @@ export class ChatController {
     @Req() req: AuthRequest,
   ): Promise<CreateConversationResponseDto> {
     return this.chatService.createAdminTestConversation(dto.siteId, req.user);
+  }
+
+  // ─── Admin: Stream test chat response (stateless SSE) ──────────────────────
+
+  /**
+   * Protected — admin/owner tests chatbot responses with live Knowledge Base & tools.
+   * Completely stateless & ephemeral: does NOT save anything to conversations or chat_messages tables.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Post('admin-test/stream')
+  @HttpCode(HttpStatus.OK)
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  @Header('Transfer-Encoding', 'chunked')
+  @Header('Cache-Control', 'no-cache')
+  @Header('Connection', 'keep-alive')
+  @Header('X-Accel-Buffering', 'no')
+  async streamAdminTestResponse(
+    @Body() dto: AdminTestStreamDto,
+    @Req() req: AuthRequest,
+    @Res() res: Response,
+  ) {
+    const site = await this.chatService.assertSiteAccessForTest(
+      dto.siteId,
+      req.user,
+    );
+    return this.graphService.handleAdminTestStream(dto, site, res);
   }
   // ─── Public: AI SSE streaming endpoint (visitor) ────────────────────────
 

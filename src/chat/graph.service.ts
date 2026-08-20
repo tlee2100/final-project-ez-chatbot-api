@@ -43,6 +43,7 @@ import {
   replacePseudoToolResponse,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
+import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
 // ─── Agent State ──────────────────────────────────────────────────────────────
 
 /** Intent categories the classifier node can assign */
@@ -267,6 +268,7 @@ const sanitizeBookingChips = (
 @Injectable()
 export class GraphService {
   private readonly logger = new Logger(GraphService.name);
+  private readonly testSessionMessages = new Map<string, LLMMessage[]>();
 
   constructor(
     private readonly aiService: AiService,
@@ -294,6 +296,10 @@ export class GraphService {
    * Returns false (and logs) when AI should not respond.
    */
   async canRunAi(conversationId: string, siteId: string): Promise<boolean> {
+    if (conversationId.startsWith('admin-test-')) {
+      return true;
+    }
+
     const [conversation, site] = await Promise.all([
       this.conversationRepo.findOne({ where: { id: conversationId } }),
       this.siteRepo.findOne({ where: { id: siteId } }),
@@ -349,10 +355,102 @@ export class GraphService {
     siteId: string,
     res?: ExpressResponse,
     onNegativeSentiment?: (text: string) => Promise<void>,
+    newTestMessageContent?: string,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
       if (res) res.end();
+      return;
+    }
+
+    if (conversationId.startsWith('admin-test-')) {
+      const site = await this.siteRepo.findOne({
+        where: { id: siteId },
+        relations: {
+          industryTemplateInfo: true,
+          bookingConfig: true,
+          bookingServices: true,
+          bookingResources: true,
+        },
+      });
+
+      if (!this.testSessionMessages.has(conversationId)) {
+        this.testSessionMessages.set(conversationId, []);
+      }
+      const history = this.testSessionMessages.get(conversationId)!;
+      if (newTestMessageContent) {
+        history.push({ role: 'user', content: newTestMessageContent });
+      }
+
+      const onFinish = (text: string): Promise<void> => {
+        history.push({ role: 'assistant', content: text });
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('newMessage', {
+            id: `ai-msg-${Date.now()}`,
+            conversationId,
+            content: text,
+            senderType: 'AI',
+            createdAt: new Date().toISOString(),
+          });
+        return Promise.resolve();
+      };
+
+      const onRequestHandoff = (): Promise<void> => {
+        // No handoff in sandbox test
+        return Promise.resolve();
+      };
+
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('ai-stream-start', { conversationId });
+
+      try {
+        await this.runStream({
+          messages: [...history],
+          siteId,
+          conversationId,
+          systemPromptOverride: site?.systemPromptOverride ?? null,
+          maxTokensPerResponse: site?.maxTokensPerResponse ?? 1000,
+          visitorContext: {
+            name: 'Admin Tester',
+          },
+          siteContext: {
+            name: site?.name ?? undefined,
+            domains: site?.allowedDomains ?? [],
+            bookingEnabled: site?.bookingEnabled === true,
+            bookingServices:
+              site?.bookingServices?.map((service) => ({
+                id: service.id,
+                name: service.name,
+              })) ?? [],
+            bookingResources:
+              site?.bookingResources?.map((resource) => ({
+                id: resource.id,
+                name: resource.name,
+              })) ?? [],
+            bookingHours: site?.bookingConfig
+              ? {
+                  timezone: site.bookingConfig.bookingTimezone,
+                  availableDays: site.bookingConfig.bookingAvailableDays,
+                  startTime: site.bookingConfig.bookingStartTime,
+                  endTime: site.bookingConfig.bookingEndTime,
+                  slotDuration: site.bookingConfig.bookingSlotDuration,
+                }
+              : undefined,
+            industryTemplateConfig: site?.industryTemplateInfo?.config,
+          },
+          res,
+          server: this.chatGateway.server,
+          onFinish,
+          onRequestHandoff,
+          sentimentDetection: false,
+        });
+      } finally {
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('ai-stream-end', { conversationId });
+      }
       return;
     }
 
@@ -461,6 +559,85 @@ export class GraphService {
     }
   }
 
+  /**
+   * High-level entry point for Admin In-Dashboard Testing (Stateless SSE).
+   * Runs the full RAG / LangGraph pipeline using in-memory conversation history.
+   * Completely bypasses database persistence (no rows in conversations or chat_messages).
+   */
+  async handleAdminTestStream(
+    dto: AdminTestStreamDto,
+    site: Site,
+    res: ExpressResponse,
+  ): Promise<void> {
+    const messages: LLMMessage[] = dto.messages.map((m) => ({
+      role:
+        m.role === 'user'
+          ? ('user' as const)
+          : m.role === 'assistant'
+            ? ('assistant' as const)
+            : ('system' as const),
+      content: m.content,
+    }));
+
+    const dummyConversationId = `admin-test-${Date.now()}`;
+
+    try {
+      await this.runStream({
+        messages,
+        siteId: site.id,
+        conversationId: dummyConversationId,
+        systemPromptOverride:
+          dto.systemPromptOverride ?? site.systemPromptOverride ?? null,
+        maxTokensPerResponse: site.maxTokensPerResponse ?? 1000,
+        visitorContext: {
+          name: 'Admin Tester',
+        },
+        siteContext: {
+          name: site.name ?? undefined,
+          domains: site.allowedDomains ?? [],
+          bookingEnabled: site.bookingEnabled === true,
+          bookingServices:
+            site.bookingServices?.map((service) => ({
+              id: service.id,
+              name: service.name,
+            })) ?? [],
+          bookingResources:
+            site.bookingResources?.map((resource) => ({
+              id: resource.id,
+              name: resource.name,
+            })) ?? [],
+          bookingHours: site.bookingConfig
+            ? {
+                timezone: site.bookingConfig.bookingTimezone,
+                availableDays: site.bookingConfig.bookingAvailableDays,
+                startTime: site.bookingConfig.bookingStartTime,
+                endTime: site.bookingConfig.bookingEndTime,
+                slotDuration: site.bookingConfig.bookingSlotDuration,
+              }
+            : undefined,
+          industryTemplateConfig: site.industryTemplateInfo?.config,
+        },
+        res,
+        server: this.chatGateway.server,
+        onFinish: async () => {
+          // In-memory test session: do not write to database
+        },
+        onRequestHandoff: async () => {
+          // In-memory test session: do not escalate to agent
+        },
+        sentimentDetection: false,
+      });
+    } catch (err) {
+      this.logger.error(`[AdminTestStream] Error: ${String(err)}`);
+      if (res && !res.writableEnded) {
+        res.write(
+          `\n\n[Error: ${err instanceof Error ? err.message : 'AI service unavailable'}]`,
+        );
+        res.end();
+      }
+    }
+  }
+
   // ─── Low-level graph runner ─────────────────────────────────────────────────
 
   /**
@@ -483,6 +660,7 @@ export class GraphService {
     let toolProvider: IToolProvider | undefined;
     let createdBookingCode: string | undefined;
     let cancelledBookingCode: string | undefined;
+    let streamedTokensCount = 0;
 
     try {
       // ── 1. Build LangChain messages from raw LLMMessage array ──────────────
@@ -588,6 +766,29 @@ export class GraphService {
                       'Do not execute. The widget already displayed the booking summary card. Do not repeat booking details, do not add Confirm/Edit chips, and ask the user to review the card in one short sentence only.',
                   });
                 }
+
+                if (conversationId.startsWith('admin-test-')) {
+                  this.logger.log(
+                    `[Tool Node] Mock booking execution in test mode: ${conversationId}`,
+                  );
+                  const mockBookingCode = `TEST-BK${Math.floor(1000 + Math.random() * 9000)}`;
+                  const mockResult = {
+                    bookingCode: mockBookingCode,
+                    status: 'confirmed',
+                    customerName: toolArgs.customerName,
+                    phone: toolArgs.phone,
+                    serviceName: service.name,
+                    resourceName: resource.name,
+                    date: toolArgs.date,
+                    timeSlot: toolArgs.timeSlot,
+                  };
+                  createdBookingCode = mockBookingCode;
+                  this.chatGateway.emitBookingSuccess(
+                    conversationId,
+                    mockResult,
+                  );
+                  return JSON.stringify(mockResult);
+                }
               }
 
               this.logger.log(`[Tool Node] Executing tool: ${def.name}`);
@@ -649,6 +850,11 @@ export class GraphService {
       const activeConversationBookingCode = async (
         state: typeof AgentState.State,
       ) => {
+        if (conversationId.startsWith('admin-test-')) {
+          return latestActiveBookingCode(
+            [state.summary, ...state.messages.map(messageText)].join('\n'),
+          );
+        }
         const metadataMessages = await this.chatMessageRepo.find({
           where: [
             { conversationId, content: Like('%<booking-code>%') },
@@ -861,6 +1067,52 @@ export class GraphService {
           };
         }
 
+        if (conversationId.startsWith('admin-test-')) {
+          const testCancellationPayload = {
+            bookingCode,
+            status: 'confirmed',
+            customerName: 'Admin Tester',
+            phone: '0901234567',
+            serviceId: undefined,
+            serviceName: 'Dịch vụ thử nghiệm',
+            resourceId: undefined,
+            resourceName: 'Nhân viên thử nghiệm',
+            date: new Date().toISOString().split('T')[0],
+            timeSlot: '10:00',
+          };
+
+          if (!/^\/confirm-cancel-booking\b/i.test(userText)) {
+            this.chatGateway.emitBookingCancellation(
+              conversationId,
+              testCancellationPayload,
+            );
+            return {
+              messages: [
+                new AIMessage(
+                  isVietnamese
+                    ? 'Vui lòng kiểm tra và xác nhận hủy lịch.'
+                    : 'Please review and confirm the booking cancellation.',
+                ),
+              ],
+            };
+          }
+
+          cancelledBookingCode = bookingCode;
+          this.chatGateway.emitBookingCancelled(conversationId, {
+            ...testCancellationPayload,
+            status: 'cancelled',
+          });
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese
+                  ? 'Lịch đặt thử nghiệm của bạn đã được hủy.'
+                  : 'Your test booking has been cancelled.',
+              ),
+            ],
+          };
+        }
+
         const booking = await this.bookingRepo.findOne({
           where: { siteId: state.siteId, code: bookingCode },
           relations: { service: true, resource: true },
@@ -1023,6 +1275,7 @@ export class GraphService {
               handleLLMNewToken(token: string) {
                 if (!shouldStream) return;
                 if (token) {
+                  streamedTokensCount++;
                   // 1. HTTP SSE — visitor receives tokens
                   if (res) {
                     res.write(token);
@@ -1155,10 +1408,12 @@ export class GraphService {
           state.summarizedMessageCount + messagesToSummarize.length;
 
         // Persist to DB so the next graph run picks up the compressed context
-        await this.conversationRepo.update(conversationId, {
-          summary: newSummary,
-          summarizedMessageCount: newCount,
-        });
+        if (!conversationId.startsWith('admin-test-')) {
+          await this.conversationRepo.update(conversationId, {
+            summary: newSummary,
+            summarizedMessageCount: newCount,
+          });
+        }
 
         return {
           messages: state.messages.slice(state.messages.length - 2),
@@ -1276,6 +1531,9 @@ export class GraphService {
             `${sanitizedText}${bookingMetadata}`,
             finalState.knowledgeSources,
           );
+          if (res && streamedTokensCount === 0 && !res.writableEnded) {
+            res.write(`${sanitizedText}${bookingMetadata}`);
+          }
         }
       }
 

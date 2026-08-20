@@ -167,16 +167,18 @@ export class ChatService {
         this.trackConversationPresence(client, visitor.conversationId);
 
         const receiverType = SenderType.VISITOR;
-        await this.markConversationDelivered(
-          visitor.conversationId,
-          receiverType,
-        );
-        this.chatGateway.server
-          .to(`conversation-${visitor.conversationId}`)
-          .emit('conversation-delivered', {
-            conversationId: visitor.conversationId,
+        if (!visitor.conversationId.startsWith('admin-test-')) {
+          await this.markConversationDelivered(
+            visitor.conversationId,
             receiverType,
-          });
+          );
+          this.chatGateway.server
+            .to(`conversation-${visitor.conversationId}`)
+            .emit('conversation-delivered', {
+              conversationId: visitor.conversationId,
+              receiverType,
+            });
+        }
 
         client.emit('connected', { message: `Connected as visitor` });
       }
@@ -361,6 +363,44 @@ export class ChatService {
       payload.senderType = SenderType.VISITOR;
     } else if (user) {
       payload.senderType = SenderType.AGENT;
+    }
+
+    // Ephemeral in-memory test conversation (sandbox mode)
+    if (payload.conversationId.startsWith('admin-test-')) {
+      const siteId =
+        visitor?.siteId || (client.handshake.query.siteId as string);
+      const messageEvent = {
+        id: payload.localId || `msg-test-${Date.now()}`,
+        conversationId: payload.conversationId,
+        content: payload.content,
+        senderType: SenderType.VISITOR,
+        createdAt: new Date().toISOString(),
+        status: MessageStatus.SENT,
+      };
+
+      client.emit('messageSaved', {
+        localId: payload.localId,
+        ...messageEvent,
+      });
+
+      client
+        .to(`conversation-${payload.conversationId}`)
+        .emit('newMessage', messageEvent);
+
+      this.graphService
+        .handleVisitorMessage(
+          payload.conversationId,
+          siteId,
+          undefined,
+          undefined,
+          payload.content,
+        )
+        .catch((err: unknown) =>
+          this.logger.error(
+            `AI test stream error: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      return;
     }
 
     try {
@@ -587,27 +627,41 @@ export class ChatService {
    * pipeline works normally, and it does NOT fire agent notifications (unlike
    * the public createConversation) to avoid polluting the inbox.
    */
-  async createAdminTestConversation(
-    siteId: string,
-    user: JwtUser,
-  ): Promise<CreateConversationResponseDto> {
+  async assertSiteAccessForTest(siteId: string, user: JwtUser): Promise<Site> {
     const site = await this.siteRepository.findOne({
       where: { id: siteId },
-      select: { id: true, ownerId: true, name: true },
+      relations: {
+        industryTemplateInfo: true,
+        bookingConfig: true,
+        bookingServices: true,
+        bookingResources: true,
+      },
     });
 
     if (!site) {
       throw new NotFoundException(`Site ${siteId} not found`);
     }
 
-    // Only the site owner or a super-admin may use the test endpoint.
     const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
     const isOwner = site.ownerId === user.id;
-    if (!isSuperAdmin && !isOwner) {
+    const isOrgAdmin =
+      user.role === UserRole.ADMIN &&
+      user.organizationId !== null &&
+      site.organizationId === user.organizationId;
+    if (!isSuperAdmin && !isOwner && !isOrgAdmin) {
       throw new ForbiddenException(
-        'Only the site owner or a super-admin may create a test conversation for this site',
+        'You do not have permission to test this site',
       );
     }
+
+    return site;
+  }
+
+  async createAdminTestConversation(
+    siteId: string,
+    user: JwtUser,
+  ): Promise<CreateConversationResponseDto> {
+    await this.assertSiteAccessForTest(siteId, user);
 
     const conversation = this.conversationRepository.create({
       siteId,
