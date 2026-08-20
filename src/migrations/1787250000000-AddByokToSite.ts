@@ -10,8 +10,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * The key is NEVER stored in plaintext. Encryption/decryption is handled
  * by src/shared/utils/encryption.util.ts using OPENAI_KEY_ENCRYPTION_SECRET.
  */
-export class AddByokToSite1787200000000 implements MigrationInterface {
-  name = 'AddByokToSite1787200000000';
+export class AddByokToSite1787250000000 implements MigrationInterface {
+  name = 'AddByokToSite1787250000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

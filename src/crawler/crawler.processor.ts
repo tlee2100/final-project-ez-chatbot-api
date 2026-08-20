@@ -102,6 +102,7 @@ export class CrawlerProcessor {
         await this.finishRun(run.id);
         return;
       }
+      await this.itemRepository.delete({ runId: run.id });
       for (let start = 0; start < urls.length; start += 500) {
         const batch = urls.slice(start, start + 500).map((entry) =>
           this.itemRepository.create({
@@ -122,7 +123,7 @@ export class CrawlerProcessor {
               attempts: 3,
               backoff: { type: 'exponential', delay: 5_000 },
               removeOnComplete: true,
-              removeOnFail: true,
+              removeOnFail: false,
             },
           })),
         );

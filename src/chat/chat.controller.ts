@@ -16,7 +16,15 @@ import {
   BadRequestException,
   UseInterceptors,
   UploadedFile,
+  ParseUUIDPipe,
 } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiParam,
+  ApiBody,
+  ApiResponse,
+} from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -30,6 +38,10 @@ import { CreateConversationResponseDto } from './dto/create-conversation-respons
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
+import {
+  SubmitMessageFeedbackDto,
+  MessageFeedbackResponseDto,
+} from './dto/submit-message-feedback.dto';
 import { DomainAllowlistGuard } from 'src/common/guards/domain-allowlist.guard';
 import { ApiThrottlerGuard } from 'src/common/guards/api-throttler.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -38,6 +50,7 @@ import { ClosedReason } from './entities/conversation.entity';
 import { CreateAdminTestConversationDto } from './dto/create-admin-test-conversation.dto';
 import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
 
+@ApiTags('Chat')
 @Controller('chat')
 export class ChatController {
   constructor(
@@ -154,6 +167,49 @@ export class ChatController {
   @Get('public/conversations/:id/status')
   getPublicConversationStatus(@Param('id') id: string) {
     return this.chatService.getPublicConversationStatus(id);
+  }
+
+  // ─── Public: Visitor message feedback (thumbs up / down) ───────────────
+
+  /**
+   * Public — visitor submits thumbs up/down rating on an AI bot message.
+   */
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @Post('public/messages/:id/feedback')
+  @ApiOperation({
+    summary: 'Submit feedback on an AI message (thumbs up / down)',
+    description:
+      'Allows a visitor to submit binary feedback (HELPFUL or UNHELPFUL) on an AI-generated message.',
+  })
+  @ApiParam({
+    name: 'id',
+    type: 'string',
+    format: 'uuid',
+    description: 'Message UUID (must be an AI bot message)',
+  })
+  @ApiBody({ type: SubmitMessageFeedbackDto })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Feedback successfully recorded',
+    type: MessageFeedbackResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Message not found or message was not sent by AI',
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Invalid input payload or malformed UUID',
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: 'Rate limit exceeded',
+  })
+  submitMessageFeedback(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SubmitMessageFeedbackDto,
+  ): Promise<MessageFeedbackResponseDto> {
+    return this.chatService.submitMessageFeedback(id, dto);
   }
 
   // ─── Protected: Agent/admin endpoints ─────────────────────────────────
