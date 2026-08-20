@@ -216,7 +216,11 @@ export interface GraphRunOptions {
    * The Site entity — used by AiService.buildModelForSite() to resolve BYOK key.
    * When provided and site.useCustomOpenAiKey is true, the per-site encrypted key is used.
    */
-  site?: { useCustomOpenAiKey?: boolean; encryptedOpenAiKey?: string | null };
+  site?: {
+    id?: string;
+    useCustomOpenAiKey?: boolean;
+    encryptedOpenAiKey?: string | null;
+  };
 }
 
 export interface GraphRunResult {
@@ -1200,7 +1204,10 @@ export class GraphService {
 
           return { intent: intent as IntentType };
         } catch (error) {
-          this.logger.error('Failed to parse structured intent', error);
+          const errMsg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Intent classification fallback for site ${options.site?.id ?? 'unknown'}: ${errMsg.slice(0, 150)}`,
+          );
           return { intent: 'small_talk' as IntentType };
         }
       };
@@ -1633,26 +1640,75 @@ export class GraphService {
           )
           .bindTools(visibleTools);
 
-        const response = await boundModel.invoke(messagesWithSystem, {
-          callbacks: [
-            {
-              handleLLMNewToken(token: string) {
-                if (!shouldStream) return;
-                if (token) {
-                  streamedTokensCount++;
-                  // 1. HTTP SSE — visitor receives tokens
-                  if (res) {
-                    res.write(token);
+        let response;
+        try {
+          response = await boundModel.invoke(messagesWithSystem, {
+            callbacks: [
+              {
+                handleLLMNewToken(token: string) {
+                  if (!shouldStream) return;
+                  if (token) {
+                    streamedTokensCount++;
+                    // 1. HTTP SSE — visitor receives tokens
+                    if (res) {
+                      res.write(token);
+                    }
+                    // 2. WebSocket — admin dashboard receives tokens
+                    server
+                      .to(`conversation-${conversationId}`)
+                      .emit('aiChunk', { token, conversationId });
                   }
-                  // 2. WebSocket — admin dashboard receives tokens
-                  server
-                    .to(`conversation-${conversationId}`)
-                    .emit('aiChunk', { token, conversationId });
-                }
+                },
               },
-            },
-          ],
-        });
+            ],
+          });
+        } catch (modelError) {
+          const errMsg =
+            modelError instanceof Error
+              ? modelError.message
+              : String(modelError);
+          const isAuthOrQuota =
+            errMsg.includes('401') ||
+            errMsg.includes('Incorrect API key') ||
+            errMsg.includes('invalid_api_key') ||
+            errMsg.includes('429') ||
+            errMsg.includes('insufficient_quota') ||
+            errMsg.includes('MODEL_AUTHENTICATION');
+
+          if (isAuthOrQuota && options.site?.useCustomOpenAiKey) {
+            this.logger.warn(
+              `Custom OpenAI key on site ${options.site?.id ?? 'unknown'} failed (${errMsg.slice(0, 100)}). Gracefully falling back to system master key...`,
+            );
+            const fallbackModel = this.aiService
+              .buildModel(
+                temperature,
+                shouldStream,
+                options.maxTokensPerResponse,
+              )
+              .bindTools(visibleTools);
+
+            response = await fallbackModel.invoke(messagesWithSystem, {
+              callbacks: [
+                {
+                  handleLLMNewToken(token: string) {
+                    if (!shouldStream) return;
+                    if (token) {
+                      streamedTokensCount++;
+                      if (res) {
+                        res.write(token);
+                      }
+                      server
+                        .to(`conversation-${conversationId}`)
+                        .emit('aiChunk', { token, conversationId });
+                    }
+                  },
+                },
+              ],
+            });
+          } else {
+            throw modelError;
+          }
+        }
 
         return { messages: [response] };
       };
@@ -2027,7 +2083,23 @@ export class GraphService {
             : undefined,
       };
     } catch (error) {
-      this.logger.error('LangGraph workflow error', error);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const isAuthError =
+        errMsg.includes('401') ||
+        errMsg.includes('Incorrect API key') ||
+        errMsg.includes('invalid_api_key') ||
+        errMsg.includes('MODEL_AUTHENTICATION');
+
+      if (isAuthError) {
+        this.logger.warn(
+          `LangGraph LLM authentication issue on site ${options.site?.id ?? 'unknown'}: ${errMsg.slice(0, 150)}`,
+        );
+      } else {
+        this.logger.error(
+          `LangGraph workflow error: ${errMsg}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
 
       const fallbackMsg =
         "I'm currently unable to process your request. Please try again or contact support.";

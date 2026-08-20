@@ -95,11 +95,19 @@ export class AiService {
     maxTokens?: number,
   ): ChatOpenAI {
     let resolvedApiKey = this.apiKey;
+    let resolvedBaseURL: string | undefined = this.baseURL;
+    let resolvedModelName: string = this.modelName;
 
     if (site.useCustomOpenAiKey && site.encryptedOpenAiKey) {
       try {
         resolvedApiKey = decryptApiKey(site.encryptedOpenAiKey);
         this.logger.debug('Using site-specific OpenAI API key (BYOK)');
+        resolvedBaseURL =
+          process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+        resolvedModelName =
+          process.env.OPENAI_CHAT_MODEL ||
+          process.env.OPENAI_MODEL ||
+          'gpt-4o-mini';
       } catch (err) {
         this.logger.error(
           `Failed to decrypt site API key, falling back to master key: ${err instanceof Error ? err.message : String(err)}`,
@@ -109,8 +117,8 @@ export class AiService {
 
     return new ChatOpenAI({
       apiKey: resolvedApiKey,
-      configuration: { baseURL: this.baseURL },
-      modelName: this.modelName,
+      configuration: resolvedBaseURL ? { baseURL: resolvedBaseURL } : undefined,
+      modelName: resolvedModelName,
       temperature,
       streaming,
       maxRetries: 3,
