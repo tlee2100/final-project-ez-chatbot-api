@@ -5,6 +5,10 @@ import {
   Conversation,
   HandlingStatus,
 } from '../chat/entities/conversation.entity';
+import {
+  ChatMessage,
+  FeedbackRating,
+} from '../chat/entities/chat-message.entity';
 import { Site } from '../site/entities/site.entity';
 import { User } from '../user/entities/user.entity';
 import { Organization } from '../organization/entities/organization.entity';
@@ -17,6 +21,8 @@ export class AnalyticsService {
   constructor(
     @InjectRepository(Conversation)
     private readonly conversationRepo: Repository<Conversation>,
+    @InjectRepository(ChatMessage)
+    private readonly chatMessageRepo: Repository<ChatMessage>,
     @InjectRepository(Site)
     private readonly siteRepo: Repository<Site>,
     @InjectRepository(User)
@@ -119,6 +125,31 @@ export class AnalyticsService {
         order: { createdAt: 'DESC' },
         take: 5,
       });
+    }
+
+    // 5.1. Count User Feedback (Helpful / Unhelpful)
+    let helpfulCount = 0;
+    let unhelpfulCount = 0;
+
+    if (siteIds.length > 0) {
+      const feedbackCounts = await this.chatMessageRepo
+        .createQueryBuilder('message')
+        .innerJoin('message.conversation', 'conversation')
+        .select('message.feedbackRating', 'rating')
+        .addSelect('COUNT(message.id)', 'count')
+        .where('conversation.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('message.feedbackRating IS NOT NULL')
+        .groupBy('message.feedbackRating')
+        .getRawMany<{ rating: FeedbackRating; count: string }>();
+
+      for (const row of feedbackCounts) {
+        const countVal = parseInt(row.count, 10) || 0;
+        if (row.rating === FeedbackRating.HELPFUL) {
+          helpfulCount = countVal;
+        } else if (row.rating === FeedbackRating.UNHELPFUL) {
+          unhelpfulCount = countVal;
+        }
+      }
     }
 
     const totalCalculated = aiHandledCount + agentHandledCount;
@@ -254,9 +285,8 @@ export class AnalyticsService {
         })),
       },
       userFeedback: [
-        { label: 'Helpful', value: 85, color: '#10b981' },
-        { label: 'Okay', value: 10, color: '#f59e0b' },
-        { label: 'Not Helpful', value: 5, color: '#ef4444' },
+        { label: 'Helpful', value: helpfulCount, color: '#10b981' },
+        { label: 'Not Helpful', value: unhelpfulCount, color: '#ef4444' },
       ],
       recentActivity:
         recentActivity.length > 0

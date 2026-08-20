@@ -30,9 +30,14 @@ import {
   ChatMessage,
   SenderType,
   MessageStatus,
+  FeedbackRating,
 } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import {
+  SubmitMessageFeedbackDto,
+  MessageFeedbackResponseDto,
+} from './dto/submit-message-feedback.dto';
 import { JwtUser } from '../auth/types/jwt-user.type';
 import { NotificationService } from '../notification/notification.service';
 import { NotificationType } from '../notification/enums/notification-type.enum';
@@ -56,6 +61,8 @@ type ChatMessageDto = Pick<
   | 'content'
   | 'status'
   | 'createdAt'
+  | 'feedbackRating'
+  | 'feedbackAt'
 > & {
   senderName?: string | null;
 };
@@ -1222,6 +1229,8 @@ export class ChatService {
       status: message.status,
       createdAt: message.createdAt,
       senderName: message.agent?.name ?? null,
+      feedbackRating: message.feedbackRating,
+      feedbackAt: message.feedbackAt,
     }));
   }
 
@@ -1682,5 +1691,35 @@ export class ChatService {
       );
       uploadStream.end(file.buffer);
     });
+  }
+
+  // ─── Feedback ────────────────────────────────────────────────────────────
+
+  /**
+   * Submit visitor thumbs up / down feedback on an AI message.
+   */
+  async submitMessageFeedback(
+    messageId: string,
+    dto: SubmitMessageFeedbackDto,
+  ): Promise<MessageFeedbackResponseDto> {
+    const message = await this.chatMessageRepository.findOne({
+      where: { id: messageId },
+    });
+
+    if (!message || message.senderType !== SenderType.AI) {
+      throw new NotFoundException(
+        `AI message with ID "${messageId}" not found`,
+      );
+    }
+
+    message.feedbackRating = dto.rating;
+    message.feedbackAt = new Date();
+
+    const updated = await this.chatMessageRepository.save(message);
+
+    return {
+      id: updated.id,
+      feedbackRating: updated.feedbackRating as FeedbackRating,
+    };
   }
 }
