@@ -24,6 +24,10 @@ export class SiteProfile extends AutomapperProfile {
           (d) => d.enabled,
           mapFrom((s) => s.isAiActive),
         ),
+        forMember(
+          (d) => d.hasCustomApiKey,
+          mapFrom((s) => Boolean(s.encryptedOpenAiKey)),
+        ),
       );
     };
   }

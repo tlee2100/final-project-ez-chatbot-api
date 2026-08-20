@@ -25,7 +25,7 @@ import {
   ApiBody,
   ApiResponse,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -67,8 +67,15 @@ export class ChatController {
   @Post('conversations')
   createConversation(
     @Body() dto: CreateConversationDto,
+    @Req() req: Request,
   ): Promise<CreateConversationResponseDto> {
-    return this.chatService.createConversation(dto);
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string | undefined)
+        ?.split(',')[0]
+        ?.trim() ??
+      req.ip ??
+      req.socket?.remoteAddress;
+    return this.chatService.createConversation(dto, clientIp);
   }
 
   // ─── Admin: Create test conversation (authenticated) ──────────────────────
@@ -156,6 +163,7 @@ export class ChatController {
     return this.chatService.getMessagesForConversation(id, cursor, limit);
   }
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Get('public/conversations/:id/status')
   getPublicConversationStatus(@Param('id') id: string) {
     return this.chatService.getPublicConversationStatus(id);
@@ -296,6 +304,7 @@ export class ChatController {
     return this.chatService.updatePublicConversationStatus(id, dto);
   }
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Patch('public/conversations/:id/call-agent')
   async callAgent(@Param('id') id: string) {
     return this.chatService.escalateToAgent(id);
@@ -303,6 +312,7 @@ export class ChatController {
 
   // ─── Attachments ────────────────────────────────────────────────────────
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Post('public/conversations/:id/upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadAttachmentPublic(

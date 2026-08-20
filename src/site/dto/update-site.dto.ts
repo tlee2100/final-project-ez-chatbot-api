@@ -219,4 +219,13 @@ export class UpdateSiteDto {
   @IsOptional()
   @IsBoolean()
   showAvatar?: boolean;
+
+  // ── BYOK (SEC-001 / CE-004) ──
+  @ApiPropertyOptional({
+    description:
+      'Toggle whether to use the custom OpenAI key without deleting it',
+  })
+  @IsOptional()
+  @IsBoolean()
+  useCustomOpenAiKey?: boolean;
 }

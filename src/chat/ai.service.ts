@@ -15,15 +15,17 @@ import {
   detectConversationLanguage,
   parseMultimodalContent,
 } from './chat-flow.utils';
+import { decryptApiKey } from '../shared/utils/encryption.util';
 
 /**
  * AiService — LLM abstraction layer.
  *
  * Responsibilities:
  *  - Initialise the LLM provider (DeepSeek via ai-box.vn proxy) from env config.
- *  - buildModel()   → returns a configured ChatOpenAI instance.
- *  - invoke()       → blocking LLM call; used for intent classification and memory summarisation.
- *  - stream()       → streaming LLM call; emits tokens via onToken callback; used by GraphService.
+ *  - buildModel()          → returns a configured ChatOpenAI instance (uses master key).
+ *  - buildModelForSite()   → like buildModel() but uses per-site BYOK key if available.
+ *  - invoke()              → blocking LLM call; used for intent classification and memory summarisation.
+ *  - stream()              → streaming LLM call; emits tokens via onToken callback; used by GraphService.
  *
  * The service does NOT know about HTTP responses or WebSocket rooms — that fan-out
  * responsibility belongs to GraphService.
@@ -54,7 +56,7 @@ export class AiService {
   // ─── Public API ──────────────────────────────────────────────────────────
 
   /**
-   * Build a configured ChatOpenAI instance.
+   * Build a configured ChatOpenAI instance using the master API key.
    *
    * @param temperature  Sampling temperature (default 0.7). Use 0 for deterministic tasks.
    * @param streaming    Whether to enable streaming mode on the model instance.
@@ -68,6 +70,55 @@ export class AiService {
       apiKey: this.apiKey,
       configuration: { baseURL: this.baseURL },
       modelName: this.modelName,
+      temperature,
+      streaming,
+      maxRetries: 3,
+      timeout: 30000,
+      ...(maxTokens ? { maxTokens } : {}),
+    });
+  }
+
+  /**
+   * Build a configured ChatOpenAI instance for a specific site.
+   * If the site has a custom encrypted API key (BYOK), it will be decrypted and used.
+   * Falls back to the master key if no custom key is configured.
+   *
+   * @param site         The site entity (needs useCustomOpenAiKey + encryptedOpenAiKey)
+   * @param temperature  Sampling temperature
+   * @param streaming    Whether to enable streaming mode
+   * @param maxTokens    Optional token limit
+   */
+  buildModelForSite(
+    site: { useCustomOpenAiKey?: boolean; encryptedOpenAiKey?: string | null },
+    temperature = 0.7,
+    streaming = false,
+    maxTokens?: number,
+  ): ChatOpenAI {
+    let resolvedApiKey = this.apiKey;
+    let resolvedBaseURL: string | undefined = this.baseURL;
+    let resolvedModelName: string = this.modelName;
+
+    if (site.useCustomOpenAiKey && site.encryptedOpenAiKey) {
+      try {
+        resolvedApiKey = decryptApiKey(site.encryptedOpenAiKey);
+        this.logger.debug('Using site-specific OpenAI API key (BYOK)');
+        resolvedBaseURL =
+          process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+        resolvedModelName =
+          process.env.OPENAI_CHAT_MODEL ||
+          process.env.OPENAI_MODEL ||
+          'gpt-4o-mini';
+      } catch (err) {
+        this.logger.error(
+          `Failed to decrypt site API key, falling back to master key: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    return new ChatOpenAI({
+      apiKey: resolvedApiKey,
+      configuration: resolvedBaseURL ? { baseURL: resolvedBaseURL } : undefined,
+      modelName: resolvedModelName,
       temperature,
       streaming,
       maxRetries: 3,
