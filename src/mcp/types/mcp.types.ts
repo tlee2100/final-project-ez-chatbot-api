@@ -43,6 +43,7 @@ export interface BookingResult {
   bookingCode: string;
   status: 'confirmed' | 'cancelled';
   customerName: string;
+  customerEmail?: string;
   phone: string;
   date: string;
   timeSlot: string;
@@ -61,6 +62,7 @@ export interface CreateBookingPayload {
   resourceId: string;
   date: string;
   timeSlot: string;
+  sessionId?: string;
 }
 
 export interface SiteConfigServiceItem {

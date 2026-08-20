@@ -70,6 +70,13 @@ export class SiteDto {
 
   @ApiProperty({
     example: true,
+    description: 'Whether booking appointments is enabled for this site',
+  })
+  @AutoMap()
+  bookingEnabled: boolean;
+
+  @ApiProperty({
+    example: true,
     description: 'Whether the site is enabled (alias for isAiActive)',
   })
   enabled: boolean;

@@ -39,6 +39,7 @@ import { NotificationType } from '../notification/enums/notification-type.enum';
 import { EmailQueueService } from '../notification/email-queue.service';
 import { ChatGateway, SocketData, ChatMessagePayload } from './chat.gateway';
 import { GraphService } from './graph.service';
+import { ChatTimeoutService } from './chat-timeout.service';
 import { CreateConversationResponseDto } from './dto/create-conversation-response.dto';
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
 import { AiService } from './ai.service';
@@ -88,6 +89,8 @@ export class ChatService {
     private readonly chatGateway: ChatGateway,
     @Inject(forwardRef(() => GraphService))
     private readonly graphService: GraphService,
+    @Inject(forwardRef(() => ChatTimeoutService))
+    private readonly chatTimeoutService: ChatTimeoutService,
     private readonly emailQueueService: EmailQueueService,
     private readonly aiService: AiService,
   ) {
@@ -588,6 +591,14 @@ export class ChatService {
       `New conversation ${result.conversationId} created for site ${dto.siteId}`,
     );
 
+    // Schedule inactivity timeout & warning timers for the new conversation
+    this.chatTimeoutService.scheduleTimers(
+      result.conversationId,
+      site,
+      new Date(),
+      result.handlingStatus,
+    );
+
     // Notify agents AFTER the transaction commits so the foreign key constraint passes
     const recipientIds = new Set([
       site.ownerId,
@@ -630,11 +641,18 @@ export class ChatService {
   async assertSiteAccessForTest(siteId: string, user: JwtUser): Promise<Site> {
     const site = await this.siteRepository.findOne({
       where: { id: siteId },
-      relations: {
-        industryTemplateInfo: true,
-        bookingConfig: true,
-        bookingServices: true,
-        bookingResources: true,
+      select: {
+        id: true,
+        ownerId: true,
+        organizationId: true,
+        name: true,
+        enableConversationTimeout: true,
+        inactivityTimeoutMinutes: true,
+        warningTimeMinutes: true,
+        inactivityWarningMessage: true,
+        timeoutMessage: true,
+        resetTimerOnBotResponse: true,
+        pauseTimerForAgentChats: true,
       },
     });
 
@@ -661,7 +679,7 @@ export class ChatService {
     siteId: string,
     user: JwtUser,
   ): Promise<CreateConversationResponseDto> {
-    await this.assertSiteAccessForTest(siteId, user);
+    const site = await this.assertSiteAccessForTest(siteId, user);
 
     const conversation = this.conversationRepository.create({
       siteId,
@@ -676,6 +694,14 @@ export class ChatService {
 
     this.logger.log(
       `[AdminTest] Test conversation ${saved.id} created for site ${siteId} by admin ${user.email}`,
+    );
+
+    // Schedule timers for test conversation
+    this.chatTimeoutService.scheduleTimers(
+      saved.id,
+      site,
+      saved.lastActivityAt,
+      saved.handlingStatus,
     );
 
     // Intentionally NO agent notifications for test conversations.
@@ -979,6 +1005,7 @@ export class ChatService {
   ): Promise<{ conversation: Conversation; isNewAssignment: boolean }> {
     const conversation = await this.conversationRepository.findOne({
       where: { id: conversationId },
+      relations: { site: true },
     });
     if (!conversation) {
       throw new NotFoundException(`Conversation ${conversationId} not found`);
@@ -1010,6 +1037,11 @@ export class ChatService {
       this.logger.log(
         `Agent ${agentUser.email} assigned to conversation ${conversationId}`,
       );
+
+      // Pause inactivity timer if site is configured to pause for agent chats
+      if (conversation.site?.pauseTimerForAgentChats) {
+        this.chatTimeoutService.pauseTimer(conversation.id);
+      }
 
       // Notify the whole site room so other agents' inboxes refresh
       this.chatGateway.notifyConversationAssigned(
@@ -1141,8 +1173,9 @@ export class ChatService {
     }
 
     conversation.status = status;
-    if (status === ConversationStatus.CLOSED && reason) {
-      conversation.closedReason = reason;
+    if (status === ConversationStatus.CLOSED) {
+      if (reason) conversation.closedReason = reason;
+      this.chatTimeoutService.cancelTimer(id);
     }
     conversation.lastActivityAt = new Date();
 
@@ -1153,14 +1186,22 @@ export class ChatService {
     id: string,
     dto: UpdateConversationStatusDto,
   ): Promise<Conversation> {
-    return this.updateStatusAndNotify(id, dto.status, ClosedReason.AGENT);
+    return this.updateStatusAndNotify(
+      id,
+      dto.status,
+      dto.reason || ClosedReason.AGENT,
+    );
   }
 
   async updatePublicConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
   ): Promise<Conversation> {
-    return this.updateStatusAndNotify(id, dto.status, ClosedReason.VISITOR);
+    return this.updateStatusAndNotify(
+      id,
+      dto.status,
+      dto.reason || ClosedReason.VISITOR,
+    );
   }
 
   async getPublicConversationStatus(id: string) {
@@ -1282,6 +1323,16 @@ export class ChatService {
       lastActivityAt: new Date(),
     });
 
+    // Reset inactivity timer according to senderType and site settings
+    if (senderType === SenderType.VISITOR || senderType === SenderType.AGENT) {
+      this.chatTimeoutService.resetTimer(conversationId, conversation.site);
+    } else if (senderType === SenderType.AI) {
+      if (conversation.site?.resetTimerOnBotResponse) {
+        this.chatTimeoutService.resetTimer(conversationId, conversation.site);
+      }
+    }
+    // Note: SYSTEM messages (e.g. warning messages) intentionally do NOT reset the timer
+
     // Emit ephemeral toast to agent (NOT persisted to DB)
     if (senderType === SenderType.VISITOR && conversation.agentId) {
       this.chatGateway.emitChatToastToAgent(conversation.agentId, {
@@ -1346,6 +1397,8 @@ export class ChatService {
       closedReason: reason,
     });
 
+    this.chatTimeoutService.cancelTimer(id);
+
     this.chatGateway.notifyConversationClosed(id, conversation.siteId);
 
     if (conversation.agentId) {
@@ -1365,7 +1418,12 @@ export class ChatService {
       }
     }
 
-    if (conversation.site && conversation.site.owner) {
+    // Only send summary & transcript emails if the conversation was closed normally (not just cleared/reset by visitor)
+    if (
+      reason !== ClosedReason.CLEARED &&
+      conversation.site &&
+      conversation.site.owner
+    ) {
       const messageCount = await this.chatMessageRepository.count({
         where: { conversationId: conversation.id },
       });

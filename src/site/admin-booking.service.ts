@@ -18,6 +18,8 @@ import type { PaginateQuery } from 'nestjs-paginate';
 import { BookingService as CoreBookingService } from '../booking/booking.service';
 import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { CreateBookingDto } from '../booking/dto/create-booking.dto';
+import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
+import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 
 import { IsArray, IsBoolean, IsNumber, IsString } from 'class-validator';
 
@@ -216,6 +218,16 @@ export class AdminBookingService {
     );
   }
 
+  async getActiveHolds(siteId: string, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.getActiveHolds(siteId);
+  }
+
+  async releaseHold(siteId: string, dto: HoldSlotDto, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.releaseHold(siteId, dto);
+  }
+
   async createBooking(
     siteId: string,
     body: {
@@ -228,6 +240,7 @@ export class AdminBookingService {
       customerPhone?: string;
       customerEmail?: string;
       notes?: string;
+      sessionId: string;
     },
     user: JwtUser,
   ) {
@@ -244,6 +257,7 @@ export class AdminBookingService {
       phone: body.customerPhone,
       customerEmail: body.customerEmail,
       notes: body.notes,
+      sessionId: body.sessionId,
     };
 
     return this.coreBookingService.createBooking(
@@ -280,5 +294,36 @@ export class AdminBookingService {
       startDate,
       endDate,
     );
+  }
+
+  async holdSlot(siteId: string, dto: HoldSlotDto, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.holdSlot(siteId, dto);
+  }
+
+  async getBlockouts(
+    siteId: string,
+    user: JwtUser,
+    startDate?: string,
+    endDate?: string,
+    resourceId?: string,
+  ) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.getBlockouts(
+      siteId,
+      startDate,
+      endDate,
+      resourceId,
+    );
+  }
+
+  async createBlockout(siteId: string, dto: CreateBlockoutDto, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.createBlockout(siteId, dto);
+  }
+
+  async deleteBlockout(siteId: string, blockoutId: string, user: JwtUser) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.deleteBlockout(siteId, blockoutId);
   }
 }

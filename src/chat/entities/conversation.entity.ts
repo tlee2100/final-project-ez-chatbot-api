@@ -29,6 +29,7 @@ export enum ClosedReason {
   TIMEOUT = 'TIMEOUT',
   AGENT = 'AGENT',
   ERROR = 'ERROR',
+  CLEARED = 'CLEARED',
 }
 
 @Entity('conversations')
@@ -39,7 +40,7 @@ export class Conversation {
   @Column({ type: 'uuid' })
   siteId: string;
 
-  @ManyToOne(() => Site)
+  @ManyToOne(() => Site, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'siteId' })
   site: Site;
 

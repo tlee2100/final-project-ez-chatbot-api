@@ -15,6 +15,8 @@ import {
   McpCancelBookingDto,
   McpCreateBookingDto,
   McpSearchKnowledgeDto,
+  McpHoldSlotDto,
+  McpReleaseHoldDto,
 } from './dto/mcp-internal.dto';
 
 /**
@@ -196,6 +198,46 @@ export class McpController {
       resourceId,
       serviceId,
     );
+  }
+
+  /**
+   * POST /api/internal/mcp/booking/hold
+   * MCP-009: holdSlot tool backend.
+   * siteId from X-MCP-Context.
+   */
+  @Post('booking/hold')
+  @ApiOperation({ summary: 'Hold a booking slot (MCP-009)' })
+  @ApiHeader({
+    name: 'X-MCP-Context',
+    description: 'Signed context carrying siteId',
+    required: true,
+  })
+  async holdSlot(
+    @Headers('x-mcp-context') mcpContext: string,
+    @Body() dto: McpHoldSlotDto,
+  ) {
+    const { siteId } = this.mcpService.validateToken(mcpContext);
+    return await this.mcpService.holdSlot(siteId, dto);
+  }
+
+  /**
+   * POST /api/internal/mcp/booking/release
+   * MCP-010: releaseHold tool backend.
+   * siteId from X-MCP-Context.
+   */
+  @Post('booking/release')
+  @ApiOperation({ summary: 'Release a held booking slot (MCP-010)' })
+  @ApiHeader({
+    name: 'X-MCP-Context',
+    description: 'Signed context carrying siteId',
+    required: true,
+  })
+  async releaseHold(
+    @Headers('x-mcp-context') mcpContext: string,
+    @Body() dto: McpReleaseHoldDto,
+  ) {
+    const { siteId } = this.mcpService.validateToken(mcpContext);
+    return await this.mcpService.releaseHold(siteId, dto);
   }
 
   /**

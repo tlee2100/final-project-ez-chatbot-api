@@ -7,7 +7,10 @@ jest.mock('@automapper/classes', () => ({
 
 import { ForbiddenException } from '@nestjs/common';
 import { ChatService } from './chat.service';
-import { ConversationStatus } from './entities/conversation.entity';
+import {
+  ConversationStatus,
+  ClosedReason,
+} from './entities/conversation.entity';
 import { MessageStatus, SenderType } from './entities/chat-message.entity';
 import { createRepositoryMock } from '../test/service-test-helpers';
 
@@ -26,12 +29,16 @@ describe('ChatService saveMessage', () => {
       server: { to: jest.fn().mockReturnThis(), emit: jest.fn() },
     };
     const graphService = {};
-    const emailQueueService = {
+    const chatTimeoutService = {
       enqueueConversationSummaryEmail: jest.fn(),
       enqueueChatTranscriptEmail: jest.fn(),
+      scheduleTimers: jest.fn(),
+      resetTimer: jest.fn(),
+      cancelTimer: jest.fn(),
+      pauseTimer: jest.fn(),
     };
+    const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
     const aiService = { invoke: jest.fn() };
-
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,
@@ -41,6 +48,7 @@ describe('ChatService saveMessage', () => {
       notificationService as never,
       chatGateway as never,
       graphService as never,
+      chatTimeoutService as never,
       emailQueueService as never,
       aiService as never,
     );
@@ -86,6 +94,7 @@ describe('ChatService saveMessage', () => {
       conversationId: 'conv-1',
       status: ConversationStatus.CLOSED,
       handlingStatus: 'AGENT_HANDLING',
+      closedReason: undefined,
     });
     expect(conversationRepository.findOne).toHaveBeenCalledWith({
       where: { id: 'conv-1' },
@@ -129,5 +138,32 @@ describe('ChatService saveMessage', () => {
         },
       ],
     );
+  });
+
+  it('updates public conversation status with CLEARED reason', async () => {
+    const { service, conversationRepository } = makeService();
+    const conv = {
+      id: 'conv-1',
+      siteId: 'site-1',
+      status: ConversationStatus.OPEN,
+      closedReason: null,
+      visitorName: 'John Doe',
+      visitorEmail: 'john@example.com',
+      createdAt: new Date(),
+      site: { owner: { id: 'owner-1' } },
+    };
+
+    conversationRepository.findOne.mockResolvedValue(conv);
+    conversationRepository.update.mockResolvedValue({ affected: 1 });
+
+    await service.updatePublicConversationStatus('conv-1', {
+      status: ConversationStatus.CLOSED,
+      reason: ClosedReason.CLEARED,
+    });
+
+    expect(conversationRepository.update).toHaveBeenCalledWith('conv-1', {
+      status: ConversationStatus.CLOSED,
+      closedReason: ClosedReason.CLEARED,
+    });
   });
 });

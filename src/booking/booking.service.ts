@@ -3,14 +3,18 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
+import { BookingBlockout } from './entities/booking-blockout.entity';
 import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
 import { BookingResource } from '../site/entities/booking-resources.entity';
 import { BookingService as BookingServiceEntity } from '../site/entities/booking-service.entity';
 import { Repository } from 'typeorm';
 import { CreateBookingDto } from './dto/create-booking.dto';
+import { CreateBlockoutDto } from './dto/create-blockout.dto';
 import { SiteService } from '../site/site.service';
 import { EmailQueueService } from '../notification/email-queue.service';
 import { BookingStatus } from './enums/booking-status.enum';
@@ -32,20 +36,44 @@ import {
   PaginateQuery,
   Paginated,
 } from 'nestjs-paginate';
+import { Redis } from 'ioredis';
+import { BookingGateway } from './booking.gateway';
+import { HoldSlotDto } from './dto/hold-slot.dto';
 
+export type SlotItem =
+  | {
+      startAt: string;
+      endAt: string;
+      resourceId: string;
+      status: 'AVAILABLE' | 'HOLDING' | 'BOOKED';
+    }
+  | {
+      startAt: string;
+      endAt: string;
+      status: 'AVAILABLE' | 'HOLDING' | 'BOOKED';
+      availableResources: Array<{
+        resourceId: string;
+        resourceName: string;
+      }>;
+    };
 @Injectable()
 export class BookingService {
   constructor(
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
+    @InjectRepository(BookingBlockout)
+    private blockoutRepository: Repository<BookingBlockout>,
     @InjectRepository(SiteBookingConfig)
     private configRepository: Repository<SiteBookingConfig>,
     @InjectRepository(BookingResource)
     private resourceRepository: Repository<BookingResource>,
     @InjectRepository(BookingServiceEntity)
     private serviceEntityRepository: Repository<BookingServiceEntity>,
+    @Inject(forwardRef(() => SiteService))
     private siteService: SiteService,
     private emailQueueService: EmailQueueService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
+    private readonly bookingGateway: BookingGateway,
   ) {}
 
   async getSiteBookingConfig(siteId: string): Promise<SiteBookingConfig> {
@@ -93,19 +121,88 @@ export class BookingService {
     startDate: string,
     endDate: string,
   ) {
+    const site = await this.siteService.findOneEntity(siteId);
+    if (!site.bookingEnabled) {
+      return { slots: [] };
+    }
+
     const config = await this.configRepository.findOne({ where: { siteId } });
     if (!config) {
       throw new NotFoundException('Site booking configuration not found');
     }
 
-    const timezone = config.bookingTimezone || 'UTC';
-    const duration = config.bookingSlotDuration || 30;
+    const { startBoundary, endBoundary } = this.resolveTimeBoundaries(
+      startDate,
+      endDate,
+      config.bookingTimezone || 'UTC',
+    );
 
     let allResources: BookingResource[] = [];
     if (!resourceId) {
       allResources = await this.resourceRepository.find({ where: { siteId } });
     }
 
+    const bookings = await this.fetchConfirmedBookings(
+      siteId,
+      startBoundary,
+      endBoundary,
+      resourceId,
+    );
+    const blockouts = await this.fetchBlockouts(
+      siteId,
+      startBoundary,
+      endBoundary,
+      resourceId,
+    );
+    const slotTimes = this.generateSlotTimeBlocks(
+      config,
+      startBoundary,
+      endBoundary,
+    );
+    const redisMap = await this.getHoldStatusFromRedis(
+      siteId,
+      resourceId,
+      allResources,
+      slotTimes,
+    );
+
+    return this.evaluateSlotAvailability(
+      siteId,
+      resourceId,
+      allResources,
+      bookings,
+      blockouts,
+      slotTimes,
+      redisMap,
+    );
+  }
+
+  private async fetchBlockouts(
+    siteId: string,
+    startBoundary: Date,
+    endBoundary: Date,
+    resourceId?: string | null,
+  ) {
+    const query = this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId })
+      .andWhere('b.endAt >= :startBoundary', { startBoundary })
+      .andWhere('b.startAt <= :endBoundary', { endBoundary });
+
+    if (resourceId) {
+      query.andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId,
+      });
+    }
+
+    return query.getMany();
+  }
+
+  private resolveTimeBoundaries(
+    startDate: string,
+    endDate: string,
+    timezone: string,
+  ) {
     const requestedStart = parseISO(startDate);
     const todayInSiteTimezone = formatInTimeZone(
       new Date(),
@@ -115,8 +212,15 @@ export class BookingService {
     const startBoundary =
       startDate === todayInSiteTimezone ? new Date() : requestedStart;
     const endBoundary = endOfDay(parseISO(endDate));
+    return { startBoundary, endBoundary };
+  }
 
-    // Fetch bookings in this range
+  private async fetchConfirmedBookings(
+    siteId: string,
+    startBoundary: Date,
+    endBoundary: Date,
+    resourceId?: string | null,
+  ) {
     const bookingsQuery = this.bookingRepository
       .createQueryBuilder('booking')
       .where('booking.siteId = :siteId', { siteId })
@@ -133,104 +237,335 @@ export class BookingService {
       );
     }
 
-    const bookings = await bookingsQuery.getMany();
+    return bookingsQuery.getMany();
+  }
 
-    type SlotItem =
-      | { startAt: string; endAt: string; resourceId: string }
-      | {
-          startAt: string;
-          endAt: string;
-          availableResources: Array<{
-            resourceId: string;
-            resourceName: string;
-          }>;
-        };
-    const availableSlots: SlotItem[] = [];
+  private generateSlotTimeBlocks(
+    config: SiteBookingConfig,
+    startBoundary: Date,
+    endBoundary: Date,
+  ) {
+    const timezone = config.bookingTimezone || 'UTC';
+    const duration = config.bookingSlotDuration || 30;
 
-    // We'll iterate day by day. To keep things simple, let's just generate slots for each day in the requested range.
+    const slotTimes: {
+      slotStart: Date;
+      slotEnd: Date;
+      dayEnd: Date;
+      isPast: boolean;
+    }[] = [];
     let currentDay = startOfDay(startBoundary);
 
     while (!isAfter(currentDay, endBoundary)) {
-      // getDay: 0 = Sunday, 1 = Monday. Config array: default {1,2,3,4,5} (Mon-Fri)
       const dayOfWeek = getDay(currentDay) === 0 ? 7 : getDay(currentDay);
       if (config.bookingAvailableDays.includes(dayOfWeek)) {
-        // Parse start and end time for this specific day in the site's local timezone
         const dateStr = format(currentDay, 'yyyy-MM-dd');
         const dayStartTimeStr = `${dateStr}T${config.bookingStartTime}:00`;
         const dayEndTimeStr = `${dateStr}T${config.bookingEndTime}:00`;
 
-        // Convert the local time strings into absolute UTC Date objects using the site's timezone
         let slotStart = fromZonedTime(dayStartTimeStr, timezone);
         const dayEnd = fromZonedTime(dayEndTimeStr, timezone);
         let slotEnd = addMinutes(slotStart, duration);
 
         while (isBefore(slotStart, dayEnd) || isEqual(slotStart, dayEnd)) {
           const now = new Date();
-          if (
-            slotStart >= startBoundary &&
-            slotEnd <= endBoundary &&
-            slotStart >= now
-          ) {
-            if (resourceId) {
-              // Check if slot overlaps with any booking for this specific resource
-              const isOverlapping = bookings.some((b) => {
-                const bStart = new Date(b.startAt);
-                const bEnd = new Date(b.endAt);
-                return slotStart < bEnd && slotEnd > bStart;
-              });
-
-              if (!isOverlapping) {
-                availableSlots.push({
-                  startAt: slotStart.toISOString(),
-                  endAt: slotEnd.toISOString(),
-                  resourceId,
-                });
-              }
-            } else {
-              // No preference: find all resources that are free
-              const freeResources = allResources.filter((resource) => {
-                const isOverlapping = bookings.some((b) => {
-                  const bStart = new Date(b.startAt);
-                  const bEnd = new Date(b.endAt);
-                  return (
-                    slotStart < bEnd &&
-                    slotEnd > bStart &&
-                    b.resourceId === resource.id
-                  );
-                });
-                return !isOverlapping;
-              });
-
-              if (freeResources.length > 0) {
-                availableSlots.push({
-                  startAt: slotStart.toISOString(),
-                  endAt: slotEnd.toISOString(),
-                  availableResources: freeResources.map((r) => ({
-                    resourceId: r.id,
-                    resourceName: r.name,
-                  })),
-                });
-              }
-            }
+          if (slotStart >= startBoundary && slotEnd <= endBoundary) {
+            slotTimes.push({
+              slotStart,
+              slotEnd,
+              dayEnd,
+              isPast: slotStart < now,
+            });
           }
-
           slotStart = slotEnd;
           slotEnd = addMinutes(slotStart, duration);
         }
       }
-      currentDay = addMinutes(currentDay, 24 * 60); // next day
+      currentDay = addMinutes(currentDay, 24 * 60);
+    }
+    return slotTimes;
+  }
+
+  private async getHoldStatusFromRedis(
+    siteId: string,
+    resourceId: string | null,
+    allResources: BookingResource[],
+    slotTimes: { slotStart: Date; slotEnd: Date; isPast: boolean }[],
+  ): Promise<Map<string, boolean>> {
+    const expectedKeys: string[] = [];
+    if (resourceId) {
+      for (const slot of slotTimes) {
+        if (!slot.isPast) {
+          expectedKeys.push(
+            `booking_hold:site:${siteId}:resource:${resourceId}:time:${slot.slotStart.toISOString()}_${slot.slotEnd.toISOString()}`,
+          );
+        }
+      }
+    } else {
+      for (const slot of slotTimes) {
+        if (!slot.isPast) {
+          for (const resource of allResources) {
+            expectedKeys.push(
+              `booking_hold:site:${siteId}:resource:${resource.id}:time:${slot.slotStart.toISOString()}_${slot.slotEnd.toISOString()}`,
+            );
+          }
+        }
+      }
+    }
+
+    const redisValues =
+      expectedKeys.length > 0 ? await this.redis.mget(...expectedKeys) : [];
+    const redisMap = new Map<string, boolean>();
+    expectedKeys.forEach((key, idx) => {
+      if (redisValues[idx]) redisMap.set(key, true);
+    });
+
+    return redisMap;
+  }
+
+  private evaluateSlotAvailability(
+    siteId: string,
+    resourceId: string | null,
+    allResources: BookingResource[],
+    bookings: Booking[],
+    blockouts: BookingBlockout[],
+    slotTimes: { slotStart: Date; slotEnd: Date; isPast: boolean }[],
+    redisMap: Map<string, boolean>,
+  ) {
+    const availableSlots: SlotItem[] = [];
+
+    for (const slot of slotTimes) {
+      if (slot.isPast) continue;
+
+      const slotStart = slot.slotStart;
+      const slotEnd = slot.slotEnd;
+
+      if (resourceId) {
+        const isOverlapping = bookings.some((b) => {
+          const bStart = new Date(b.startAt);
+          const bEnd = new Date(b.endAt);
+          return slotStart < bEnd && slotEnd > bStart;
+        });
+
+        const isBlocked = blockouts.some((bo) => {
+          const boStart = new Date(bo.startAt);
+          const boEnd = new Date(bo.endAt);
+          const matchesResource =
+            !bo.resourceId || bo.resourceId === resourceId;
+          return matchesResource && slotStart < boEnd && slotEnd > boStart;
+        });
+
+        if (!isOverlapping && !isBlocked) {
+          const key = `booking_hold:site:${siteId}:resource:${resourceId}:time:${slotStart.toISOString()}_${slotEnd.toISOString()}`;
+          const isHolding = redisMap.has(key);
+
+          availableSlots.push({
+            startAt: slotStart.toISOString(),
+            endAt: slotEnd.toISOString(),
+            resourceId,
+            status: isHolding ? 'HOLDING' : 'AVAILABLE',
+          });
+        }
+      } else {
+        const freeResources = allResources.filter((resource) => {
+          const isOverlapping = bookings.some((b) => {
+            const bStart = new Date(b.startAt);
+            const bEnd = new Date(b.endAt);
+            return (
+              slotStart < bEnd &&
+              slotEnd > bStart &&
+              b.resourceId === resource.id
+            );
+          });
+          if (isOverlapping) return false;
+
+          const isBlocked = blockouts.some((bo) => {
+            const boStart = new Date(bo.startAt);
+            const boEnd = new Date(bo.endAt);
+            const matchesResource =
+              !bo.resourceId || bo.resourceId === resource.id;
+            return matchesResource && slotStart < boEnd && slotEnd > boStart;
+          });
+          return !isBlocked;
+        });
+
+        if (freeResources.length > 0) {
+          let availableResourcesCount = 0;
+          for (const resource of freeResources) {
+            const key = `booking_hold:site:${siteId}:resource:${resource.id}:time:${slotStart.toISOString()}_${slotEnd.toISOString()}`;
+            if (!redisMap.has(key)) {
+              availableResourcesCount++;
+            }
+          }
+
+          availableSlots.push({
+            startAt: slotStart.toISOString(),
+            endAt: slotEnd.toISOString(),
+            status: availableResourcesCount > 0 ? 'AVAILABLE' : 'HOLDING',
+            availableResources: freeResources.map((r) => ({
+              resourceId: r.id,
+              resourceName: r.name,
+            })),
+          });
+        }
+      }
     }
 
     return { slots: availableSlots };
   }
 
+  async holdSlot(siteId: string, dto: HoldSlotDto) {
+    const site = await this.siteService.findOneEntity(siteId);
+    if (!site.bookingEnabled) {
+      throw new BadRequestException('Booking is disabled for this site');
+    }
+
+    // Check if slot overlaps with any active blockout
+    const overlappingBlockout = await this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId })
+      .andWhere(
+        'tstzrange("b"."startAt", "b"."endAt") && tstzrange(:startAt::timestamptz, :endAt::timestamptz)',
+        {
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+        },
+      )
+      .andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId: dto.resourceId,
+      })
+      .getOne();
+
+    if (overlappingBlockout) {
+      throw new ConflictException(
+        overlappingBlockout.reason
+          ? `Selected time is blocked: ${overlappingBlockout.reason}`
+          : 'Selected time is blocked (holiday or staff leave)',
+      );
+    }
+
+    const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+
+    // If slot is already held, check if it belongs to the same session
+    const existing = await this.redis.get(key);
+    if (existing) {
+      try {
+        const parsed = JSON.parse(existing) as { sessionId?: string };
+        if (parsed.sessionId === dto.sessionId) {
+          await this.redis.expire(key, 600);
+          return { success: true };
+        }
+      } catch {
+        // invalid json, proceed to overwrite/set
+      }
+      throw new ConflictException('Slot is currently being held');
+    }
+
+    const value = JSON.stringify({
+      sessionId: dto.sessionId,
+      createdAt: new Date().toISOString(),
+    });
+
+    const result = await this.redis.set(key, value, 'EX', 600, 'NX');
+
+    if (result !== 'OK') {
+      throw new ConflictException('Slot is currently being held');
+    }
+
+    this.bookingGateway.emitSlotHeld(siteId, {
+      resourceId: dto.resourceId,
+      startAt: dto.startAt,
+      endAt: dto.endAt,
+    });
+
+    return { success: true };
+  }
+
+  async getActiveHolds(siteId: string) {
+    const pattern = `booking_hold:site:${siteId}:resource:*`;
+    // We use keys here since the number of concurrent holds is extremely small
+    const keys = await this.redis.keys(pattern);
+
+    return keys.map((key) => {
+      // Key format: booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}
+      // startAt and endAt contain colons, so we must extract by finding exact markers
+      const timeIndex = key.indexOf(':time:');
+      const timeString = key.substring(timeIndex + 6);
+      const [startAt, endAt] = timeString.split('_');
+
+      const resourceIndex = key.indexOf(':resource:');
+      const resourceId = key.substring(resourceIndex + 10, timeIndex);
+
+      return { resourceId, startAt, endAt, status: 'HOLDING' as const };
+    });
+  }
+
+  async releaseHold(siteId: string, dto: HoldSlotDto) {
+    const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+    await this.redis.del(key);
+
+    this.bookingGateway.emitSlotReleased(siteId, {
+      resourceId: dto.resourceId,
+      startAt: dto.startAt,
+      endAt: dto.endAt,
+    });
+
+    return { success: true };
+  }
+
+  async getHold(
+    siteId: string,
+    resourceId: string,
+    startAt: string,
+    endAt: string,
+  ): Promise<{ sessionId: string } | null> {
+    const holdKey = `booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}`;
+    const holdDataStr = await this.redis.get(holdKey);
+    if (!holdDataStr) return null;
+    try {
+      return JSON.parse(holdDataStr) as { sessionId: string };
+    } catch {
+      return null;
+    }
+  }
+
   async createBooking(dto: CreateBookingDto): Promise<Booking> {
+    const site = await this.siteService.findOneEntity(dto.siteId);
+    if (!site.bookingEnabled) {
+      throw new BadRequestException('Booking is disabled for this site');
+    }
+
     const bookingDate = new Date(dto.startAt);
 
     // Prevent booking for days before today
     if (isBefore(startOfDay(bookingDate), startOfDay(new Date()))) {
       throw new BadRequestException('Cannot create a booking for a past day');
     }
+
+    // Check if slot overlaps with any active blockout
+    const overlappingBlockout = await this.blockoutRepository
+      .createQueryBuilder('b')
+      .where('b.siteId = :siteId', { siteId: dto.siteId })
+      .andWhere(
+        'tstzrange("b"."startAt", "b"."endAt") && tstzrange(:startAt::timestamptz, :endAt::timestamptz)',
+        {
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+        },
+      )
+      .andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId: dto.resourceId || null,
+      })
+      .getOne();
+
+    if (overlappingBlockout) {
+      throw new ConflictException(
+        overlappingBlockout.reason
+          ? `Selected time is blocked: ${overlappingBlockout.reason}`
+          : 'Selected time is blocked (holiday or staff leave)',
+      );
+    }
+
     // Layer 2 Security: Pre-check SELECT for overlaps
     const conflictQuery = this.bookingRepository
       .createQueryBuilder('booking')
@@ -258,6 +593,22 @@ export class BookingService {
       );
     }
 
+    // Verify hold session
+    if (dto.resourceId) {
+      const holdKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+      const holdDataStr = await this.redis.get(holdKey);
+      if (!holdDataStr) {
+        throw new BadRequestException(
+          'Hold expired or invalid. Please select the time slot again.',
+        );
+      }
+
+      const holdData = JSON.parse(holdDataStr) as { sessionId: string };
+      if (holdData.sessionId !== dto.sessionId) {
+        throw new BadRequestException('Hold belongs to another session.');
+      }
+    }
+
     // Generate a code, for simplicity we can use a random short string
     const code = Math.random().toString(36).substring(2, 10).toUpperCase();
 
@@ -269,6 +620,17 @@ export class BookingService {
 
     try {
       const savedBooking = await this.bookingRepository.save(booking);
+
+      if (dto.resourceId) {
+        const holdKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+        await this.redis.del(holdKey);
+
+        this.bookingGateway.emitSlotConfirmed(dto.siteId, {
+          resourceId: dto.resourceId,
+          startAt: dto.startAt,
+          endAt: dto.endAt,
+        });
+      }
 
       if (savedBooking.customerEmail) {
         const site = await this.siteService.findOne(dto.siteId);
@@ -469,5 +831,81 @@ export class BookingService {
         },
       ],
     };
+  }
+
+  // ── Blockout Management ──────────────────────────────────────────────────
+
+  async getBlockouts(
+    siteId: string,
+    startDate?: string,
+    endDate?: string,
+    resourceId?: string,
+  ): Promise<BookingBlockout[]> {
+    const query = this.blockoutRepository
+      .createQueryBuilder('b')
+      .leftJoinAndSelect('b.resource', 'resource')
+      .where('b.siteId = :siteId', { siteId });
+
+    if (startDate) {
+      query.andWhere('b.endAt >= :startDate', { startDate });
+    }
+    if (endDate) {
+      query.andWhere('b.startAt <= :endDate', { endDate });
+    }
+    if (resourceId) {
+      query.andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
+        resourceId,
+      });
+    }
+
+    query.orderBy('b.startAt', 'ASC');
+    return query.getMany();
+  }
+
+  async createBlockout(
+    siteId: string,
+    dto: CreateBlockoutDto,
+  ): Promise<BookingBlockout> {
+    const start = new Date(dto.startAt);
+    const end = new Date(dto.endAt);
+
+    if (isAfter(start, end) || isEqual(start, end)) {
+      throw new BadRequestException('endAt must be after startAt');
+    }
+
+    if (dto.resourceId) {
+      const resource = await this.getResourceById(siteId, dto.resourceId);
+      if (!resource) {
+        throw new NotFoundException(
+          `Staff resource ${dto.resourceId} not found`,
+        );
+      }
+    }
+
+    const blockout = this.blockoutRepository.create({
+      siteId,
+      resourceId: dto.resourceId || null,
+      startAt: start,
+      endAt: end,
+      reason: dto.reason?.trim() || null,
+    });
+
+    const saved = await this.blockoutRepository.save(blockout);
+    return this.blockoutRepository.findOneOrFail({
+      where: { id: saved.id },
+      relations: { resource: true },
+    });
+  }
+
+  async deleteBlockout(siteId: string, blockoutId: string): Promise<void> {
+    const blockout = await this.blockoutRepository.findOne({
+      where: { id: blockoutId, siteId },
+    });
+
+    if (!blockout) {
+      throw new NotFoundException(`Blockout with ID ${blockoutId} not found`);
+    }
+
+    await this.blockoutRepository.remove(blockout);
   }
 }

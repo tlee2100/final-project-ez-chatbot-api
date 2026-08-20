@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DocumentModule } from '../document/document.module';
@@ -33,7 +33,7 @@ import { SitemapService } from './services/sitemap.service';
       Site,
     ]),
     BullModule.registerQueue({ name: CRAWLER_QUEUE }),
-    SiteModule,
+    forwardRef(() => SiteModule),
     DocumentModule,
   ],
   controllers: [CrawlerController],
@@ -49,5 +49,6 @@ import { SitemapService } from './services/sitemap.service';
     PageExtractorService,
     CrawlerIndexingService,
   ],
+  exports: [CrawlerService],
 })
 export class CrawlerModule {}

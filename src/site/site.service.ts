@@ -6,6 +6,7 @@ import {
   ConflictException,
   forwardRef,
   Inject,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
@@ -15,6 +16,7 @@ import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
 import type { Mapper } from '@automapper/core';
 import { InjectMapper } from '@automapper/nestjs';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
+import { Redis } from 'ioredis';
 
 import { CreateSiteDto } from './dto/create-site.dto';
 import { UpdateSiteDto } from './dto/update-site.dto';
@@ -28,6 +30,13 @@ import { UserRole } from '../user/enums/user-role.enum';
 import type { JwtUser } from 'src/auth/types/jwt-user.type';
 import { SITE_PAGINATION_CONFIG } from './config/site-pagination.config';
 import { ChatGateway } from '../chat/chat.gateway';
+import { ChatTimeoutService } from '../chat/chat-timeout.service';
+import {
+  Conversation,
+  ConversationStatus,
+} from '../chat/entities/conversation.entity';
+import { Document } from '../document/entities/document.entity';
+import { CrawlerService } from '../crawler/crawler.service';
 
 type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
   data: SiteDto[];
@@ -35,18 +44,28 @@ type PaginatedSiteDtos = Omit<Paginated<Site>, 'data'> & {
 
 @Injectable()
 export class SiteService {
+  private readonly logger = new Logger(SiteService.name);
+
   constructor(
     @InjectRepository(Site)
     private readonly siteRepository: Repository<Site>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(Document)
+    private readonly documentRepository: Repository<Document>,
     @InjectMapper()
     private readonly mapper: Mapper,
     private readonly notificationService: NotificationService,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
+    @Inject(forwardRef(() => ChatTimeoutService))
+    private readonly chatTimeoutService: ChatTimeoutService,
+    @Inject(forwardRef(() => CrawlerService))
+    private readonly crawlerService: CrawlerService,
     @InjectRepository(Booking)
     private readonly bookingRepository: Repository<Booking>,
+    @Inject('REDIS_CLIENT')
+    private readonly redis: Redis,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -155,13 +174,18 @@ export class SiteService {
     const activeChatsMap: Record<string, number> = {};
 
     if (siteIds.length > 0) {
-      const activeChatsRows = await this.siteRepository.manager.query<
-        Array<{ siteId: string; count: string }>
-      >(
-        `SELECT "siteId", COUNT(id) as count FROM conversations WHERE "siteId" = ANY($1) AND status != 'CLOSED' GROUP BY "siteId"`,
-        [siteIds],
-      );
-      activeChatsRows.forEach((row: { siteId: string; count: string }) => {
+      const activeChatsRows = await this.siteRepository.manager
+        .createQueryBuilder(Conversation, 'conversation')
+        .select('conversation.siteId', 'siteId')
+        .addSelect('COUNT(conversation.id)', 'count')
+        .where('conversation.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('conversation.status != :closedStatus', {
+          closedStatus: ConversationStatus.CLOSED,
+        })
+        .groupBy('conversation.siteId')
+        .getRawMany<{ siteId: string; count: string }>();
+
+      activeChatsRows.forEach((row) => {
         activeChatsMap[row.siteId] = parseInt(row.count, 10);
       });
     }
@@ -189,6 +213,8 @@ export class SiteService {
         agents: true,
         documents: true,
         bookingConfig: true,
+        bookingServices: true,
+        bookingResources: true,
       },
     });
     if (!site) {
@@ -203,13 +229,14 @@ export class SiteService {
     const site = await this.findOneEntity(id);
     const dto = this.mapper.map(site, Site, SiteDto);
 
-    const activeChatsRows = await this.siteRepository.manager.query<
-      Array<{ count: string }>
-    >(
-      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
-      [id],
-    );
-    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    const activeChatsCount = await this.siteRepository.manager
+      .createQueryBuilder(Conversation, 'conversation')
+      .where('conversation.siteId = :siteId', { siteId: id })
+      .andWhere('conversation.status != :closedStatus', {
+        closedStatus: ConversationStatus.CLOSED,
+      })
+      .getCount();
+    dto.activeChats = activeChatsCount;
     dto.updatedAt = new Date().toISOString();
 
     return dto;
@@ -220,13 +247,14 @@ export class SiteService {
     const site = await this.assertSiteAccess(id, user);
     const dto = this.mapper.map(site, Site, SiteDto);
 
-    const activeChatsRows = await this.siteRepository.manager.query<
-      Array<{ count: string }>
-    >(
-      `SELECT COUNT(id) as count FROM conversations WHERE "siteId" = $1 AND status != 'CLOSED'`,
-      [id],
-    );
-    dto.activeChats = parseInt(activeChatsRows[0]?.count || '0', 10);
+    const activeChatsCount = await this.siteRepository.manager
+      .createQueryBuilder(Conversation, 'conversation')
+      .where('conversation.siteId = :siteId', { siteId: id })
+      .andWhere('conversation.status != :closedStatus', {
+        closedStatus: ConversationStatus.CLOSED,
+      })
+      .getCount();
+    dto.activeChats = activeChatsCount;
     dto.updatedAt = new Date().toISOString();
 
     return dto;
@@ -288,6 +316,17 @@ export class SiteService {
     await this.siteRepository.update(id, updateData);
     const updatedSite = await this.findOne(id);
 
+    // Refresh conversation timeout timers if timeout settings were modified
+    if (
+      dto.enableConversationTimeout !== undefined ||
+      dto.inactivityTimeoutMinutes !== undefined ||
+      dto.warningTimeMinutes !== undefined ||
+      dto.pauseTimerForAgentChats !== undefined ||
+      dto.resetTimerOnBotResponse !== undefined
+    ) {
+      void this.chatTimeoutService.refreshSiteTimers(id);
+    }
+
     // Broadcast updated settings to active conversations
 
     const conversations = await this.siteRepository.manager
@@ -312,58 +351,86 @@ export class SiteService {
   async remove(id: string, user: JwtUser): Promise<void> {
     await this.assertSiteAccess(id, user);
 
+    // 1. Cancel in-memory conversation timers
     try {
-      await this.siteRepository.manager.transaction(async (manager) => {
-        // 1. Delete notifications related to the site directly
-        await manager.query(`DELETE FROM "notifications" WHERE "siteId" = $1`, [
-          id,
-        ]);
+      await this.chatTimeoutService.cancelAllTimersForSite(id);
+    } catch (timerErr) {
+      this.logger.warn(
+        `Failed to cancel timers for site ${id}:`,
+        timerErr instanceof Error ? timerErr.stack : timerErr,
+      );
+    }
 
-        // 2. Delete conversations, their messages, and their notifications
-        const conversations: Array<{ id: string }> = await manager.query(
-          `SELECT id FROM "conversations" WHERE "siteId" = $1`,
-          [id],
-        );
-        if (conversations.length > 0) {
-          const conversationIds = conversations.map((c) => c.id);
-          await manager.query(
-            `DELETE FROM "notifications" WHERE "conversationId" = ANY($1)`,
-            [conversationIds],
-          );
-          await manager.query(
-            `DELETE FROM "chat_messages" WHERE "conversationId" = ANY($1)`,
-            [conversationIds],
-          );
-          await manager.query(
-            `DELETE FROM "conversations" WHERE "siteId" = $1`,
-            [id],
-          );
-        }
+    // 2. Remove any scheduled Bull repeatable jobs for crawler
+    try {
+      if (this.crawlerService) {
+        await this.crawlerService.removeSiteRepeatableJob(id);
+      }
+    } catch (crawlerErr) {
+      this.logger.warn(
+        `Failed to remove crawler job for site ${id}:`,
+        crawlerErr instanceof Error ? crawlerErr.stack : crawlerErr,
+      );
+    }
 
-        // 3. Delete documents and their chunks
-        const documents: Array<{ id: string }> = await manager.query(
-          `SELECT id FROM "documents" WHERE "siteId" = $1`,
-          [id],
-        );
-        if (documents.length > 0) {
-          const documentIds = documents.map((d) => d.id);
-          await manager.query(
-            `DELETE FROM "document_chunks" WHERE "documentId" = ANY($1)`,
-            [documentIds],
-          );
-          await manager.query(`DELETE FROM "documents" WHERE "siteId" = $1`, [
-            id,
-          ]);
-        }
-
-        // 4. Clean up many-to-many agent assignments
-        await manager.query(`DELETE FROM "site_agents" WHERE "siteId" = $1`, [
-          id,
-        ]);
-
-        // 5. Delete the site
-        await manager.delete(Site, id);
+    // 3. Clean up Cloudinary assets (Documents and site images)
+    try {
+      const documents = await this.documentRepository.find({
+        where: { siteId: id },
+        select: { id: true, cloudinaryPublicId: true },
       });
+
+      for (const doc of documents) {
+        if (doc.cloudinaryPublicId) {
+          await cloudinary.uploader
+            .destroy(doc.cloudinaryPublicId, {
+              resource_type: 'raw',
+            })
+            .catch(() => {});
+        }
+      }
+
+      await cloudinary.api
+        .delete_resources_by_prefix(`sites/${id}/`, {
+          resource_type: 'raw',
+        })
+        .catch(() => {});
+
+      await cloudinary.api
+        .delete_resources_by_prefix(`sites/${id}/`, {
+          resource_type: 'image',
+        })
+        .catch(() => {});
+
+      await cloudinary.api
+        .delete_folder(`sites/${id}/documents`)
+        .catch(() => {});
+      await cloudinary.api.delete_folder(`sites/${id}`).catch(() => {});
+    } catch (cloudinaryErr) {
+      this.logger.warn(
+        `Failed to clean up Cloudinary assets for site ${id}:`,
+        cloudinaryErr instanceof Error ? cloudinaryErr.stack : cloudinaryErr,
+      );
+    }
+
+    // 4. Clean up any temporary Redis slot hold keys for this site
+    try {
+      if (this.redis) {
+        const holdKeys = await this.redis.keys(`hold:${id}:*`);
+        if (holdKeys.length > 0) {
+          await this.redis.del(...holdKeys);
+        }
+      }
+    } catch (redisErr) {
+      this.logger.warn(
+        `Failed to clear Redis hold keys for site ${id}:`,
+        redisErr instanceof Error ? redisErr.stack : redisErr,
+      );
+    }
+
+    // 5. Database deletion (DB CASCADE handles all child entities)
+    try {
+      await this.siteRepository.delete(id);
     } catch (error) {
       const err = error as { code?: string };
       if (err?.code === '23503') {

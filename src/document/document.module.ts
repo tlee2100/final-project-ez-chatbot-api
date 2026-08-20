@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { DocumentService } from './document.service';
 import { DocumentController } from './document.controller';
 import { Site } from 'src/site/entities/site.entity';
@@ -23,7 +23,7 @@ import { CHUNK_SEARCH_REPOSITORY } from './constants/document.tokens';
       name: 'document-processing',
     }),
     NotificationModule,
-    SiteModule,
+    forwardRef(() => SiteModule),
   ],
   providers: [
     DocumentService,

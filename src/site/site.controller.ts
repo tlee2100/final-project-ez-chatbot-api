@@ -14,6 +14,7 @@ import {
   UseInterceptors,
   UploadedFile,
   BadRequestException,
+  Query,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AuthGuard } from '@nestjs/passport';
@@ -44,6 +45,8 @@ import { AssignAgentDto } from './dto/assign-agent.dto';
 
 import { ChatGateway } from '../chat/chat.gateway';
 import { SITE_PAGINATION_CONFIG } from './config/site-pagination.config';
+import { BookingService } from '../booking/booking.service';
+import { formatInTimeZone } from 'date-fns-tz';
 
 @ApiTags('Sites')
 @ApiBearerAuth()
@@ -52,6 +55,7 @@ export class SiteController {
   constructor(
     private readonly siteService: SiteService,
     private readonly chatGateway: ChatGateway,
+    private readonly bookingService: BookingService,
   ) {}
 
   @Post()
@@ -133,6 +137,17 @@ export class SiteController {
       chatWindowTitle: site.chatWindowTitle,
       chatButtonText: site.chatButtonText,
       showAvatar: site.showAvatar,
+      bookingEnabled: site.bookingEnabled,
+      bookingServices:
+        site.bookingServices?.map((s) => ({
+          id: s.id,
+          name: s.name,
+        })) ?? [],
+      bookingResources:
+        site.bookingResources?.map((r) => ({
+          id: r.id,
+          name: r.name,
+        })) ?? [],
       bookingHours: site.bookingConfig
         ? {
             timezone: site.bookingConfig.bookingTimezone,
@@ -143,6 +158,62 @@ export class SiteController {
           }
         : null,
     };
+  }
+
+  @Get('public/:id/available-slots')
+  @ApiOperation({
+    summary: 'Get available booking slots for a date (Unauthenticated)',
+  })
+  @ApiParam({ name: 'id', description: 'Site ID' })
+  async getPublicAvailableSlots(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('date') date: string,
+    @Query('resourceId') resourceId?: string,
+    @Query('serviceId') serviceId?: string,
+  ) {
+    if (!date) {
+      throw new BadRequestException('date parameter is required');
+    }
+    const config = await this.bookingService.getSiteBookingConfig(id);
+    const timezone = config.bookingTimezone || 'UTC';
+
+    const result = await this.bookingService.getAvailableSlots(
+      id,
+      resourceId || null,
+      serviceId || null,
+      date,
+      date,
+    );
+
+    const slots = result.slots.map((slot, idx) => {
+      const localTime = formatInTimeZone(
+        new Date(slot.startAt),
+        timezone,
+        'HH:mm',
+      );
+      const slotId = `slot-${date}-${idx}`;
+
+      if ('availableResources' in slot && slot.availableResources) {
+        return {
+          slotId,
+          date,
+          timeSlot: localTime,
+          availableResources: slot.availableResources,
+          available: slot.availableResources.length > 0,
+        };
+      }
+
+      const s = slot as { startAt: string; endAt: string; resourceId: string };
+      return {
+        slotId,
+        date,
+        timeSlot: localTime,
+        resourceId: s.resourceId ?? resourceId ?? 'any',
+        available: true,
+      };
+    });
+
+    return { slots };
   }
 
   @Patch(':id')

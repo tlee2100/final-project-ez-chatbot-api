@@ -39,14 +39,14 @@ export class Notification {
   @Column({ type: 'uuid', nullable: true })
   siteId: string | null;
 
-  @ManyToOne(() => Site, { nullable: true })
+  @ManyToOne(() => Site, { nullable: true, onDelete: 'CASCADE' })
   @JoinColumn({ name: 'siteId' })
   site: Site | null;
 
   @Column({ type: 'uuid', nullable: true })
   conversationId: string | null;
 
-  @ManyToOne(() => Conversation, { nullable: true })
+  @ManyToOne(() => Conversation, { nullable: true, onDelete: 'CASCADE' })
   @JoinColumn({ name: 'conversationId' })
   conversation: Conversation | null;
 
