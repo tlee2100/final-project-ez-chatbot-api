@@ -22,6 +22,11 @@ export enum MessageStatus {
   READ = 'READ',
 }
 
+export enum FeedbackRating {
+  HELPFUL = 'HELPFUL',
+  UNHELPFUL = 'UNHELPFUL',
+}
+
 @Entity('chat_messages')
 export class ChatMessage {
   @PrimaryGeneratedColumn('uuid')
@@ -54,6 +59,17 @@ export class ChatMessage {
     default: MessageStatus.SENT,
   })
   status: MessageStatus;
+
+  @Column({
+    type: 'enum',
+    enum: FeedbackRating,
+    nullable: true,
+    default: null,
+  })
+  feedbackRating: FeedbackRating | null;
+
+  @Column({ type: 'timestamptz', nullable: true, default: null })
+  feedbackAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

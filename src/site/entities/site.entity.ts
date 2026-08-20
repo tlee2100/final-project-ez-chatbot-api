@@ -126,7 +126,7 @@ export class Site {
   sentimentDetection: boolean;
 
   @AutoMap()
-  @Column({ name: 'llmModel', type: 'varchar', default: 'deepseek-v4-flash' })
+  @Column({ name: 'llmModel', type: 'varchar', default: 'qwen3.7-flash' })
   llmModel: string;
 
   @AutoMap()
