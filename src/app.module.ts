@@ -10,7 +10,7 @@ import { User } from './user/entities/user.entity';
 import { SiteModule } from './site/site.module';
 import { Site } from './site/entities/site.entity';
 import { SiteBookingConfig } from './site/entities/site-booking-config.entity';
-import { BookingService } from './site/entities/booking-service.entity';
+import { BookingServiceItem } from './site/entities/booking-service.entity';
 import { BookingResource } from './site/entities/booking-resources.entity';
 import { IndustryTemplate } from './site/entities/industry-template.entity';
 import { Booking } from './booking/entities/booking.entity';
@@ -51,7 +51,7 @@ import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
         User,
         Site,
         SiteBookingConfig,
-        BookingService,
+        BookingServiceItem,
         BookingResource,
         IndustryTemplate,
         Booking,

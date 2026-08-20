@@ -9,7 +9,7 @@ import { AutoMap } from '@automapper/classes';
 import { Site } from './site.entity';
 
 @Entity('booking_services')
-export class BookingService {
+export class BookingServiceItem {
   @AutoMap()
   @PrimaryGeneratedColumn('uuid')
   id: string;

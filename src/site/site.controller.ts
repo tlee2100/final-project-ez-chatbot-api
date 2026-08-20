@@ -138,6 +138,8 @@ export class SiteController {
       chatButtonText: site.chatButtonText,
       showAvatar: site.showAvatar,
       bookingEnabled: site.bookingEnabled,
+      industryTemplate: site.industryTemplateId ?? 'salon',
+      industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
       bookingServices:
         site.bookingServices?.map((s) => ({
           id: s.id,

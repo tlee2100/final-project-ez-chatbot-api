@@ -17,7 +17,7 @@ import { Organization } from '../../organization/entities/organization.entity';
 import { CrawlerConfig } from '../../crawler/entities/crawler-config.entity';
 import { IndustryTemplate } from './industry-template.entity';
 import { SiteBookingConfig } from './site-booking-config.entity';
-import { BookingService } from './booking-service.entity';
+import { BookingServiceItem } from './booking-service.entity';
 import { BookingResource } from './booking-resources.entity';
 
 @Entity('sites')
@@ -148,9 +148,11 @@ export class Site {
   @OneToOne(() => SiteBookingConfig, (config) => config.site, { cascade: true })
   bookingConfig: SiteBookingConfig;
 
-  @AutoMap(() => [BookingService])
-  @OneToMany(() => BookingService, (service) => service.site, { cascade: true })
-  bookingServices: BookingService[];
+  @AutoMap(() => [BookingServiceItem])
+  @OneToMany(() => BookingServiceItem, (service) => service.site, {
+    cascade: true,
+  })
+  bookingServices: BookingServiceItem[];
 
   @AutoMap(() => [BookingResource])
   @OneToMany(() => BookingResource, (resource) => resource.site, {

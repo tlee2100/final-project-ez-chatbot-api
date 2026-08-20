@@ -499,6 +499,7 @@ export class ChatService {
   }
 
   handleTyping(client: Socket, payload: { conversationId: string }): void {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     const user = socketData.user;
     const visitor = socketData.visitor;
@@ -522,6 +523,7 @@ export class ChatService {
     client: Socket,
     payload: { conversationId: string },
   ): Promise<void> {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     if (!socketData.user && !socketData.visitor) return;
 
@@ -1407,6 +1409,7 @@ export class ChatService {
     if (conversationId.startsWith('admin-test-')) {
       return;
     }
+    if (!conversationId) return;
     await this.chatMessageRepository.update(
       {
         conversationId,

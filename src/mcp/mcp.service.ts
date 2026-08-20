@@ -174,6 +174,7 @@ export class McpService {
 
     const site = await this.siteRepository.findOne({
       where: { id: siteId },
+      relations: { industryTemplateInfo: true },
     });
 
     let bookingHours: SiteConfigBookingHours = {};
@@ -215,6 +216,8 @@ export class McpService {
         knowledgeBaseStatus: 'READY',
         allowedDomains: ['*'],
         bookingEnabled: true,
+        industryTemplate: 'salon',
+        industryTemplateConfig: null,
         timezone: 'Asia/Ho_Chi_Minh',
         bookingHours,
         services,
@@ -229,7 +232,9 @@ export class McpService {
       isAiActive: site.isAiActive,
       knowledgeBaseStatus: site.knowledgeBaseStatus,
       allowedDomains: site.allowedDomains,
-      bookingEnabled: true,
+      bookingEnabled: site.bookingEnabled ?? true,
+      industryTemplate: site.industryTemplateId || 'salon',
+      industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
       timezone: 'Asia/Ho_Chi_Minh',
       bookingHours,
       services,
@@ -336,11 +341,37 @@ export class McpService {
 
   // ─── Booking (Mocked — Phase 1B per Rule 3) ───────────────────────────────
 
+  private async resolveResourceId(
+    siteId: string,
+    resourceIdOrName?: string,
+  ): Promise<string | undefined> {
+    if (!resourceIdOrName) return undefined;
+    const resources = await this.bookingService.getResourcesBySiteId(siteId);
+    const matched = resources.find(
+      (r) =>
+        r.id === resourceIdOrName ||
+        r.name.toLowerCase().trim() === resourceIdOrName.toLowerCase().trim(),
+    );
+    return matched ? matched.id : resourceIdOrName;
+  }
+
+  private async resolveServiceId(
+    siteId: string,
+    serviceIdOrName?: string,
+  ): Promise<string | undefined> {
+    if (!serviceIdOrName) return undefined;
+    const services = await this.bookingService.getServicesBySiteId(siteId);
+    const matched = services.find(
+      (s) =>
+        s.id === serviceIdOrName ||
+        s.name.toLowerCase().trim() === serviceIdOrName.toLowerCase().trim(),
+    );
+    return matched ? matched.id : serviceIdOrName;
+  }
+
   /**
    * MCP-006 / getAvailableSlots backend:
-   * Returns mock available time slots for a date and optional resource.
-   *
-   * ponytail: MOCK — real implementation wired in Phase 1C by BookingModule team.
+   * Returns available time slots for a date and optional resource.
    */
   async getAvailableSlots(
     siteId: string,
@@ -348,17 +379,21 @@ export class McpService {
     resourceId?: string,
     serviceId?: string,
   ): Promise<AvailableSlot[]> {
+    const resolvedResourceId = await this.resolveResourceId(siteId, resourceId);
+    const resolvedServiceId = await this.resolveServiceId(siteId, serviceId);
+
     this.logger.log(
-      `[MCP] getAvailableSlots: siteId=${siteId}, date=${date}, resourceId=${resourceId ?? 'any'}, serviceId=${serviceId ?? 'any'}`,
+      `[MCP] getAvailableSlots: siteId=${siteId}, date=${date}, resourceId=${resolvedResourceId ?? 'any'}, serviceId=${resolvedServiceId ?? 'any'}`,
     );
 
     const config = await this.bookingService.getSiteBookingConfig(siteId);
     const timezone = config.bookingTimezone || 'UTC';
+    const allResources = await this.bookingService.getResourcesBySiteId(siteId);
 
     const result = await this.bookingService.getAvailableSlots(
       siteId,
-      resourceId || null,
-      serviceId || null,
+      resolvedResourceId || null,
+      resolvedServiceId || null,
       date, // startDate (ISO or local date string)
       date, // endDate (same day)
     );
@@ -385,12 +420,13 @@ export class McpService {
 
       // Branch A: Specific resource selected
       const s = slot as { startAt: string; endAt: string; resourceId: string };
+      const matchedRes = allResources.find((r) => r.id === s.resourceId);
       return {
         slotId,
         date,
         timeSlot: localTime,
-        resourceId: s.resourceId ?? resourceId ?? 'any',
-        resourceName: s.resourceId ? undefined : 'Any Provider', // will not happen in Branch A
+        resourceId: s.resourceId ?? resolvedResourceId ?? 'any',
+        resourceName: matchedRes?.name,
         available: true,
       };
     });
@@ -407,29 +443,88 @@ export class McpService {
       serviceId?: string;
       date: string;
       timeSlot: string;
+      slotCount?: number;
+      sessionId?: string;
+      conversationId?: string;
+      slots?: Array<{
+        resourceId: string;
+        date: string;
+        timeSlot: string;
+        serviceId?: string;
+      }>;
     },
   ): Promise<{ sessionId: string }> {
     this.logger.log(
-      `[MCP] holdSlot: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}`,
+      `[MCP] holdSlot: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}, slotCount=${payload.slotCount ?? 1}`,
     );
 
     const config = await this.bookingService.getSiteBookingConfig(siteId);
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
+    const sessionId =
+      payload.sessionId || payload.conversationId || randomUUID();
 
+    // Direct multi-slot list
+    if (payload.slots && payload.slots.length > 0) {
+      const newKeys: string[] = [];
+      for (const slot of payload.slots) {
+        const localStart = `${slot.date}T${slot.timeSlot}:00`;
+        const utcStart = fromZonedTime(localStart, timezone);
+        const utcEnd = addMinutes(utcStart, duration);
+        newKeys.push(
+          `booking_hold:site:${siteId}:resource:${slot.resourceId}:time:${utcStart.toISOString()}_${utcEnd.toISOString()}`,
+        );
+      }
+
+      // Release any other slots previously held by this session
+      await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
+
+      for (const slot of payload.slots) {
+        const localStart = `${slot.date}T${slot.timeSlot}:00`;
+        const utcStart = fromZonedTime(localStart, timezone);
+        const utcEnd = addMinutes(utcStart, duration);
+        await this.bookingService.holdSlot(siteId, {
+          resourceId: slot.resourceId,
+          serviceId: slot.serviceId ?? payload.serviceId,
+          startAt: utcStart.toISOString(),
+          endAt: utcEnd.toISOString(),
+          sessionId,
+        });
+      }
+
+      return { sessionId };
+    }
+
+    const slotCount = Math.max(1, payload.slotCount ?? 1);
     const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
-    const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
-    const utcEndAt = addMinutes(utcStartAt, duration);
+    const initialUtcStart = fromZonedTime(localDateTimeStr, timezone);
 
-    const sessionId = randomUUID();
+    const newKeys: string[] = [];
+    let calcStart = initialUtcStart;
+    for (let i = 0; i < slotCount; i++) {
+      const calcEnd = addMinutes(calcStart, duration);
+      newKeys.push(
+        `booking_hold:site:${siteId}:resource:${payload.resourceId}:time:${calcStart.toISOString()}_${calcEnd.toISOString()}`,
+      );
+      calcStart = calcEnd;
+    }
 
-    await this.bookingService.holdSlot(siteId, {
-      resourceId: payload.resourceId,
-      serviceId: payload.serviceId,
-      startAt: utcStartAt.toISOString(),
-      endAt: utcEndAt.toISOString(),
-      sessionId,
-    });
+    // Release any other slots previously held by this session (e.g. user changed time, staff, or date)
+    await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
+
+    // Hold each sub-slot in the span
+    let currStart = initialUtcStart;
+    for (let i = 0; i < slotCount; i++) {
+      const currEnd = addMinutes(currStart, duration);
+      await this.bookingService.holdSlot(siteId, {
+        resourceId: payload.resourceId,
+        serviceId: payload.serviceId,
+        startAt: currStart.toISOString(),
+        endAt: currEnd.toISOString(),
+        sessionId,
+      });
+      currStart = currEnd;
+    }
 
     return { sessionId };
   }
@@ -441,30 +536,43 @@ export class McpService {
   async releaseHold(
     siteId: string,
     payload: {
-      resourceId: string;
-      date: string;
-      timeSlot: string;
+      resourceId?: string;
+      date?: string;
+      timeSlot?: string;
+      slotCount?: number;
+      sessionId?: string;
     },
   ): Promise<{ success: boolean }> {
     this.logger.log(
-      `[MCP] releaseHold: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}`,
+      `[MCP] releaseHold: siteId=${siteId}, resource=${payload.resourceId}, date=${payload.date}, time=${payload.timeSlot}, sessionId=${payload.sessionId}`,
     );
 
-    const config = await this.bookingService.getSiteBookingConfig(siteId);
-    const timezone = config.bookingTimezone || 'UTC';
-    const duration = config.bookingSlotDuration || 30;
+    if (payload.sessionId) {
+      await this.bookingService.releaseSessionHolds(siteId, payload.sessionId);
+    }
 
-    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
-    const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
-    const utcEndAt = addMinutes(utcStartAt, duration);
+    if (payload.resourceId && payload.date && payload.timeSlot) {
+      const config = await this.bookingService.getSiteBookingConfig(siteId);
+      const timezone = config.bookingTimezone || 'UTC';
+      const duration = config.bookingSlotDuration || 30;
+      const slotCount = Math.max(1, payload.slotCount ?? 1);
 
-    // Call internal method to release
-    await this.bookingService.releaseHold(siteId, {
-      resourceId: payload.resourceId,
-      startAt: utcStartAt.toISOString(),
-      endAt: utcEndAt.toISOString(),
-      sessionId: '', // not used in releaseHold but required by HoldSlotDto
-    });
+      let currStart = fromZonedTime(
+        `${payload.date}T${payload.timeSlot}:00`,
+        timezone,
+      );
+
+      for (let i = 0; i < slotCount; i++) {
+        const currEnd = addMinutes(currStart, duration);
+        await this.bookingService.releaseHold(siteId, {
+          resourceId: payload.resourceId,
+          startAt: currStart.toISOString(),
+          endAt: currEnd.toISOString(),
+          sessionId: payload.sessionId || '',
+        });
+        currStart = currEnd;
+      }
+    }
 
     return { success: true };
   }
@@ -472,8 +580,6 @@ export class McpService {
   /**
    * MCP-007 / createBooking backend:
    * Creates a booking and returns a booking code.
-   *
-   * ponytail: MOCK — real implementation (with conflict detection) wired in Phase 1C.
    */
   async createBooking(
     siteId: string,
@@ -487,7 +593,11 @@ export class McpService {
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
 
-    if (!payload.resourceId) {
+    const resolvedResourceId =
+      (await this.resolveResourceId(siteId, payload.resourceId)) ||
+      payload.resourceId;
+
+    if (!resolvedResourceId) {
       throw new BadRequestException(
         'A specific staff/resource must be selected before creating a booking.',
       );
@@ -496,57 +606,71 @@ export class McpService {
     let resourceName = 'Staff';
     const resource = await this.bookingService.getResourceById(
       siteId,
-      payload.resourceId,
+      resolvedResourceId,
     );
     if (resource) {
       resourceName = resource.name;
     }
 
-    let serviceName = 'Service';
-    if (payload.serviceId) {
+    const resolvedServiceId = await this.resolveServiceId(
+      siteId,
+      payload.serviceId,
+    );
+
+    const serviceNames: string[] = [];
+    const allServiceIdsRaw =
+      payload.serviceIds ?? (resolvedServiceId ? [resolvedServiceId] : []);
+    const resolvedAllServiceIds: string[] = [];
+
+    for (const sId of allServiceIdsRaw) {
+      const actualId = (await this.resolveServiceId(siteId, sId)) || sId;
+      resolvedAllServiceIds.push(actualId);
       const service = await this.bookingService.getServiceById(
         siteId,
-        payload.serviceId,
+        actualId,
       );
       if (service) {
-        serviceName = service.name;
+        serviceNames.push(service.name);
       }
     }
 
-    // Convert local date + timeSlot into UTC startAt / endAt
+    const slotCount = Math.max(1, payload.slotCount ?? 1);
     const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
     const utcStartAt = fromZonedTime(localDateTimeStr, timezone);
-    const utcEndAt = addMinutes(utcStartAt, duration);
+    const utcEndAt = addMinutes(utcStartAt, duration * slotCount);
 
     let sessionId = payload.sessionId;
 
     if (!sessionId) {
       const activeHold = await this.bookingService.getHold(
         siteId,
-        payload.resourceId,
+        resolvedResourceId,
         utcStartAt.toISOString(),
-        utcEndAt.toISOString(),
+        addMinutes(utcStartAt, duration).toISOString(),
       );
 
       if (activeHold?.sessionId) {
         sessionId = activeHold.sessionId;
       } else {
         sessionId = randomUUID();
-        // Only hold the slot if sessionId was not provided and slot is not already held
-        await this.bookingService.holdSlot(siteId, {
-          resourceId: payload.resourceId,
-          serviceId: payload.serviceId,
-          startAt: utcStartAt.toISOString(),
-          endAt: utcEndAt.toISOString(),
-          sessionId,
+        await this.holdSlot(siteId, {
+          resourceId: resolvedResourceId,
+          serviceId: resolvedServiceId,
+          date: payload.date,
+          timeSlot: payload.timeSlot,
+          slotCount,
+          slots: payload.slots,
         });
       }
     }
 
     const booking = await this.bookingService.createBooking({
       siteId,
-      resourceId: payload.resourceId,
-      serviceId: payload.serviceId,
+      resourceId: resolvedResourceId,
+      serviceId: resolvedServiceId,
+      serviceIds:
+        resolvedAllServiceIds.length > 0 ? resolvedAllServiceIds : undefined,
+      slots: payload.slots,
       startAt: utcStartAt.toISOString(),
       endAt: utcEndAt.toISOString(),
       timezone,
@@ -557,17 +681,24 @@ export class McpService {
       sessionId,
     });
 
+    const allBookingCodes = (booking.templateFields
+      ?.allBookingCodes as string[]) || [booking.code];
+
     return {
       bookingCode: booking.code,
+      allBookingCodes,
       status: 'confirmed',
       customerName: booking.customerName,
       customerEmail: booking.customerEmail || payload.customerEmail,
       phone: booking.phone,
       date: payload.date,
       timeSlot: payload.timeSlot,
+      endTimeSlot: formatInTimeZone(new Date(booking.endAt), timezone, 'HH:mm'),
       resourceName,
       serviceId: payload.serviceId,
-      serviceName,
+      serviceIds: payload.serviceIds,
+      serviceName: serviceNames[0],
+      serviceNames,
       createdAt: booking.createdAt.toISOString(),
     };
   }

@@ -215,6 +215,7 @@ export class SiteService {
         bookingConfig: true,
         bookingServices: true,
         bookingResources: true,
+        industryTemplateInfo: true,
       },
     });
     if (!site) {

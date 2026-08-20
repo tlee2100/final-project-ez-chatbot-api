@@ -58,6 +58,15 @@ export const parseMultimodalContent = (
 export type BookingSlotSelection = {
   date: string;
   timeSlot: string;
+  endTimeSlot?: string;
+  slotCount?: number;
+  serviceIds?: string[];
+  slots?: Array<{
+    resourceId: string;
+    date: string;
+    timeSlot: string;
+    serviceId?: string;
+  }>;
   resourceId?: string;
   language?: 'en' | 'vi';
 };
@@ -76,6 +85,21 @@ export const parseBookingSlotSelection = (
     return {
       date: value.date,
       timeSlot: value.timeSlot,
+      endTimeSlot:
+        typeof value.endTimeSlot === 'string' ? value.endTimeSlot : undefined,
+      slotCount:
+        typeof value.slotCount === 'number' ? value.slotCount : undefined,
+      serviceIds: Array.isArray(value.serviceIds)
+        ? (value.serviceIds as string[])
+        : undefined,
+      slots: Array.isArray(value.slots)
+        ? (value.slots as Array<{
+            resourceId: string;
+            date: string;
+            timeSlot: string;
+            serviceId?: string;
+          }>)
+        : undefined,
       resourceId:
         typeof value.resourceId === 'string' ? value.resourceId : undefined,
       language:

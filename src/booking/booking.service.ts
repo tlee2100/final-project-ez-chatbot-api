@@ -4,14 +4,13 @@ import {
   Injectable,
   NotFoundException,
   Inject,
-  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
 import { BookingBlockout } from './entities/booking-blockout.entity';
 import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
 import { BookingResource } from '../site/entities/booking-resources.entity';
-import { BookingService as BookingServiceEntity } from '../site/entities/booking-service.entity';
+import { BookingServiceItem } from '../site/entities/booking-service.entity';
 import { Repository } from 'typeorm';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { CreateBlockoutDto } from './dto/create-blockout.dto';
@@ -39,6 +38,7 @@ import {
 import { Redis } from 'ioredis';
 import { BookingGateway } from './booking.gateway';
 import { HoldSlotDto } from './dto/hold-slot.dto';
+import { groupConsecutiveSlots } from './booking-slot.utils';
 
 export type SlotItem =
   | {
@@ -67,9 +67,8 @@ export class BookingService {
     private configRepository: Repository<SiteBookingConfig>,
     @InjectRepository(BookingResource)
     private resourceRepository: Repository<BookingResource>,
-    @InjectRepository(BookingServiceEntity)
-    private serviceEntityRepository: Repository<BookingServiceEntity>,
-    @Inject(forwardRef(() => SiteService))
+    @InjectRepository(BookingServiceItem)
+    private serviceEntityRepository: Repository<BookingServiceItem>,
     private siteService: SiteService,
     private emailQueueService: EmailQueueService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
@@ -96,13 +95,13 @@ export class BookingService {
   async getServiceById(
     siteId: string,
     serviceId: string,
-  ): Promise<BookingServiceEntity | null> {
+  ): Promise<BookingServiceItem | null> {
     return this.serviceEntityRepository.findOne({
       where: { id: serviceId, siteId },
     });
   }
 
-  async getServicesBySiteId(siteId: string): Promise<BookingServiceEntity[]> {
+  async getServicesBySiteId(siteId: string): Promise<BookingServiceItem[]> {
     return this.serviceEntityRepository.find({
       where: { siteId },
     });
@@ -481,10 +480,21 @@ export class BookingService {
     return { success: true };
   }
 
+  private async scanKeys(pattern: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const stream = this.redis.scanStream({ match: pattern, count: 100 });
+      const foundKeys: string[] = [];
+      stream.on('data', (resultKeys: string[]) => {
+        foundKeys.push(...resultKeys);
+      });
+      stream.on('end', () => resolve(foundKeys));
+      stream.on('error', (err) => reject(err));
+    });
+  }
+
   async getActiveHolds(siteId: string) {
     const pattern = `booking_hold:site:${siteId}:resource:*`;
-    // We use keys here since the number of concurrent holds is extremely small
-    const keys = await this.redis.keys(pattern);
+    const keys = await this.scanKeys(pattern);
 
     return keys.map((key) => {
       // Key format: booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}
@@ -513,6 +523,42 @@ export class BookingService {
     return { success: true };
   }
 
+  async releaseSessionHolds(
+    siteId: string,
+    sessionId: string,
+    excludeKeys: string[] = [],
+  ): Promise<void> {
+    if (!sessionId) return;
+    const pattern = `booking_hold:site:${siteId}:resource:*`;
+    const keys = await this.scanKeys(pattern);
+
+    for (const key of keys) {
+      if (excludeKeys.includes(key)) continue;
+      const val = await this.redis.get(key);
+      if (val) {
+        try {
+          const parsed = JSON.parse(val) as { sessionId?: string };
+          if (parsed.sessionId === sessionId) {
+            const timeIndex = key.indexOf(':time:');
+            const timeString = key.substring(timeIndex + 6);
+            const [startAt, endAt] = timeString.split('_');
+            const resourceIndex = key.indexOf(':resource:');
+            const resourceId = key.substring(resourceIndex + 10, timeIndex);
+
+            await this.releaseHold(siteId, {
+              resourceId,
+              startAt,
+              endAt,
+              sessionId,
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   async getHold(
     siteId: string,
     resourceId: string,
@@ -535,11 +581,104 @@ export class BookingService {
       throw new BadRequestException('Booking is disabled for this site');
     }
 
+    const config = await this.getSiteBookingConfig(dto.siteId);
+    const duration = config.bookingSlotDuration || 30;
+    const isSalon = site.industryTemplateId === 'salon';
+
+    // Multi-slot array mode
+    if (dto.slots && dto.slots.length > 0) {
+      const groupedSpans = groupConsecutiveSlots(
+        dto.slots,
+        duration,
+        config.bookingTimezone || 'UTC',
+      );
+
+      const totalSlots = dto.slots.length;
+      const providedServices =
+        dto.serviceIds ?? (dto.serviceId ? [dto.serviceId] : []);
+
+      if (isSalon && totalSlots > 1) {
+        if (providedServices.length !== totalSlots) {
+          throw new BadRequestException(
+            `Salon booking requires exactly 1 service per slot. You selected ${totalSlots} slots but ${providedServices.length} services.`,
+          );
+        }
+      }
+
+      const createdBookings: Booking[] = [];
+      let serviceIndex = 0;
+
+      for (const span of groupedSpans) {
+        const spanServiceIds = isSalon
+          ? providedServices.slice(serviceIndex, serviceIndex + span.slotCount)
+          : providedServices;
+        serviceIndex += span.slotCount;
+
+        const subDto: CreateBookingDto = {
+          ...dto,
+          slots: undefined,
+          resourceId: span.resourceId,
+          startAt: span.startAt,
+          endAt: span.endAt,
+          serviceId: spanServiceIds[0] ?? dto.serviceId,
+          serviceIds: spanServiceIds.length ? spanServiceIds : undefined,
+          templateFields: {
+            ...dto.templateFields,
+            serviceIds: spanServiceIds,
+            slotCount: span.slotCount,
+            startTimeSlot: span.startTimeSlot,
+            endTimeSlot: span.endTimeSlot,
+          },
+        };
+
+        const singleBooking = await this.createSingleBooking(subDto, site);
+        createdBookings.push(singleBooking);
+      }
+
+      if (createdBookings.length > 1) {
+        const allCodes = createdBookings.map((b) => b.code);
+        createdBookings[0].templateFields = {
+          ...createdBookings[0].templateFields,
+          allBookingCodes: allCodes,
+          totalBookingsCount: createdBookings.length,
+        };
+      }
+
+      return createdBookings[0];
+    }
+
+    // Single booking mode
+    return this.createSingleBooking(dto, site);
+  }
+
+  private async createSingleBooking(
+    dto: CreateBookingDto,
+    site: { id: string; name: string; industryTemplateId?: string },
+  ): Promise<Booking> {
     const bookingDate = new Date(dto.startAt);
 
     // Prevent booking for days before today
     if (isBefore(startOfDay(bookingDate), startOfDay(new Date()))) {
       throw new BadRequestException('Cannot create a booking for a past day');
+    }
+
+    const config = await this.getSiteBookingConfig(dto.siteId);
+    const duration = config.bookingSlotDuration || 30;
+    const diffMins = Math.round(
+      (parseISO(dto.endAt).getTime() - parseISO(dto.startAt).getTime()) / 60000,
+    );
+    const slotCount = Math.max(1, Math.round(diffMins / duration));
+
+    const isSalon = site.industryTemplateId === 'salon';
+    const providedServices =
+      dto.serviceIds ?? (dto.serviceId ? [dto.serviceId] : []);
+
+    if (isSalon && slotCount > 1) {
+      if (providedServices.length !== slotCount) {
+        throw new BadRequestException(
+          `Salon booking requires exactly 1 service per slot. You selected ${slotCount} slots but ${providedServices.length} services.`,
+        );
+      }
     }
 
     // Check if slot overlaps with any active blockout
@@ -593,19 +732,20 @@ export class BookingService {
       );
     }
 
-    // Verify hold session
+    // Verify hold session across all sub-slots in the span
     if (dto.resourceId) {
-      const holdKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
-      const holdDataStr = await this.redis.get(holdKey);
-      if (!holdDataStr) {
-        throw new BadRequestException(
-          'Hold expired or invalid. Please select the time slot again.',
-        );
-      }
-
-      const holdData = JSON.parse(holdDataStr) as { sessionId: string };
-      if (holdData.sessionId !== dto.sessionId) {
-        throw new BadRequestException('Hold belongs to another session.');
+      let subStart = parseISO(dto.startAt);
+      for (let i = 0; i < slotCount; i++) {
+        const subEnd = addMinutes(subStart, duration);
+        const subKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${subStart.toISOString()}_${subEnd.toISOString()}`;
+        const holdDataStr = await this.redis.get(subKey);
+        if (holdDataStr) {
+          const holdData = JSON.parse(holdDataStr) as { sessionId: string };
+          if (dto.sessionId && holdData.sessionId !== dto.sessionId) {
+            throw new BadRequestException('Hold belongs to another session.');
+          }
+        }
+        subStart = subEnd;
       }
     }
 
@@ -614,6 +754,15 @@ export class BookingService {
 
     const booking = this.bookingRepository.create({
       ...dto,
+      serviceId: providedServices[0] ?? dto.serviceId ?? null,
+      services: providedServices.map(
+        (id) => ({ id }) as unknown as BookingServiceItem,
+      ),
+      templateFields: {
+        ...dto.templateFields,
+        serviceIds: providedServices,
+        slotCount,
+      },
       code,
       status: BookingStatus.CONFIRMED,
     });
@@ -622,21 +771,36 @@ export class BookingService {
       const savedBooking = await this.bookingRepository.save(booking);
 
       if (dto.resourceId) {
-        const holdKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
-        await this.redis.del(holdKey);
-
-        this.bookingGateway.emitSlotConfirmed(dto.siteId, {
-          resourceId: dto.resourceId,
-          startAt: dto.startAt,
-          endAt: dto.endAt,
-        });
+        // Clear all sub-slot hold keys for the span
+        let curr = parseISO(dto.startAt);
+        const end = parseISO(dto.endAt);
+        while (isBefore(curr, end)) {
+          const next = addMinutes(curr, duration);
+          const subKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${curr.toISOString()}_${next.toISOString()}`;
+          await this.redis.del(subKey);
+          this.bookingGateway.emitSlotConfirmed(dto.siteId, {
+            resourceId: dto.resourceId,
+            startAt: curr.toISOString(),
+            endAt: next.toISOString(),
+          });
+          curr = next;
+        }
+        const fullSpanKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+        await this.redis.del(fullSpanKey);
       }
 
       if (savedBooking.customerEmail) {
-        const site = await this.siteService.findOne(dto.siteId);
-        const service = dto.serviceId
-          ? await this.getServiceById(dto.siteId, dto.serviceId)
-          : null;
+        const serviceNames: string[] = [];
+        if (providedServices.length) {
+          for (const sId of providedServices) {
+            const s = await this.getServiceById(dto.siteId, sId);
+            if (s) serviceNames.push(s.name);
+          }
+        }
+
+        const serviceName = serviceNames.length
+          ? serviceNames.join(', ')
+          : 'N/A';
         const resource = dto.resourceId
           ? await this.getResourceById(dto.siteId, dto.resourceId)
           : null;
@@ -645,7 +809,7 @@ export class BookingService {
           to: savedBooking.customerEmail,
           customerName: savedBooking.customerName,
           bookingCode: savedBooking.code,
-          serviceName: service?.name ?? 'N/A',
+          serviceName,
           resourceName: resource?.name ?? null,
           startAt: new Date(savedBooking.startAt).toISOString(),
           endAt: new Date(savedBooking.endAt).toISOString(),

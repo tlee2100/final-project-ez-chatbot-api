@@ -41,15 +41,19 @@ export interface AvailableSlot {
 /** Mock booking result shape returned before Phase 1C booking module is live. */
 export interface BookingResult {
   bookingCode: string;
+  allBookingCodes?: string[];
   status: 'confirmed' | 'cancelled';
   customerName: string;
   customerEmail?: string;
   phone: string;
   date: string;
   timeSlot: string;
+  endTimeSlot?: string;
   resourceName: string;
-  serviceId: string;
-  serviceName: string;
+  serviceId?: string;
+  serviceIds?: string[];
+  serviceName?: string;
+  serviceNames?: string[];
   createdAt: string;
 }
 
@@ -58,10 +62,18 @@ export interface CreateBookingPayload {
   customerName: string;
   customerEmail?: string;
   phone: string;
-  serviceId: string;
+  serviceId?: string;
+  serviceIds?: string[];
   resourceId: string;
   date: string;
   timeSlot: string;
+  slotCount?: number;
+  slots?: Array<{
+    resourceId: string;
+    date: string;
+    timeSlot: string;
+    serviceId?: string;
+  }>;
   sessionId?: string;
 }
 
