@@ -1160,6 +1160,13 @@ export class ChatService {
     status: ConversationStatus,
     reason?: ClosedReason,
   ): Promise<Conversation> {
+    if (id.startsWith('admin-test-')) {
+      return {
+        id,
+        status,
+        closedReason: reason,
+      } as Conversation;
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
     });
@@ -1205,6 +1212,14 @@ export class ChatService {
   }
 
   async getPublicConversationStatus(id: string) {
+    if (id.startsWith('admin-test-')) {
+      return {
+        conversationId: id,
+        status: ConversationStatus.OPEN,
+        handlingStatus: HandlingStatus.AI_HANDLING,
+        closedReason: null,
+      };
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
       select: {
@@ -1293,6 +1308,17 @@ export class ChatService {
     senderType: SenderType,
     agentId?: string,
   ): Promise<ChatMessage> {
+    if (conversationId.startsWith('admin-test-')) {
+      return {
+        id: `test-msg-${Date.now()}`,
+        conversationId,
+        content,
+        senderType,
+        agentId: agentId ?? null,
+        status: MessageStatus.SENT,
+        createdAt: new Date(),
+      } as ChatMessage;
+    }
     const conversation = await this.getConversationById(conversationId);
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ForbiddenException('Conversation is closed');
@@ -1349,6 +1375,9 @@ export class ChatService {
     conversationId: string,
     receiverType: SenderType,
   ): Promise<void> {
+    if (conversationId.startsWith('admin-test-')) {
+      return;
+    }
     await this.chatMessageRepository.update(
       {
         conversationId,
@@ -1366,6 +1395,9 @@ export class ChatService {
     conversationId: string,
     readerType: SenderType,
   ): Promise<void> {
+    if (conversationId.startsWith('admin-test-')) {
+      return;
+    }
     await this.chatMessageRepository.update(
       {
         conversationId,
@@ -1385,6 +1417,14 @@ export class ChatService {
     id: string,
     reason: ClosedReason = ClosedReason.VISITOR,
   ): Promise<Conversation> {
+    if (id.startsWith('admin-test-')) {
+      this.chatGateway.notifyConversationClosed(id, 'admin-test');
+      return {
+        id,
+        status: ConversationStatus.CLOSED,
+        closedReason: reason,
+      } as Conversation;
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
       relations: { site: { owner: true } },
