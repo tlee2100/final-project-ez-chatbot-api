@@ -8,6 +8,7 @@ import {
   forwardRef,
   Inject,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bull';
@@ -75,6 +76,18 @@ export class CrawlerService implements OnModuleInit {
     });
     for (const config of configs) await this.syncRepeatableJob(config);
     await this.recoverOrphanedRuns();
+  }
+
+  @Cron('*/5 * * * *')
+  async handleOrphanedRunRecovery(): Promise<void> {
+    if (!this.isFeatureEnabled()) return;
+    try {
+      await this.recoverOrphanedRuns();
+    } catch (error) {
+      this.logger.error(
+        `Periodic orphaned run recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async getConfig(siteId: string, user: JwtUser) {
@@ -462,8 +475,9 @@ export class CrawlerService implements OnModuleInit {
         jobId: runItemId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 5_000 },
+        timeout: 120_000,
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: { count: 200, age: 7 * 24 * 3600 },
       },
     );
   }
@@ -473,7 +487,7 @@ export class CrawlerService implements OnModuleInit {
       jobId: `sitemap-${runId}`,
       attempts: 1,
       removeOnComplete: true,
-      removeOnFail: false,
+      removeOnFail: { count: 200, age: 7 * 24 * 3600 },
     };
   }
 

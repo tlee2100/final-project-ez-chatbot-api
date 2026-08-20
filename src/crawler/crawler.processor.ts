@@ -1,4 +1,9 @@
-import { Process, Processor } from '@nestjs/bull';
+import {
+  OnQueueFailed,
+  OnQueueStalled,
+  Process,
+  Processor,
+} from '@nestjs/bull';
 import { BadRequestException, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -122,8 +127,9 @@ export class CrawlerProcessor {
               jobId: item.id,
               attempts: 3,
               backoff: { type: 'exponential', delay: 5_000 },
+              timeout: 120_000,
               removeOnComplete: true,
-              removeOnFail: false,
+              removeOnFail: { count: 200, age: 7 * 24 * 3600 },
             },
           })),
         );
@@ -135,7 +141,10 @@ export class CrawlerProcessor {
     }
   }
 
-  @Process({ name: CRAWL_PAGE_JOB, concurrency: 2 })
+  @Process({
+    name: CRAWL_PAGE_JOB,
+    concurrency: parseInt(process.env.CRAWLER_CONCURRENCY || '2', 10),
+  })
   async handlePage(job: Job<CrawlPageJobData>): Promise<void> {
     const item = await this.itemRepository.findOne({
       where: { id: job.data.runItemId },
@@ -542,6 +551,39 @@ export class CrawlerProcessor {
     return (error instanceof Error ? error.message : String(error)).slice(
       0,
       2000,
+    );
+  }
+
+  @OnQueueFailed()
+  async onFailed(job: Job, error: Error): Promise<void> {
+    this.logger.error(
+      `Job ${job.id} (${job.name}) failed after ${job.attemptsMade} attempt(s): ${error.message}`,
+      error.stack,
+    );
+    if (job.name === CRAWL_PAGE_JOB) {
+      const data = job.data as CrawlPageJobData;
+      try {
+        const item = await this.itemRepository.findOne({
+          where: { id: data.runItemId },
+        });
+        if (item && !TERMINAL_CRAWL_ITEM_STATUSES.includes(item.status)) {
+          await this.completeItem(item.id, CrawlRunItemStatus.FAILED, {
+            errorCode: 'UNHANDLED_FAILURE',
+            errorMessage: error.message?.slice(0, 2000),
+          });
+        }
+      } catch (dbError) {
+        this.logger.error(
+          `Failed to update DB for failed job ${job.id}: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
+        );
+      }
+    }
+  }
+
+  @OnQueueStalled()
+  onStalled(job: Job): void {
+    this.logger.warn(
+      `Job ${job.id} (${job.name}) stalled — Bull will retry automatically`,
     );
   }
 }
