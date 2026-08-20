@@ -191,8 +191,7 @@ export class EmailQueueService {
   }
 
   getEncryptionKey(): Buffer {
-    const secret =
-      process.env.EMAIL_TOKEN_ENCRYPTION_KEY || process.env.JWT_SECRET;
+    const secret = process.env.JWT_SECRET;
     if (!secret) {
       throw new Error('Missing JWT_SECRET environment variable');
     }
