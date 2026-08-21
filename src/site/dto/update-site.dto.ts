@@ -112,6 +112,15 @@ export class UpdateSiteDto {
 
   @AutoMap()
   @ApiPropertyOptional({
+    example: 'qwen3.7-flash',
+    description: 'LLM Model for the site or null to use shared model',
+  })
+  @IsOptional()
+  @IsString()
+  llmModel?: string;
+
+  @AutoMap()
+  @ApiPropertyOptional({
     example: 50,
     description: 'Max messages per chat session',
   })
@@ -243,4 +252,13 @@ export class UpdateSiteDto {
   @IsOptional()
   @IsBoolean()
   showAvatar?: boolean;
+
+  // ── BYOK (SEC-001 / CE-004) ──
+  @ApiPropertyOptional({
+    description:
+      'Toggle whether to use the custom OpenAI key without deleting it',
+  })
+  @IsOptional()
+  @IsBoolean()
+  useCustomOpenAiKey?: boolean;
 }

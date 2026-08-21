@@ -22,6 +22,11 @@ export enum MessageStatus {
   READ = 'READ',
 }
 
+export enum FeedbackRating {
+  HELPFUL = 'HELPFUL',
+  UNHELPFUL = 'UNHELPFUL',
+}
+
 @Entity('chat_messages')
 export class ChatMessage {
   @PrimaryGeneratedColumn('uuid')
@@ -48,12 +53,29 @@ export class ChatMessage {
   @Column('text')
   content: string;
 
+  @Column({ type: 'varchar', length: 35, nullable: true })
+  locale: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  components: Record<string, unknown>[] | null;
+
   @Column({
     type: 'enum',
     enum: MessageStatus,
     default: MessageStatus.SENT,
   })
   status: MessageStatus;
+
+  @Column({
+    type: 'enum',
+    enum: FeedbackRating,
+    nullable: true,
+    default: null,
+  })
+  feedbackRating: FeedbackRating | null;
+
+  @Column({ type: 'timestamptz', nullable: true, default: null })
+  feedbackAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

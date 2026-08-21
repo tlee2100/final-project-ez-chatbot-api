@@ -76,6 +76,13 @@ export class CreateSiteDto {
   @IsOptional()
   @IsBoolean()
   emailTranscript?: boolean;
+  @ApiPropertyOptional({
+    example: 'qwen3.7-flash',
+    description: 'LLM Model for the site',
+  })
+  @IsOptional()
+  @IsString()
+  llmModel?: string;
 
   @ApiPropertyOptional({
     type: [String],

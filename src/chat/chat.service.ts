@@ -4,6 +4,8 @@ import {
   NotFoundException,
   UnauthorizedException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   forwardRef,
   Inject,
 } from '@nestjs/common';
@@ -30,9 +32,14 @@ import {
   ChatMessage,
   SenderType,
   MessageStatus,
+  FeedbackRating,
 } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import {
+  SubmitMessageFeedbackDto,
+  MessageFeedbackResponseDto,
+} from './dto/submit-message-feedback.dto';
 import { JwtUser } from '../auth/types/jwt-user.type';
 import { NotificationService } from '../notification/notification.service';
 import { NotificationType } from '../notification/enums/notification-type.enum';
@@ -46,6 +53,8 @@ import { AiService } from './ai.service';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import { Booking } from '../booking/entities/booking.entity';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
+import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
+import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -54,12 +63,22 @@ type ChatMessageDto = Pick<
   | 'senderType'
   | 'agentId'
   | 'content'
+  | 'locale'
+  | 'components'
   | 'status'
   | 'createdAt'
+  | 'feedbackRating'
+  | 'feedbackAt'
 > & {
   senderName?: string | null;
 };
 const MAX_MESSAGE_LENGTH = 1000;
+
+/** In-memory state for WS rate limiting (SEC-005) */
+interface WsRateLimitEntry {
+  count: number;
+  resetAt: number;
+}
 
 @Injectable()
 export class ChatService {
@@ -72,6 +91,17 @@ export class ChatService {
     string,
     { agent: Set<string>; visitor: Set<string> }
   >();
+
+  /**
+   * SEC-005 — WebSocket Rate Limiter
+   * Key = `${siteId}-${clientIp}`. Enforces WS_LIMIT requests per WS_WINDOW_MS.
+   * Entries are lazily cleaned up on the next request from the same key.
+   */
+  private readonly wsRateLimitMap = new Map<string, WsRateLimitEntry>();
+  private readonly WS_LIMIT = 30; // max messages per window
+  private readonly WS_WINDOW_MS = 60_000; // 1 minute
+  /** Active IP session tracking: `${siteId}-${clientIp}` -> Set<conversationId> */
+  private readonly ipActiveSessionsMap = new Map<string, Set<string>>();
 
   constructor(
     @InjectRepository(Site)
@@ -93,6 +123,8 @@ export class ChatService {
     private readonly chatTimeoutService: ChatTimeoutService,
     private readonly emailQueueService: EmailQueueService,
     private readonly aiService: AiService,
+    @Inject(AI_MODERATION_SERVICE)
+    private readonly moderationService: IAIModerationServiceType,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -364,6 +396,77 @@ export class ChatService {
         return;
       }
       payload.senderType = SenderType.VISITOR;
+
+      // ── SEC-005: WebSocket Rate Limit ──────────────────────────────────────
+      const siteIdForLimit = visitor.siteId ?? 'unknown';
+      const clientIp =
+        (client.handshake.headers['x-forwarded-for'] as string | undefined)
+          ?.split(',')[0]
+          ?.trim() ??
+        client.handshake.address ??
+        'unknown';
+      const rlKey = `${siteIdForLimit}-${clientIp}`;
+      const now = Date.now();
+      const entry = this.wsRateLimitMap.get(rlKey);
+
+      if (entry && now < entry.resetAt) {
+        if (entry.count >= this.WS_LIMIT) {
+          this.logger.warn(`WS rate limit exceeded — key: ${rlKey}`);
+          client.emit('messageError', {
+            message: 'Rate limit exceeded. Please slow down.',
+            code: 429,
+          });
+          return;
+        }
+        entry.count += 1;
+      } else {
+        // New window or expired entry
+        this.wsRateLimitMap.set(rlKey, {
+          count: 1,
+          resetAt: now + this.WS_WINDOW_MS,
+        });
+      }
+
+      // ── SEC-005: Max Messages Per Session Enforcement ──────────────────────
+      if (!payload.conversationId.startsWith('admin-test-')) {
+        const conversation = await this.conversationRepository.findOne({
+          where: { id: payload.conversationId },
+          relations: { site: true },
+        });
+        if (conversation?.site?.maxMessagesPerSession) {
+          const msgCount = await this.chatMessageRepository.count({
+            where: {
+              conversationId: payload.conversationId,
+              senderType: SenderType.VISITOR,
+            },
+          });
+          if (msgCount >= conversation.site.maxMessagesPerSession) {
+            this.logger.warn(
+              `Max messages per session cap reached (${msgCount}/${conversation.site.maxMessagesPerSession}) for conv ${payload.conversationId}`,
+            );
+            client.emit('messageError', {
+              message:
+                'Session message limit reached. Please start a new conversation.',
+              code: 429,
+            });
+            return;
+          }
+        }
+      }
+
+      // ── SEC-006: Content Moderation ────────────────────────────────────────
+      const isSafe = await this.moderationService.isSafe(payload.content);
+      if (!isSafe) {
+        this.logger.warn(
+          `Message blocked by moderation for conversation ${payload.conversationId}`,
+        );
+        client.emit('messageError', {
+          message:
+            'Your message was blocked because it violates our content policy.',
+          code: 403,
+        });
+        return;
+      }
     } else if (user) {
       payload.senderType = SenderType.AGENT;
     }
@@ -501,6 +604,7 @@ export class ChatService {
   }
 
   handleTyping(client: Socket, payload: { conversationId: string }): void {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     const user = socketData.user;
     const visitor = socketData.visitor;
@@ -524,6 +628,7 @@ export class ChatService {
     client: Socket,
     payload: { conversationId: string },
   ): Promise<void> {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     if (!socketData.user && !socketData.visitor) return;
 
@@ -541,6 +646,7 @@ export class ChatService {
 
   async createConversation(
     dto: CreateConversationDto,
+    clientIp?: string,
   ): Promise<CreateConversationResponseDto> {
     const site = await this.siteRepository.findOne({
       where: { id: dto.siteId },
@@ -553,6 +659,18 @@ export class ChatService {
       throw new ForbiddenException(
         'Chat widget is currently disabled for this site',
       );
+    }
+
+    // ── SEC-005: Max Sessions Per IP Enforcement ────────────────────────────
+    if (clientIp && site.maxSessionsPerIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      if (sessions.size >= site.maxSessionsPerIp) {
+        throw new HttpException(
+          'Maximum active chat sessions reached for your IP address. Please continue existing conversation or try again later.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
     }
 
     const result = await this.conversationRepository.manager.transaction(
@@ -598,6 +716,13 @@ export class ChatService {
         };
       },
     );
+
+    if (clientIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      sessions.add(result.conversationId);
+      this.ipActiveSessionsMap.set(rlKey, sessions);
+    }
 
     this.logger.log(
       `New conversation ${result.conversationId} created for site ${dto.siteId}`,
@@ -1203,6 +1328,7 @@ export class ChatService {
     if (status === ConversationStatus.CLOSED) {
       if (reason) conversation.closedReason = reason;
       this.chatTimeoutService.cancelTimer(id);
+      this.ipActiveSessionsMap.forEach((sessions) => sessions.delete(id));
     }
     conversation.lastActivityAt = new Date();
 
@@ -1311,9 +1437,13 @@ export class ChatService {
       senderType: message.senderType,
       agentId: message.agentId,
       content: message.content,
+      locale: message.locale,
+      components: message.components,
       status: message.status,
       createdAt: message.createdAt,
       senderName: message.agent?.name ?? null,
+      feedbackRating: message.feedbackRating,
+      feedbackAt: message.feedbackAt,
     }));
   }
 
@@ -1334,6 +1464,8 @@ export class ChatService {
     content: string,
     senderType: SenderType,
     agentId?: string,
+    locale?: string,
+    components?: Record<string, unknown>[],
   ): Promise<ChatMessage> {
     if (conversationId.startsWith('admin-test-')) {
       return {
@@ -1356,6 +1488,8 @@ export class ChatService {
       content,
       senderType,
       agentId: agentId ?? null,
+      locale: locale ?? null,
+      components: components ?? null,
     });
 
     console.log(`Message::: ${JSON.stringify(message)}`);
@@ -1425,6 +1559,7 @@ export class ChatService {
     if (conversationId.startsWith('admin-test-')) {
       return;
     }
+    if (!conversationId) return;
     await this.chatMessageRepository.update(
       {
         conversationId,
@@ -1825,5 +1960,35 @@ export class ChatService {
       );
       uploadStream.end(file.buffer);
     });
+  }
+
+  // ─── Feedback ────────────────────────────────────────────────────────────
+
+  /**
+   * Submit visitor thumbs up / down feedback on an AI message.
+   */
+  async submitMessageFeedback(
+    messageId: string,
+    dto: SubmitMessageFeedbackDto,
+  ): Promise<MessageFeedbackResponseDto> {
+    const message = await this.chatMessageRepository.findOne({
+      where: { id: messageId },
+    });
+
+    if (!message || message.senderType !== SenderType.AI) {
+      throw new NotFoundException(
+        `AI message with ID "${messageId}" not found`,
+      );
+    }
+
+    message.feedbackRating = dto.rating;
+    message.feedbackAt = new Date();
+
+    const updated = await this.chatMessageRepository.save(message);
+
+    return {
+      id: updated.id,
+      feedbackRating: updated.feedbackRating as FeedbackRating,
+    };
   }
 }

@@ -5,13 +5,17 @@ jest.mock('@automapper/classes', () => ({
   AutoMap: () => () => undefined,
 }));
 
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ChatService } from './chat.service';
 import {
   ConversationStatus,
   ClosedReason,
 } from './entities/conversation.entity';
-import { MessageStatus, SenderType } from './entities/chat-message.entity';
+import {
+  MessageStatus,
+  SenderType,
+  FeedbackRating,
+} from './entities/chat-message.entity';
 import { createRepositoryMock } from '../test/service-test-helpers';
 
 describe('ChatService saveMessage', () => {
@@ -39,6 +43,8 @@ describe('ChatService saveMessage', () => {
     };
     const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
     const aiService = { invoke: jest.fn() };
+    // Mock moderation service — always safe so existing test behaviour is unchanged
+    const moderationService = { isSafe: jest.fn().mockResolvedValue(true) };
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,
@@ -51,6 +57,7 @@ describe('ChatService saveMessage', () => {
       chatTimeoutService as never,
       emailQueueService as never,
       aiService as never,
+      moderationService,
     );
 
     return {
@@ -164,6 +171,65 @@ describe('ChatService saveMessage', () => {
     expect(conversationRepository.update).toHaveBeenCalledWith('conv-1', {
       status: ConversationStatus.CLOSED,
       closedReason: ClosedReason.CLEARED,
+    });
+  });
+
+  describe('submitMessageFeedback', () => {
+    it('successfully submits feedback on an AI message', async () => {
+      const { service, chatMessageRepository } = makeService();
+      const msg = {
+        id: 'msg-ai-1',
+        conversationId: 'conv-1',
+        senderType: SenderType.AI,
+        content: 'I can help with that.',
+        feedbackRating: null,
+        feedbackAt: null,
+      };
+
+      chatMessageRepository.findOne.mockResolvedValue(msg);
+      chatMessageRepository.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      const result = await service.submitMessageFeedback('msg-ai-1', {
+        rating: FeedbackRating.HELPFUL,
+      });
+
+      expect(result).toEqual({
+        id: 'msg-ai-1',
+        feedbackRating: FeedbackRating.HELPFUL,
+      });
+      expect(chatMessageRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'msg-ai-1',
+          feedbackRating: FeedbackRating.HELPFUL,
+        }),
+      );
+    });
+
+    it('throws NotFoundException if message is not found', async () => {
+      const { service, chatMessageRepository } = makeService();
+      chatMessageRepository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.submitMessageFeedback('msg-not-found', {
+          rating: FeedbackRating.UNHELPFUL,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws NotFoundException if message is not from AI', async () => {
+      const { service, chatMessageRepository } = makeService();
+      chatMessageRepository.findOne.mockResolvedValue({
+        id: 'msg-user-1',
+        senderType: SenderType.VISITOR,
+      });
+
+      await expect(
+        service.submitMessageFeedback('msg-user-1', {
+          rating: FeedbackRating.UNHELPFUL,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

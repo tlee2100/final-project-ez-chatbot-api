@@ -22,6 +22,8 @@ import {
 } from './admin-booking.service';
 import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
+import { CreateAdminBookingDto } from '../booking/dto/create-admin-booking.dto';
+import { UpdateBookingStatusDto } from '../booking/dto/update-booking-status.dto';
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -94,19 +96,7 @@ export class AdminBookingController {
   @ApiOperation({ summary: 'Create a new manual booking' })
   createBooking(
     @Param('siteId') siteId: string,
-    @Body()
-    body: {
-      staffId?: string;
-      serviceId?: string;
-      startAt?: string;
-      endAt?: string;
-      timezone?: string;
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      notes?: string;
-      sessionId: string;
-    },
+    @Body() body: CreateAdminBookingDto,
     @Req() req: AuthRequest,
   ) {
     return this.adminBookingService.createBooking(siteId, body, req.user);
@@ -118,13 +108,13 @@ export class AdminBookingController {
   updateBookingStatus(
     @Param('siteId') siteId: string,
     @Param('bookingId') bookingId: string,
-    @Body('status') status: string,
+    @Body() body: UpdateBookingStatusDto,
     @Req() req: AuthRequest,
   ) {
     return this.adminBookingService.updateBookingStatus(
       siteId,
       bookingId,
-      status,
+      body.status,
       req.user,
     );
   }

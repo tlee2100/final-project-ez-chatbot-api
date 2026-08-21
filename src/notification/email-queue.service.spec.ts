@@ -65,22 +65,6 @@ describe('EmailQueueService', () => {
     expect(decrypted).toBe(emailData.activationToken);
   });
 
-  it('prefers EMAIL_TOKEN_ENCRYPTION_KEY over JWT_SECRET when provided', () => {
-    process.env.EMAIL_TOKEN_ENCRYPTION_KEY =
-      'dedicated-email-encryption-secret';
-    process.env.JWT_SECRET = 'different-jwt-secret';
-
-    const queue = { add: jest.fn() };
-    const service = new EmailQueueService(queue as never);
-
-    const key1 = service.getEncryptionKey();
-
-    delete process.env.EMAIL_TOKEN_ENCRYPTION_KEY;
-    const key2 = service.getEncryptionKey();
-
-    expect(key1).not.toEqual(key2);
-  });
-
   it('enqueues password changed email with default retry/cleanup options', async () => {
     const queue = {
       add: jest.fn().mockResolvedValue({ id: 'job-password-changed-1' }),

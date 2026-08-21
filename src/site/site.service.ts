@@ -8,8 +8,9 @@ import {
   Inject,
   Logger,
 } from '@nestjs/common';
+import { encryptApiKey, decryptApiKey } from '../shared/utils/encryption.util';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Booking } from '../booking/entities/booking.entity';
 import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
@@ -215,6 +216,7 @@ export class SiteService {
         bookingConfig: true,
         bookingServices: true,
         bookingResources: true,
+        industryTemplateInfo: true,
       },
     });
     if (!site) {
@@ -307,6 +309,9 @@ export class SiteService {
     }
 
     const updateData = { ...dto };
+    if (dto.useCustomOpenAiKey === true && !site.encryptedOpenAiKey) {
+      updateData.useCustomOpenAiKey = false;
+    }
     if (dto.allowedDomains !== undefined) {
       updateData.allowedDomains = this.sanitizeAllowedDomains(
         dto.allowedDomains,
@@ -564,7 +569,7 @@ export class SiteService {
   private sanitizeAllowedDomains(domains?: string[]): string[] {
     if (!domains || !Array.isArray(domains)) return [];
 
-    return domains
+    const cleaned = domains
       .map((domain) => {
         let clean = domain.trim();
         try {
@@ -580,6 +585,8 @@ export class SiteService {
         return clean;
       })
       .filter(Boolean);
+
+    return Array.from(new Set(cleaned));
   }
 
   async hasActiveBookingsForService(
@@ -590,7 +597,7 @@ export class SiteService {
       where: {
         siteId,
         serviceId,
-        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
+        status: In([BookingStatus.CONFIRMED]),
       },
     });
     return count > 0;
@@ -604,7 +611,7 @@ export class SiteService {
       where: {
         siteId,
         resourceId,
-        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
+        status: In([BookingStatus.CONFIRMED]),
       },
     });
     return count > 0;
@@ -631,5 +638,87 @@ export class SiteService {
       );
       stream.end(file.buffer);
     });
+  }
+
+  // ── BYOK — Bring Your Own Key (SEC-001 / CE-004) ──────────────────────────
+
+  /**
+   * Save a custom OpenAI API key for a site.
+   * The key is encrypted with AES-256-GCM before being stored in the DB.
+   * The plaintext key is NEVER persisted.
+   *
+   * @param siteId    The target site
+   * @param user      The requesting user (must have access to the site)
+   * @param plainKey  The raw OpenAI API key (e.g. "sk-...")
+   */
+  async saveCustomApiKey(
+    siteId: string,
+    user: JwtUser,
+    plainKey: string,
+  ): Promise<{ useCustomOpenAiKey: boolean }> {
+    await this.assertSiteAccess(siteId, user);
+
+    if (!plainKey || !plainKey.trim()) {
+      throw new BadRequestException('API key must not be empty');
+    }
+
+    const encrypted = encryptApiKey(plainKey.trim());
+
+    await this.siteRepository.update(siteId, {
+      encryptedOpenAiKey: encrypted,
+      useCustomOpenAiKey: true,
+    });
+
+    this.logger.log(
+      `Custom OpenAI key saved for site ${siteId} by user ${user.id}`,
+    );
+    return { useCustomOpenAiKey: true };
+  }
+
+  /**
+   * Remove the custom OpenAI API key for a site, reverting to the master env key.
+   *
+   * @param siteId  The target site
+   * @param user    The requesting user (must have access to the site)
+   */
+  async removeCustomApiKey(
+    siteId: string,
+    user: JwtUser,
+  ): Promise<{ useCustomOpenAiKey: boolean }> {
+    await this.assertSiteAccess(siteId, user);
+
+    await this.siteRepository.update(siteId, {
+      encryptedOpenAiKey: null,
+      useCustomOpenAiKey: false,
+    });
+
+    this.logger.log(
+      `Custom OpenAI key removed for site ${siteId} by user ${user.id}`,
+    );
+    return { useCustomOpenAiKey: false };
+  }
+
+  /**
+   * Retrieve and decrypt the custom OpenAI key for a site.
+   * Used ONLY by the AI proxy layer (never returned to clients).
+   *
+   * @param site  The site entity with encryptedOpenAiKey
+   * @returns     Plaintext API key, or null if not using a custom key
+   */
+  getDecryptedApiKey(site: {
+    useCustomOpenAiKey: boolean;
+    encryptedOpenAiKey: string | null;
+  }): string | null {
+    if (!site.useCustomOpenAiKey || !site.encryptedOpenAiKey) {
+      return null;
+    }
+    try {
+      return decryptApiKey(site.encryptedOpenAiKey);
+    } catch (err) {
+      this.logger.error(
+        `Failed to decrypt API key for site: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 }

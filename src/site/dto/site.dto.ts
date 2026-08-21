@@ -148,6 +148,14 @@ export class SiteDto {
   })
   sentimentDetection: boolean;
 
+  @AutoMap()
+  @ApiProperty({
+    description: 'LLM Model used for the site',
+    example: 'qwen3.7-flash',
+    default: 'qwen3.7-flash',
+  })
+  llmModel: string;
+
   @ApiProperty({
     example: 50,
     description: 'Max messages per chat session',
@@ -257,4 +265,21 @@ export class SiteDto {
   @ApiProperty({ default: true })
   @AutoMap(() => Boolean)
   showAvatar: boolean;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Whether the site is actively using a custom encrypted OpenAI API key (BYOK).',
+    default: false,
+  })
+  @AutoMap(() => Boolean)
+  useCustomOpenAiKey: boolean;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Whether the site has a custom OpenAI API key saved in the database.',
+    default: false,
+  })
+  hasCustomApiKey: boolean;
 }

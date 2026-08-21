@@ -35,13 +35,13 @@ import { SitemapService } from './services/sitemap.service';
     BullModule.registerQueue({
       name: CRAWLER_QUEUE,
       settings: {
-        lockDuration: 60_000,
-        stalledInterval: 30_000,
+        lockDuration: 180_000,
+        stalledInterval: 60_000,
         maxStalledCount: 2,
       },
       defaultJobOptions: {
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: { count: 200, age: 7 * 24 * 3600 },
       },
     }),
     forwardRef(() => SiteModule),

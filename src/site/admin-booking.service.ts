@@ -6,10 +6,10 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Site } from './entities/site.entity';
 import { SiteBookingConfig } from './entities/site-booking-config.entity';
-import { BookingService } from './entities/booking-service.entity';
+import { BookingServiceItem } from './entities/booking-service.entity';
 import { BookingResource } from './entities/booking-resources.entity';
 
 import { SiteService } from './site.service';
@@ -18,6 +18,7 @@ import type { PaginateQuery } from 'nestjs-paginate';
 import { BookingService as CoreBookingService } from '../booking/booking.service';
 import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { CreateBookingDto } from '../booking/dto/create-booking.dto';
+import { CreateAdminBookingDto } from '../booking/dto/create-admin-booking.dto';
 import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
 import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 
@@ -62,11 +63,12 @@ export class AdminBookingService {
     private siteRepository: Repository<Site>,
     @InjectRepository(SiteBookingConfig)
     private configRepository: Repository<SiteBookingConfig>,
-    @InjectRepository(BookingService)
-    private serviceRepository: Repository<BookingService>,
+    @InjectRepository(BookingServiceItem)
+    private serviceRepository: Repository<BookingServiceItem>,
     @InjectRepository(BookingResource)
     private resourceRepository: Repository<BookingResource>,
     private siteService: SiteService,
+    private dataSource: DataSource,
     @Inject(forwardRef(() => CoreBookingService))
     private coreBookingService: CoreBookingService,
   ) {}
@@ -125,81 +127,89 @@ export class AdminBookingService {
       throw new NotFoundException('Site not found');
     }
 
-    // 1. Update Site fields
-    site.bookingEnabled = dto.bookingEnabled;
-    site.industryTemplateId = dto.industryTemplate;
+    // Wrap multi-table sync inside an ACID database transaction
+    await this.dataSource.transaction(async (manager) => {
+      const siteRepo = manager.getRepository(Site);
+      const configRepo = manager.getRepository(SiteBookingConfig);
+      const serviceRepo = manager.getRepository(BookingServiceItem);
+      const resourceRepo = manager.getRepository(BookingResource);
 
-    // 2. Upsert Config
-    if (!site.bookingConfig) {
-      site.bookingConfig = this.configRepository.create({ siteId });
-    }
-    site.bookingConfig.bookingTimezone = dto.timezone;
-    site.bookingConfig.bookingSlotDuration = dto.slotDuration;
-    site.bookingConfig.bookingStartTime = dto.startTime;
-    site.bookingConfig.bookingEndTime = dto.endTime;
-    site.bookingConfig.bookingAvailableDays = dto.availableDays;
+      // 1. Update Site fields
+      site.bookingEnabled = dto.bookingEnabled;
+      site.industryTemplateId = dto.industryTemplate;
 
-    // 3. Sync Services (Smart Upsert)
-    const existingServices = site.bookingServices || [];
-    const newServiceNames = dto.services || [];
-    const servicesToRemove = existingServices.filter(
-      (s) => !newServiceNames.includes(s.name),
-    );
-    const servicesToKeep = existingServices.filter((s) =>
-      newServiceNames.includes(s.name),
-    );
-    const serviceNamesToKeep = servicesToKeep.map((s) => s.name);
-    const servicesToAdd = newServiceNames
-      .filter((name) => !serviceNamesToKeep.includes(name))
-      .map((name) => this.serviceRepository.create({ siteId, name }));
-
-    if (servicesToRemove.length > 0) {
-      for (const service of servicesToRemove) {
-        const hasActive = await this.siteService.hasActiveBookingsForService(
-          siteId,
-          service.id,
-        );
-        if (hasActive) {
-          throw new BadRequestException(
-            `Cannot delete service "${service.name}" because it has active bookings.`,
-          );
-        }
+      // 2. Upsert Config
+      if (!site.bookingConfig) {
+        site.bookingConfig = configRepo.create({ siteId });
       }
-      await this.serviceRepository.remove(servicesToRemove);
-    }
-    site.bookingServices = [...servicesToKeep, ...servicesToAdd];
+      site.bookingConfig.bookingTimezone = dto.timezone;
+      site.bookingConfig.bookingSlotDuration = dto.slotDuration;
+      site.bookingConfig.bookingStartTime = dto.startTime;
+      site.bookingConfig.bookingEndTime = dto.endTime;
+      site.bookingConfig.bookingAvailableDays = dto.availableDays;
 
-    // 4. Sync Resources (Smart Upsert)
-    const existingResources = site.bookingResources || [];
-    const newResourceNames = dto.resources || [];
-    const resourcesToRemove = existingResources.filter(
-      (r) => !newResourceNames.includes(r.name),
-    );
-    const resourcesToKeep = existingResources.filter((r) =>
-      newResourceNames.includes(r.name),
-    );
-    const resourceNamesToKeep = resourcesToKeep.map((r) => r.name);
-    const resourcesToAdd = newResourceNames
-      .filter((name) => !resourceNamesToKeep.includes(name))
-      .map((name) => this.resourceRepository.create({ siteId, name }));
+      // 3. Sync Services (Smart Upsert)
+      const existingServices = site.bookingServices || [];
+      const newServiceNames = dto.services || [];
+      const servicesToRemove = existingServices.filter(
+        (s) => !newServiceNames.includes(s.name),
+      );
+      const servicesToKeep = existingServices.filter((s) =>
+        newServiceNames.includes(s.name),
+      );
+      const serviceNamesToKeep = servicesToKeep.map((s) => s.name);
+      const servicesToAdd = newServiceNames
+        .filter((name) => !serviceNamesToKeep.includes(name))
+        .map((name) => serviceRepo.create({ siteId, name }));
 
-    if (resourcesToRemove.length > 0) {
-      for (const resource of resourcesToRemove) {
-        const hasActive = await this.siteService.hasActiveBookingsForResource(
-          siteId,
-          resource.id,
-        );
-        if (hasActive) {
-          throw new BadRequestException(
-            `Cannot delete staff "${resource.name}" because they have active bookings.`,
+      if (servicesToRemove.length > 0) {
+        for (const service of servicesToRemove) {
+          const hasActive = await this.siteService.hasActiveBookingsForService(
+            siteId,
+            service.id,
           );
+          if (hasActive) {
+            throw new BadRequestException(
+              `Cannot delete service "${service.name}" because it has upcoming confirmed bookings.`,
+            );
+          }
         }
+        await serviceRepo.remove(servicesToRemove);
       }
-      await this.resourceRepository.remove(resourcesToRemove);
-    }
-    site.bookingResources = [...resourcesToKeep, ...resourcesToAdd];
+      site.bookingServices = [...servicesToKeep, ...servicesToAdd];
 
-    await this.siteRepository.save(site);
+      // 4. Sync Resources (Smart Upsert)
+      const existingResources = site.bookingResources || [];
+      const newResourceNames = dto.resources || [];
+      const resourcesToRemove = existingResources.filter(
+        (r) => !newResourceNames.includes(r.name),
+      );
+      const resourcesToKeep = existingResources.filter((r) =>
+        newResourceNames.includes(r.name),
+      );
+      const resourceNamesToKeep = resourcesToKeep.map((r) => r.name);
+      const resourcesToAdd = newResourceNames
+        .filter((name) => !resourceNamesToKeep.includes(name))
+        .map((name) => resourceRepo.create({ siteId, name }));
+
+      if (resourcesToRemove.length > 0) {
+        for (const resource of resourcesToRemove) {
+          const hasActive = await this.siteService.hasActiveBookingsForResource(
+            siteId,
+            resource.id,
+          );
+          if (hasActive) {
+            throw new BadRequestException(
+              `Cannot delete staff/resource "${resource.name}" because it has upcoming confirmed bookings.`,
+            );
+          }
+        }
+        await resourceRepo.remove(resourcesToRemove);
+      }
+      site.bookingResources = [...resourcesToKeep, ...resourcesToAdd];
+
+      await siteRepo.save(site);
+    });
 
     return this.getBookingConfig(siteId, user);
   }
@@ -230,18 +240,7 @@ export class AdminBookingService {
 
   async createBooking(
     siteId: string,
-    body: {
-      staffId?: string;
-      serviceId?: string;
-      startAt?: string;
-      endAt?: string;
-      timezone?: string;
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      notes?: string;
-      sessionId: string;
-    },
+    body: CreateAdminBookingDto,
     user: JwtUser,
   ) {
     await this.siteService.assertSiteAccess(siteId, user);
@@ -250,6 +249,8 @@ export class AdminBookingService {
       siteId,
       resourceId: body.staffId,
       serviceId: body.serviceId,
+      serviceIds: body.serviceIds,
+      slots: body.slots,
       startAt: body.startAt,
       endAt: body.endAt,
       timezone: body.timezone || 'UTC',
@@ -268,14 +269,14 @@ export class AdminBookingService {
   async updateBookingStatus(
     siteId: string,
     bookingId: string,
-    status: string,
+    status: BookingStatus,
     user: JwtUser,
   ) {
     await this.siteService.assertSiteAccess(siteId, user);
     return this.coreBookingService.updateBookingStatus(
       siteId,
       bookingId,
-      status as BookingStatus,
+      status,
     );
   }
 
