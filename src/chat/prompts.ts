@@ -10,7 +10,7 @@ Analyze the message enclosed in <user_input> tags.
     ? `
 - Use 'book_appointment' if the user explicitly wants to book, make a reservation, or schedule a service (e.g., "tôi muốn đặt lịch", "book appointment", "đặt lịch gội đầu", "book a haircut", "hẹn lịch", "lên lịch").
 - Use 'check_booking' if the user wants to check the status or details of their existing appointment.
-- Use 'cancel_booking' if the user wants to cancel or delete an appointment.`
+- Use 'cancel_booking' if the user wants to cancel, drop, remove, or delete an appointment (e.g., "cancel booking", "I want to drop a booking", "hủy lịch", "không muốn đi nữa", "bỏ hẹn").`
     : ''
 }
 
@@ -37,6 +37,7 @@ export interface CancelPrompts {
   cancelFail: string;
   alreadyCancelled: string;
   notFound: string;
+  abortConfirmed: string;
 }
 
 export const getCancelPrompts = (isVietnamese: boolean): CancelPrompts => ({
@@ -75,4 +76,30 @@ export const getCancelPrompts = (isVietnamese: boolean): CancelPrompts => ({
   notFound: isVietnamese
     ? 'Không tìm thấy lịch đặt với mã này. Vui lòng kiểm tra lại.'
     : 'No booking found with this code. Please check and try again.',
+
+  abortConfirmed: isVietnamese
+    ? 'Yêu cầu hủy lịch đã được hủy bỏ. Lịch đặt của bạn vẫn giữ nguyên.'
+    : 'Cancellation request aborted. Your booking is kept.',
 });
+
+export type CancelFlowAction =
+  'PROVIDE_INFO' | 'ABORT_CANCELLATION' | 'SWITCH_TOPIC';
+
+export const getCancelFlowClassifierPrompt = (step: CancelStep): string => {
+  const stepDesc =
+    step === 'ask_code'
+      ? 'waiting for the user to provide a booking code'
+      : step === 'verify_phone'
+        ? 'waiting for the user to provide their phone number for identity verification'
+        : 'waiting for the user to confirm or cancel their booking';
+
+  return `You are analyzing a user message during a booking cancellation flow.
+The bot is currently ${stepDesc}.
+
+Classify the user's intent as exactly one of:
+- "PROVIDE_INFO": The user is providing the requested information (booking code, phone number, confirmation, digits, etc.).
+- "ABORT_CANCELLATION": The user explicitly wants to stop the cancellation process (e.g., "nevermind", "thôi không hủy nữa", "keep my booking", "đổi ý rồi", "bỏ qua", "stop", "cancel this", "giữ lịch giùm tôi").
+- "SWITCH_TOPIC": The user is asking a completely different question unrelated to the cancellation (e.g., asking about business hours, services, pricing, greeting, etc.).
+
+Respond with ONLY one of: PROVIDE_INFO, ABORT_CANCELLATION, SWITCH_TOPIC`;
+};

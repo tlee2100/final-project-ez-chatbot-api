@@ -13,9 +13,11 @@ import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
 import {
+  CancelFlowAction,
   CancelPrompts,
   CancelState,
   CancelStep,
+  getCancelFlowClassifierPrompt,
   getCancelPrompts,
   getIntentClassifierPrompt,
 } from './prompts';
@@ -74,6 +76,7 @@ type IntentType =
   | 'booking_slot_selected'
   | 'check_booking'
   | 'cancel_booking'
+  | 'abort_cancel_flow'
   | null;
 
 /**
@@ -141,6 +144,14 @@ const AgentState = Annotation.Root({
   cancelState: Annotation<CancelState>({
     reducer: (_, y) => y,
     default: () => ({ step: null, bookingCode: null, phoneVerified: false }),
+  }),
+  pendingCancelFlowAction: Annotation<CancelFlowAction | null>({
+    reducer: (_, y) => y,
+    default: () => null,
+  }),
+  switchTopicAfterAbort: Annotation<boolean>({
+    reducer: (_, y) => y,
+    default: () => false,
   }),
 });
 
@@ -706,6 +717,13 @@ export class GraphService {
         return JSON.stringify(message.content);
       };
 
+      const getLatestUserText = (state: typeof AgentState.State): string => {
+        const msg = [...state.messages]
+          .reverse()
+          .find((m) => m.constructor?.name?.includes('HumanMessage'));
+        return msg ? messageText(msg) : '';
+      };
+
       const activeConversationBookingCode = async (
         state: typeof AgentState.State,
       ) => {
@@ -729,7 +747,7 @@ export class GraphService {
       };
 
       const isCancelBookingPhrase = (text: string) =>
-        /(?:hủy|cancel|không\s+(?:muốn\s+)?(?:đi|đến|làm|tới)|không\s+(?:đi|đến|tới)\s+được|bỏ\s+lịch|bỏ\s+hẹn|ngưng|dừng)/i.test(
+        /(?:hủy|cancel|drop\s+(?:a\s+|the\s+|my\s+)?(?:booking|appointment)|revoke|withdraw|không\s+(?:muốn\s+)?(?:đi|đến|làm|tới)|không\s+(?:đi|đến|tới)\s+được|bỏ\s+lịch|bỏ\s+hẹn|ngưng|dừng)/i.test(
           text,
         );
 
@@ -825,9 +843,61 @@ export class GraphService {
           state.cancelState?.step !== null &&
           state.cancelState?.step !== undefined
         ) {
-          this.logger.log(
-            `Cancel flow in progress (step: ${state.cancelState.step}), overriding intent to cancel_booking`,
-          );
+          const userText = getLatestUserText(state);
+          const currentStep = state.cancelState.step;
+
+          // Fast-path: /keep-booking command is always deterministic — no LLM cost
+          if (/^\/keep-booking\b/i.test(userText.trim())) {
+            return {
+              intent: 'abort_cancel_flow' as IntentType,
+              pendingCancelFlowAction: 'ABORT_CANCELLATION' as CancelFlowAction,
+            };
+          }
+
+          // Fast-path: /confirm-cancel-booking command is always deterministic — no LLM cost
+          if (/^\/confirm-cancel-booking\b/i.test(userText.trim())) {
+            return {
+              intent: 'cancel_booking' as IntentType,
+            };
+          }
+
+          // LLM classification with cancel flow context
+          const cancelFlowSchema = z.object({
+            action: z
+              .enum(['PROVIDE_INFO', 'ABORT_CANCELLATION', 'SWITCH_TOPIC'])
+              .catch('PROVIDE_INFO'),
+          });
+
+          const cancelFlowModel = this.aiService
+            .buildModel(0, false)
+            .withStructuredOutput(cancelFlowSchema);
+
+          try {
+            const cancelFlowResponse = await cancelFlowModel.invoke([
+              new SystemMessage(getCancelFlowClassifierPrompt(currentStep)),
+              new HumanMessage(`<user_input>\n${userText}\n</user_input>`),
+            ]);
+
+            this.logger.log(
+              `[CancelFlowClassifier] step=${currentStep}, action=${cancelFlowResponse.action}`,
+            );
+
+            if (
+              cancelFlowResponse.action === 'ABORT_CANCELLATION' ||
+              cancelFlowResponse.action === 'SWITCH_TOPIC'
+            ) {
+              return {
+                intent: 'abort_cancel_flow' as IntentType,
+                pendingCancelFlowAction:
+                  cancelFlowResponse.action as CancelFlowAction,
+              };
+            }
+          } catch (err: unknown) {
+            this.logger.warn(
+              `[CancelFlowClassifier] Classification failed, falling back to cancel_booking: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+
           return { intent: 'cancel_booking' as IntentType };
         }
 
@@ -1015,17 +1085,13 @@ export class GraphService {
         timeSlot: formatInTimeZone(booking.startAt, booking.timezone, 'HH:mm'),
       });
 
-      const getLatestUserText = (state: typeof AgentState.State): string => {
-        const msg = [...state.messages]
-          .reverse()
-          .find((m) => m.constructor?.name?.includes('HumanMessage'));
-        return msg ? messageText(msg) : '';
-      };
+      const ABORT_CHIP_VI = '\n\n<chips>/keep-booking:Không hủy nữa</chips>';
+      const ABORT_CHIP_EN = '\n\n<chips>/keep-booking:Keep my booking</chips>';
 
       const handleAskCode = async (
         state: typeof AgentState.State,
         userText: string,
-        _isVietnamese: boolean,
+        isVietnamese: boolean,
         prompts: CancelPrompts,
       ) => {
         const bookingCode =
@@ -1077,7 +1143,7 @@ export class GraphService {
           },
           messages: [
             new AIMessage(
-              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
             ),
           ],
         };
@@ -1086,7 +1152,7 @@ export class GraphService {
       const handleVerifyPhone = async (
         state: typeof AgentState.State,
         userText: string,
-        _isVietnamese: boolean,
+        isVietnamese: boolean,
         prompts: CancelPrompts,
       ) => {
         const { bookingCode } = state.cancelState;
@@ -1124,7 +1190,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
               ),
             ],
           };
@@ -1138,7 +1204,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]`,
+                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
               ),
             ],
           };
@@ -1181,7 +1247,9 @@ export class GraphService {
         }
 
         if (/^\/confirm-cancel-booking\b/i.test(userText)) {
-          if (!bookingCode) {
+          const directCode = extractBookingCode(userText);
+          const targetCode = bookingCode ?? directCode;
+          if (!targetCode) {
             return {
               cancelState: {
                 step: null,
@@ -1193,11 +1261,11 @@ export class GraphService {
           }
 
           this.logger.log(
-            `[cancelBookingNode] Executing cancelBooking for code: ${bookingCode}`,
+            `[cancelBookingNode] Executing cancelBooking for code: ${targetCode}`,
           );
           const result = await currentProvider.execute({
             name: 'cancelBooking',
-            arguments: { bookingCode },
+            arguments: { bookingCode: targetCode },
           });
 
           const resultOutput = result.output;
@@ -1212,9 +1280,9 @@ export class GraphService {
             };
           }
 
-          cancelledBookingCode = bookingCode;
+          cancelledBookingCode = targetCode;
           const booking = await this.bookingRepo.findOne({
-            where: { siteId: state.siteId, code: bookingCode },
+            where: { siteId: state.siteId, code: targetCode },
             relations: { service: true, resource: true },
           });
           if (booking) {
@@ -1281,6 +1349,45 @@ export class GraphService {
           default:
             return handleAskCode(state, userText, isVietnamese, prompts);
         }
+      };
+
+      const abortCancelFlowNode = (state: typeof AgentState.State) => {
+        const convertedMessages = state.messages.map((m) => ({
+          role: m.constructor?.name?.includes('HumanMessage')
+            ? 'user'
+            : 'assistant',
+          content: messageText(m),
+        }));
+        const detectedLang = detectConversationLanguage(
+          convertedMessages,
+          state.siteContext,
+          true,
+        );
+        const isVietnamese = detectedLang === 'vi';
+        const prompts = getCancelPrompts(isVietnamese);
+        const action = state.pendingCancelFlowAction;
+        const resetState: CancelState = {
+          step: null,
+          bookingCode: null,
+          phoneVerified: false,
+        };
+
+        // Q2 Option A: SWITCH_TOPIC → reset + forward to original intent node
+        if (action === 'SWITCH_TOPIC') {
+          return {
+            cancelState: resetState,
+            pendingCancelFlowAction: null as CancelFlowAction | null,
+            switchTopicAfterAbort: true,
+          };
+        }
+
+        // Explicit ABORT at any cancel step → show "booking kept" response
+        return {
+          cancelState: resetState,
+          pendingCancelFlowAction: null as CancelFlowAction | null,
+          switchTopicAfterAbort: false,
+          messages: [new AIMessage(prompts.keepConfirmed)],
+        };
       };
 
       const bookingSlotSelectedNode = (state: typeof AgentState.State) => {
@@ -1530,6 +1637,7 @@ export class GraphService {
         .addNode('parse_tools', parseTools)
         .addNode('booking_slot_selected', bookingSlotSelectedNode)
         .addNode('cancel_booking', cancelBookingNode)
+        .addNode('abort_cancel_flow', abortCancelFlowNode)
         .addNode('request_handoff', requestHandoff)
         .addNode('summarize_memory', summarizeMemory);
 
@@ -1546,7 +1654,18 @@ export class GraphService {
           booking_slot_selected: 'booking_slot_selected',
           check_booking: 'model_node',
           cancel_booking: 'cancel_booking',
+          abort_cancel_flow: 'abort_cancel_flow',
           request_human: 'request_handoff',
+        },
+      );
+
+      workflow.addConditionalEdges(
+        'abort_cancel_flow',
+        (state) =>
+          state.switchTopicAfterAbort ? 'classify_intent' : 'summarize_memory',
+        {
+          classify_intent: 'classify_intent',
+          summarize_memory: 'summarize_memory',
         },
       );
 
@@ -1685,6 +1804,22 @@ export class GraphService {
                   ? 'Lịch hẹn của bạn đã được xác nhận!'
                   : 'Your appointment is confirmed!'
                 : sanitizedText;
+
+          const isNonModelIntent =
+            finalState.intent === 'cancel_booking' ||
+            finalState.intent === 'abort_cancel_flow' ||
+            finalState.intent === 'booking_slot_selected' ||
+            finalState.intent === 'request_human';
+
+          if (res && isNonModelIntent) {
+            res.write(finalResponseText);
+          }
+
+          if (isNonModelIntent) {
+            server
+              .to(`conversation-${conversationId}`)
+              .emit('aiChunk', { token: finalResponseText, conversationId });
+          }
           const bookingMetadata = createdBookingCode
             ? bookingCodeText(createdBookingCode, isVietnamese)
             : cancelledBookingCode

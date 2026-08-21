@@ -19,7 +19,7 @@ import {
   sanitizeBookingChips,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
-import { getCancelPrompts } from './prompts';
+import { getCancelFlowClassifierPrompt, getCancelPrompts } from './prompts';
 
 describe('booking cancellation code resolution', () => {
   it('extracts codes from widget commands and visitor messages', () => {
@@ -379,5 +379,37 @@ describe('booking chat flow guards', () => {
     expect(sanitizedEnStaff).toContain(
       '<chips>Nghi|Hiếu|No Preference</chips>',
     );
+  });
+});
+
+describe('cancel flow classifier prompts', () => {
+  it('generates proper prompts for ask_code, verify_phone, and await_confirm steps', () => {
+    const askCodePrompt = getCancelFlowClassifierPrompt('ask_code');
+    expect(askCodePrompt).toContain(
+      'waiting for the user to provide a booking code',
+    );
+    expect(askCodePrompt).toContain('PROVIDE_INFO');
+    expect(askCodePrompt).toContain('ABORT_CANCELLATION');
+    expect(askCodePrompt).toContain('SWITCH_TOPIC');
+
+    const verifyPhonePrompt = getCancelFlowClassifierPrompt('verify_phone');
+    expect(verifyPhonePrompt).toContain(
+      'waiting for the user to provide their phone number',
+    );
+
+    const confirmPrompt = getCancelFlowClassifierPrompt('await_confirm');
+    expect(confirmPrompt).toContain(
+      'waiting for the user to confirm or cancel',
+    );
+  });
+
+  it('provides abortConfirmed prompt in both Vietnamese and English', () => {
+    const viPrompts = getCancelPrompts(true);
+    expect(viPrompts.abortConfirmed).toContain(
+      'Yêu cầu hủy lịch đã được hủy bỏ',
+    );
+
+    const enPrompts = getCancelPrompts(false);
+    expect(enPrompts.abortConfirmed).toContain('Cancellation request aborted');
   });
 });
