@@ -86,8 +86,20 @@ export class Site {
   documentIds?: string[];
 
   @AutoMap()
+  @Column({ name: 'enabled', type: 'boolean', default: true })
+  enabled: boolean;
+
+  @AutoMap()
   @Column({ name: 'isAiActive', type: 'boolean', default: true })
   isAiActive: boolean;
+
+  @AutoMap()
+  @Column({ name: 'humanHandoff', type: 'boolean', default: false })
+  humanHandoff: boolean;
+
+  @AutoMap()
+  @Column({ name: 'emailTranscript', type: 'boolean', default: false })
+  emailTranscript: boolean;
 
   @AutoMap(() => [String])
   @Column({ type: 'text', array: true, default: '{}' })

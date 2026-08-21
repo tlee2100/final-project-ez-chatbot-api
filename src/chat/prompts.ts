@@ -1,9 +1,14 @@
 export const getIntentClassifierPrompt = (
   bookingEnabled: boolean,
+  humanHandoffEnabled: boolean,
 ): string => `You are an intent classifier for a customer support chatbot. Determine the user's intent from the following message.
 Analyze the message enclosed in <user_input> tags.
 
-- Use "request_human" if they ask for an agent, human, support rep, or to talk to someone.
+${
+  humanHandoffEnabled
+    ? `- Use "request_human" if they ask for an agent, human, support rep, or to talk to someone.`
+    : `- If they ask for an agent, human, support rep, or to talk to someone, politely inform them that human agents are currently unavailable, and classify the intent as "question" or "small_talk". DO NOT use "request_human".`
+}
 - Use "question" if they ask about the business, products, pricing, mention a service name casually without an explicit booking request (e.g., just saying "gội đầu", "cắt tóc", "haircut"), or need general information.
 - Use "small_talk" if they are just saying hello, thanks, goodbye, or casual chit-chat.${
   bookingEnabled

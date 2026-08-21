@@ -26,11 +26,35 @@ export class UpdateSiteDto {
 
   @ApiPropertyOptional({
     example: true,
+    description: 'Whether the site is enabled for embedding',
+  })
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
     description: 'Whether the AI is active for this site',
   })
   @IsOptional()
   @IsBoolean()
   isAiActive?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Whether human handoff is enabled',
+  })
+  @IsOptional()
+  @IsBoolean()
+  humanHandoff?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Whether email transcript is enabled',
+  })
+  @IsOptional()
+  @IsBoolean()
+  emailTranscript?: boolean;
 
   @ApiProperty({
     description: 'Allowed domains for the chat widget',

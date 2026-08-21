@@ -77,9 +77,24 @@ export class SiteDto {
 
   @ApiProperty({
     example: true,
-    description: 'Whether the site is enabled (alias for isAiActive)',
+    description: 'Whether the site is active and enabled for widget embedding',
   })
+  @AutoMap()
   enabled: boolean;
+
+  @ApiProperty({
+    example: false,
+    description: 'Whether human handoff is enabled',
+  })
+  @AutoMap()
+  humanHandoff: boolean;
+
+  @ApiProperty({
+    example: false,
+    description: 'Whether email transcript is enabled',
+  })
+  @AutoMap()
+  emailTranscript: boolean;
 
   @ApiProperty({
     example: '2026-08-13T00:00:00.000Z',

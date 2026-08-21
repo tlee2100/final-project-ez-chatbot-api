@@ -328,7 +328,6 @@ export class SiteService {
     }
 
     // Broadcast updated settings to active conversations
-
     const conversations = await this.siteRepository.manager
       .createQueryBuilder()
       .select('conversation.id', 'id')
@@ -336,6 +335,24 @@ export class SiteService {
       .where('conversation.siteId = :siteId', { siteId: id })
       .andWhere("conversation.status != 'CLOSED'")
       .getRawMany<{ id: string }>();
+
+    if (dto.isAiActive === false) {
+      await this.siteRepository.manager.query(
+        `UPDATE conversations SET "isAiActive" = false, "handlingStatus" = 'WAITING_FOR_AGENT' WHERE "siteId" = $1 AND status != 'CLOSED' AND "handlingStatus" = 'AI_HANDLING'`,
+        [id],
+      );
+      if (conversations.length > 0) {
+        for (const conv of conversations) {
+          this.chatGateway.server
+            .to(`conversation-${conv.id}`)
+            .emit('handlingStatusUpdated', {
+              conversationId: conv.id,
+              handlingStatus: 'WAITING_FOR_AGENT',
+            });
+        }
+      }
+    }
+
     if (conversations.length > 0) {
       const conversationIds = conversations.map((c) => c.id);
       this.chatGateway.broadcastSiteSettingsUpdated(
@@ -343,6 +360,9 @@ export class SiteService {
         updatedSite,
       );
     }
+    this.chatGateway.server
+      .to(`site-${id}`)
+      .emit('siteSettingsUpdated', updatedSite);
 
     return updatedSite;
   }

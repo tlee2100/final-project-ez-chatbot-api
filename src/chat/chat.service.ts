@@ -451,20 +451,29 @@ export class ChatService {
         ...messageEvent,
       });
 
-      // Automatically trigger AI if the visitor sent the message and AI is active
+      // Automatically trigger AI if the visitor sent the message
       if (payload.senderType === SenderType.VISITOR) {
-        // Run in background so we don't block the WebSocket response
-        this.graphService
-          .handleVisitorMessage(
-            payload.conversationId,
-            conversation.siteId,
-            undefined,
-            async (text: string) => {
-              const fullSite = await this.siteRepository.findOne({
-                where: { id: conversation.siteId },
-                relations: { agents: true },
-              });
-              if (fullSite) {
+        // Fetch full site to check AI status and agents
+        const fullSite = await this.siteRepository.findOne({
+          where: { id: conversation.siteId },
+          relations: { agents: true },
+        });
+
+        if (
+          fullSite &&
+          !fullSite.isAiActive &&
+          conversation.handlingStatus === HandlingStatus.AI_HANDLING
+        ) {
+          // If AI is disabled but conversation thinks it's AI_HANDLING, fix it so frontend stops typing
+          await this.escalateToAgent(payload.conversationId);
+        } else if (fullSite && fullSite.isAiActive) {
+          // Run in background so we don't block the WebSocket response
+          this.graphService
+            .handleVisitorMessage(
+              payload.conversationId,
+              conversation.siteId,
+              undefined,
+              async (text: string) => {
                 const userIds = [
                   fullSite.ownerId,
                   ...fullSite.agents.map((a) => a.id),
@@ -475,14 +484,14 @@ export class ChatService {
                   payload.conversationId,
                   text,
                 );
-              }
-            },
-          )
-          .catch((err: unknown) =>
-            this.logger.error(
-              `AI stream error: ${err instanceof Error ? err.message : String(err)}`,
-            ),
-          );
+              },
+            )
+            .catch((err: unknown) =>
+              this.logger.error(
+                `AI stream error: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+        }
       }
     } catch (error: unknown) {
       const message =
@@ -540,9 +549,9 @@ export class ChatService {
     if (!site) {
       throw new NotFoundException(`Site ${dto.siteId} not found`);
     }
-    if (!site.isAiActive) {
+    if (!site.enabled) {
       throw new ForbiddenException(
-        'Chatbot is currently disabled for this site',
+        'Chat widget is currently disabled for this site',
       );
     }
 
@@ -553,8 +562,11 @@ export class ChatService {
           visitorName: dto.visitorName,
           visitorEmail: dto.visitorEmail,
           status: ConversationStatus.OPEN,
-          handlingStatus: HandlingStatus.AI_HANDLING,
+          handlingStatus: site.isAiActive
+            ? HandlingStatus.AI_HANDLING
+            : HandlingStatus.WAITING_FOR_AGENT,
           lastActivityAt: new Date(),
+          isAiActive: site.isAiActive,
         });
         const savedConversation = await transactionalEntityManager.save(
           Conversation,
@@ -726,6 +738,14 @@ export class ChatService {
 
     if (!conversation) {
       throw new NotFoundException(`Conversation ${conversationId} not found`);
+    }
+
+    if (
+      conversation.site &&
+      !conversation.site.humanHandoff &&
+      conversation.site.isAiActive
+    ) {
+      throw new ForbiddenException('Human handoff is disabled for this site');
     }
 
     if (conversation.handlingStatus === HandlingStatus.AGENT_HANDLING) {
@@ -1197,6 +1217,7 @@ export class ChatService {
       id,
       dto.status,
       dto.reason || ClosedReason.AGENT,
+      dto.transcriptEmail,
     );
   }
 
@@ -1208,6 +1229,7 @@ export class ChatService {
       id,
       dto.status,
       dto.reason || ClosedReason.VISITOR,
+      dto.transcriptEmail,
     );
   }
 
@@ -1246,9 +1268,14 @@ export class ChatService {
     id: string,
     status: ConversationStatus,
     reason?: ClosedReason,
+    transcriptEmail?: string,
   ): Promise<Conversation> {
     if (status === ConversationStatus.CLOSED) {
-      const closedConv = await this.closeConversation(id, reason);
+      const closedConv = await this.closeConversation(
+        id,
+        reason,
+        transcriptEmail,
+      );
       this.chatGateway.emitConversationStatusChanged(id, closedConv.status);
       return closedConv;
     }
@@ -1416,6 +1443,7 @@ export class ChatService {
   async closeConversation(
     id: string,
     reason: ClosedReason = ClosedReason.VISITOR,
+    transcriptEmail?: string,
   ): Promise<Conversation> {
     if (id.startsWith('admin-test-')) {
       this.chatGateway.notifyConversationClosed(id, 'admin-test');
@@ -1458,12 +1486,25 @@ export class ChatService {
       }
     }
 
-    // Only send summary & transcript emails if the conversation was closed normally (not just cleared/reset by visitor)
+    // Run entirely in the background — do NOT await so the HTTP response
+    // is returned immediately (fixes the long spinner on "End Without Email").
     if (
       reason !== ClosedReason.CLEARED &&
       conversation.site &&
       conversation.site.owner
     ) {
+      void this.sendCloseEmails(conversation, transcriptEmail);
+    }
+
+    return this.getConversationById(id);
+  }
+
+  /** Background job: generate AI summary then enqueue summary + transcript emails. */
+  private async sendCloseEmails(
+    conversation: Conversation,
+    transcriptEmail?: string,
+  ): Promise<void> {
+    try {
       const messageCount = await this.chatMessageRepository.count({
         where: { conversationId: conversation.id },
       });
@@ -1522,98 +1563,110 @@ export class ChatService {
         summaryText: finalSummary || 'No summary available.',
       });
 
-      let targetEmail = conversation.visitorEmail;
-      let targetName = conversation.visitorName;
+      // Only send chat transcript if emailTranscript is enabled on the site OR a transcriptEmail was explicitly requested
+      if (
+        conversation.site &&
+        (conversation.site.emailTranscript || transcriptEmail)
+      ) {
+        let targetEmail = transcriptEmail || conversation.visitorEmail;
+        let targetName = conversation.visitorName;
 
-      if (messageCount > 0) {
-        const rawMessages = await this.chatMessageRepository.find({
-          where: { conversationId: conversation.id },
-          order: { createdAt: 'ASC' },
-          relations: { agent: true },
-        });
-
-        const fullChatContent = rawMessages.map((m) => m.content).join('\n');
-        const bookingCode = latestActiveBookingCode(fullChatContent);
-
-        if (bookingCode) {
-          const booking = await this.bookingRepository.findOne({
-            where: { code: bookingCode },
+        if (messageCount > 0) {
+          const rawMessages = await this.chatMessageRepository.find({
+            where: { conversationId: conversation.id },
+            order: { createdAt: 'ASC' },
+            relations: { agent: true },
           });
-          if (booking && booking.customerEmail) {
-            targetEmail = booking.customerEmail;
-            targetName = booking.customerName || targetName;
-          }
-        }
 
-        if (targetEmail) {
-          const transcriptMessages = rawMessages
-            .filter((m) => m.senderType !== SenderType.SYSTEM)
-            .map((m) => {
-              let cleanContent = (m.content || '')
-                .replace(/<booking-code>.*?<\/booking-code>/gs, '')
-                .replace(/<booking-cancelled>.*?<\/booking-cancelled>/gs, '')
-                .replace(/<chips>.*?<\/chips>/gs, '')
-                .trim();
+          const fullChatContent = rawMessages.map((m) => m.content).join('\n');
+          const bookingCode = latestActiveBookingCode(fullChatContent);
 
-              const slashCmdMatch = cleanContent.match(
-                /^\/([\w-]+)(?:\s+((?:(?!\s*::).)*))?(?:\s*::\s*(.*))?$/s,
-              );
-              if (slashCmdMatch) {
-                const command = slashCmdMatch[1];
-                const payload = slashCmdMatch[2];
-                const textAfter = slashCmdMatch[3];
-
-                if (command === 'confirm-booking' && payload) {
-                  try {
-                    const data = JSON.parse(payload) as Record<string, unknown>;
-                    let formatted = `**[Booking Confirmed]**`;
-                    if (typeof data.date === 'string')
-                      formatted += `\n- Date: ${data.date}`;
-                    if (typeof data.timeSlot === 'string')
-                      formatted += `\n- Time: ${data.timeSlot}`;
-                    if (typeof data.customerName === 'string')
-                      formatted += `\n- Name: ${data.customerName}`;
-                    if (typeof data.phone === 'string')
-                      formatted += `\n- Phone: ${data.phone}`;
-                    cleanContent = formatted;
-                  } catch {
-                    cleanContent = `**[Booking Confirmed]**`;
-                  }
-                } else if (textAfter) {
-                  cleanContent = textAfter;
-                } else {
-                  cleanContent = '';
-                }
-              }
-
-              return {
-                displayName:
-                  m.senderType === SenderType.VISITOR
-                    ? 'You'
-                    : m.senderType === SenderType.AI
-                      ? 'Bot'
-                      : m.agent?.name || 'Agent',
-                content: cleanContent,
-                timestamp: m.createdAt.toISOString(),
-              };
-            })
-            .filter((m) => m.content.length > 0);
-
-          if (transcriptMessages.length > 0) {
-            void this.emailQueueService.enqueueChatTranscriptEmail({
-              to: targetEmail,
-              visitorName: targetName || 'Visitor',
-              siteName: conversation.site.name || 'Support Chat',
-              messages: transcriptMessages,
-              startedAt: conversation.createdAt.toISOString(),
-              closedAt: new Date().toISOString(),
+          if (bookingCode) {
+            const booking = await this.bookingRepository.findOne({
+              where: { code: bookingCode },
             });
+            if (booking && booking.customerEmail) {
+              targetEmail = booking.customerEmail;
+              targetName = booking.customerName || targetName;
+            }
+          }
+
+          if (targetEmail) {
+            const transcriptMessages = rawMessages
+              .filter((m) => m.senderType !== SenderType.SYSTEM)
+              .map((m) => {
+                let cleanContent = (m.content || '')
+                  .replace(/<booking-code>.*?<\/booking-code>/gs, '')
+                  .replace(/<booking-cancelled>.*?<\/booking-cancelled>/gs, '')
+                  .replace(/<chips>.*?<\/chips>/gs, '')
+                  .trim();
+
+                const slashCmdMatch = cleanContent.match(
+                  /^\/([\\w-]+)(?:\\s+((?:(?!\\s*::).)*))?(?:\\s*::\\s*(.*))?$/s,
+                );
+                if (slashCmdMatch) {
+                  const command = slashCmdMatch[1];
+                  const payload = slashCmdMatch[2];
+                  const textAfter = slashCmdMatch[3];
+
+                  if (command === 'confirm-booking' && payload) {
+                    try {
+                      const data = JSON.parse(payload) as Record<
+                        string,
+                        unknown
+                      >;
+                      let formatted = `**[Booking Confirmed]**`;
+                      if (typeof data.date === 'string')
+                        formatted += `\n- Date: ${data.date}`;
+                      if (typeof data.timeSlot === 'string')
+                        formatted += `\n- Time: ${data.timeSlot}`;
+                      if (typeof data.customerName === 'string')
+                        formatted += `\n- Name: ${data.customerName}`;
+                      if (typeof data.phone === 'string')
+                        formatted += `\n- Phone: ${data.phone}`;
+                      cleanContent = formatted;
+                    } catch {
+                      cleanContent = `**[Booking Confirmed]**`;
+                    }
+                  } else if (textAfter) {
+                    cleanContent = textAfter;
+                  } else {
+                    cleanContent = '';
+                  }
+                }
+
+                return {
+                  displayName:
+                    m.senderType === SenderType.VISITOR
+                      ? 'You'
+                      : m.senderType === SenderType.AI
+                        ? 'Bot'
+                        : m.agent?.name || 'Agent',
+                  content: cleanContent,
+                  timestamp: m.createdAt.toISOString(),
+                };
+              })
+              .filter((m) => m.content.length > 0);
+
+            if (transcriptMessages.length > 0) {
+              void this.emailQueueService.enqueueChatTranscriptEmail({
+                to: targetEmail,
+                visitorName: targetName || 'Visitor',
+                siteName: conversation.site.name || 'Support Chat',
+                messages: transcriptMessages,
+                startedAt: conversation.createdAt.toISOString(),
+                closedAt: new Date().toISOString(),
+              });
+            }
           }
         }
       }
+    } catch (err) {
+      this.logger.error(
+        'sendCloseEmails failed: ' +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
-
-    return this.getConversationById(id);
   }
 
   async deleteConversation(id: string): Promise<Conversation> {

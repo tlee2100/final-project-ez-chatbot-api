@@ -43,12 +43,39 @@ export class CreateSiteDto {
 
   @ApiPropertyOptional({
     example: true,
+    description: 'Whether the site is enabled for embedding',
+    default: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
     description: 'Whether the AI is active for this site',
     default: true,
   })
   @IsOptional()
   @IsBoolean()
   isAiActive?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Whether human handoff is enabled',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  humanHandoff?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Whether email transcript is enabled',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  emailTranscript?: boolean;
 
   @ApiPropertyOptional({
     type: [String],
