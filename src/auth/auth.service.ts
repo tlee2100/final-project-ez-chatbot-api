@@ -66,11 +66,30 @@ export class AuthService {
       const payload = this.jwtService.verify<{ sub: string }>(token);
       const user = await this.userService.findById(payload.sub);
 
-      if (!user || user.refreshToken !== token) {
+      if (!user) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
+
+      const now = new Date();
+      const isCurrentToken = user.refreshToken === token;
+      const isGracePeriodToken =
+        user.previousRefreshToken === token &&
+        user.previousRefreshTokenExpiresAt !== null &&
+        new Date(user.previousRefreshTokenExpiresAt) > now;
+
+      if (!isCurrentToken && !isGracePeriodToken) {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
       const accessToken = this.generateAccessToken(user);
+
+      if (isGracePeriodToken && user.refreshToken) {
+        return {
+          accessToken,
+          refreshToken: user.refreshToken,
+        };
+      }
+
       const newRefreshToken = this.jwtService.sign(
         { sub: user.id },
         {
@@ -81,6 +100,8 @@ export class AuthService {
 
       await this.userService.updateInternal(user.id, {
         refreshToken: newRefreshToken,
+        previousRefreshToken: token,
+        previousRefreshTokenExpiresAt: new Date(Date.now() + 30 * 1000),
       });
 
       return {
@@ -93,7 +114,11 @@ export class AuthService {
   }
 
   async logout(userId: string) {
-    await this.userService.updateInternal(userId, { refreshToken: null });
+    await this.userService.updateInternal(userId, {
+      refreshToken: null,
+      previousRefreshToken: null,
+      previousRefreshTokenExpiresAt: null,
+    });
     return { message: 'Logged out successfully' };
   }
 
