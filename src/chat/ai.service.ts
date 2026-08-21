@@ -89,14 +89,18 @@ export class AiService {
    * @param maxTokens    Optional token limit
    */
   buildModelForSite(
-    site: { useCustomOpenAiKey?: boolean; encryptedOpenAiKey?: string | null },
+    site: {
+      useCustomOpenAiKey?: boolean;
+      encryptedOpenAiKey?: string | null;
+      llmModel?: string | null;
+    },
     temperature = 0.7,
     streaming = false,
     maxTokens?: number,
   ): ChatOpenAI {
     let resolvedApiKey = this.apiKey;
     let resolvedBaseURL: string | undefined = this.baseURL;
-    let resolvedModelName: string = this.modelName;
+    let resolvedModelName: string = site.llmModel?.trim() || this.modelName;
 
     if (site.useCustomOpenAiKey && site.encryptedOpenAiKey) {
       try {
@@ -105,6 +109,7 @@ export class AiService {
         resolvedBaseURL =
           process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
         resolvedModelName =
+          site.llmModel?.trim() ||
           process.env.OPENAI_CHAT_MODEL ||
           process.env.OPENAI_MODEL ||
           'gpt-4o-mini';

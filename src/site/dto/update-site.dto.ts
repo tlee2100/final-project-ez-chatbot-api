@@ -88,6 +88,15 @@ export class UpdateSiteDto {
 
   @AutoMap()
   @ApiPropertyOptional({
+    example: 'qwen3.7-flash',
+    description: 'LLM Model for the site or null to use shared model',
+  })
+  @IsOptional()
+  @IsString()
+  llmModel?: string;
+
+  @AutoMap()
+  @ApiPropertyOptional({
     example: 50,
     description: 'Max messages per chat session',
   })
