@@ -89,7 +89,7 @@ export class UpdateSiteDto {
   @AutoMap()
   @ApiPropertyOptional({
     example: 'qwen3.7-flash',
-    description: 'LLM Model for the site',
+    description: 'LLM Model for the site or null to use shared model',
   })
   @IsOptional()
   @IsString()
