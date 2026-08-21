@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { encryptApiKey, decryptApiKey } from '../shared/utils/encryption.util';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { Booking } from '../booking/entities/booking.entity';
 import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
@@ -577,7 +577,7 @@ export class SiteService {
       where: {
         siteId,
         serviceId,
-        status: In([BookingStatus.CONFIRMED]),
+        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
       },
     });
     return count > 0;
@@ -591,7 +591,7 @@ export class SiteService {
       where: {
         siteId,
         resourceId,
-        status: In([BookingStatus.CONFIRMED]),
+        status: Not(In([BookingStatus.COMPLETED, BookingStatus.CANCELLED])),
       },
     });
     return count > 0;

@@ -170,7 +170,7 @@ export class AdminBookingService {
           );
           if (hasActive) {
             throw new BadRequestException(
-              `Cannot delete service "${service.name}" because it has upcoming confirmed bookings.`,
+              `Cannot delete service "${service.name}" because it has active bookings.`,
             );
           }
         }
@@ -200,7 +200,7 @@ export class AdminBookingService {
           );
           if (hasActive) {
             throw new BadRequestException(
-              `Cannot delete staff/resource "${resource.name}" because it has upcoming confirmed bookings.`,
+              `Cannot delete staff "${resource.name}" because they have active bookings.`,
             );
           }
         }
