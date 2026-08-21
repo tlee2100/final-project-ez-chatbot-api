@@ -14,6 +14,9 @@ export interface LLMRequest {
   /** Full conversation history (user/assistant turns) */
   messages: LLMMessage[];
 
+  /** Effective BCP 47 locale selected by the conversation flow */
+  locale?: string;
+
   /** Optional system prompt override. Defaults to SYSTEM_PROMPT env var. */
   systemPrompt?: string;
 

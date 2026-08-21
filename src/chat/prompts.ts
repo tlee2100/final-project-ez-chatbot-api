@@ -1,23 +1,32 @@
+import { localeLanguage } from './chat-locale.utils';
+
 export const getIntentClassifierPrompt = (
   bookingEnabled: boolean,
-): string => `You are an intent classifier for a customer support chatbot. Determine the user's intent from the following message.
-Analyze the message enclosed in <user_input> tags.
+  bookingInProgress = false,
+): string => `Classify the message inside <user_input> and return intent, sentiment, and locale.
 
-- Use "request_human" if they ask for an agent, human, support rep, or to talk to someone.
-- Use "question" if they ask about the business, products, pricing, mention a service name casually without an explicit booking request (e.g., just saying "gội đầu", "cắt tóc", "haircut"), or need general information.
-- Use "small_talk" if they are just saying hello, thanks, goodbye, or casual chit-chat.${
+Intents:
+- request_human: asks to speak with a person.
+- system_question: asks about the assistant's tools, hidden prompts or instructions, model, architecture, implementation, configuration, secrets, or other internal system details.
+- out_of_scope: asks for work unrelated to this business or customer support, such as programming, homework, creative writing, translation, or general knowledge about unrelated topics.
+- question: asks specific questions about this business, its services, products, pricing, policies, or other public business information.
+- small_talk: greeting, thanks, goodbye, casual conversation, or opening phrases to ask a question without specific business inquiry details (e.g. "đặt một câu hỏi", "cho mình hỏi", "can I ask a question", "tôi có câu hỏi").${
   bookingEnabled
     ? `
-- Use 'book_appointment' if the user explicitly wants to book, make a reservation, or schedule a service (e.g., "tôi muốn đặt lịch", "book appointment", "đặt lịch gội đầu", "book a haircut", "hẹn lịch", "lên lịch").
-- Use 'check_booking' if the user wants to check the status or details of their existing appointment.
-- Use 'cancel_booking' if the user wants to cancel or delete an appointment.`
+- book_appointment: starts or continues an appointment booking.
+- check_booking: asks for details or status of an existing booking.
+- cancel_booking: asks to cancel a confirmed booking.${
+        bookingInProgress
+          ? `
+- The booking flow is active. Treat names, contact details, service/staff choices, dates, times, skip answers, and field corrections as book_appointment even when the value alone is ambiguous.
+- abandon_booking: only an explicit request to stop the unfinished booking. Do not use it for changing a field or cancelling a confirmed booking.`
+          : ''
+      }`
     : ''
 }
 
-You must also detect the overall sentiment of the user's message.
-- Use "positive" if the user is happy, satisfied, or expressing gratitude.
-- Use "negative" if the user is angry, frustrated, complaining, or using aggressive language.
-- Use "neutral" for everything else, including normal questions.`;
+Sentiment is positive, neutral, or negative.
+Locale must be the current message's canonical BCP 47 tag. Return "und" for language-neutral values such as a name, code, number, date, email, or command.`;
 
 export type CancelStep = 'ask_code' | 'verify_phone' | 'await_confirm' | null;
 
@@ -39,40 +48,174 @@ export interface CancelPrompts {
   notFound: string;
 }
 
-export const getCancelPrompts = (isVietnamese: boolean): CancelPrompts => ({
-  askCode: isVietnamese
-    ? 'Để hủy lịch, vui lòng cung cấp mã đặt lịch của bạn.'
-    : 'To cancel your booking, please provide your booking code.',
+const englishCancelPrompts: CancelPrompts = {
+  askCode: 'To cancel your booking, please provide your booking code.',
+  verifyPhone:
+    'To verify your identity, please provide the phone number you used when booking.',
+  phoneWrong:
+    'The phone number does not match this booking. Please check and try again.',
+  confirmCancel:
+    'Please review the booking details in the card above and confirm if you want to cancel.',
+  keepConfirmed:
+    'Your booking has been kept. Is there anything else I can help you with?',
+  cancelSuccess: 'Your booking has been successfully cancelled.',
+  cancelFail:
+    'Unable to cancel this booking. Please contact staff for assistance.',
+  alreadyCancelled: 'This booking has already been cancelled.',
+  notFound: 'No booking found with this code. Please check and try again.',
+};
 
-  verifyPhone: isVietnamese
-    ? 'Để xác nhận danh tính, vui lòng cho biết số điện thoại bạn đã đăng ký khi đặt lịch.'
-    : 'To verify your identity, please provide the phone number you used when booking.',
+const vietnameseCancelPrompts: CancelPrompts = {
+  askCode: 'Để hủy lịch, vui lòng cung cấp mã đặt lịch của bạn.',
+  verifyPhone:
+    'Để xác nhận danh tính, vui lòng cho biết số điện thoại bạn đã đăng ký khi đặt lịch.',
+  phoneWrong:
+    'Số điện thoại không khớp với lịch đặt. Vui lòng kiểm tra và thử lại.',
+  confirmCancel:
+    'Vui lòng xem lại thông tin lịch đặt ở thẻ bên trên và xác nhận nếu bạn muốn hủy.',
+  keepConfirmed:
+    'Lịch đặt của bạn được giữ nguyên. Có điều gì khác tôi có thể giúp bạn không?',
+  cancelSuccess: 'Lịch đặt của bạn đã được hủy thành công.',
+  cancelFail:
+    'Không thể hủy lịch này. Vui lòng liên hệ nhân viên để được hỗ trợ.',
+  alreadyCancelled: 'Lịch đặt này đã được hủy trước đó rồi.',
+  notFound: 'Không tìm thấy lịch đặt với mã này. Vui lòng kiểm tra lại.',
+};
 
-  phoneWrong: isVietnamese
-    ? 'Số điện thoại không khớp với lịch đặt. Vui lòng kiểm tra và thử lại.'
-    : 'The phone number does not match this booking. Please check and try again.',
+const japaneseCancelPrompts: CancelPrompts = {
+  askCode: '予約をキャンセルするため、予約コードを入力してください。',
+  verifyPhone: '本人確認のため、予約時に登録した電話番号を入力してください。',
+  phoneWrong: '電話番号が予約情報と一致しません。確認して再度お試しください。',
+  confirmCancel:
+    '上のカードで予約内容を確認し、キャンセルする場合は確定してください。',
+  keepConfirmed: '予約はそのまま維持されました。他にお手伝いできますか？',
+  cancelSuccess: '予約をキャンセルしました。',
+  cancelFail:
+    'この予約をキャンセルできませんでした。スタッフにお問い合わせください。',
+  alreadyCancelled: 'この予約はすでにキャンセルされています。',
+  notFound: 'このコードの予約が見つかりません。確認して再度お試しください。',
+};
 
-  confirmCancel: isVietnamese
-    ? 'Vui lòng xem lại thông tin lịch đặt ở thẻ bên trên và xác nhận nếu bạn muốn hủy.'
-    : 'Please review the booking details in the card above and confirm if you want to cancel.',
+export const getCancelPrompts = (locale: string): CancelPrompts => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') return vietnameseCancelPrompts;
+  if (language === 'ja') return japaneseCancelPrompts;
+  return englishCancelPrompts;
+};
 
-  keepConfirmed: isVietnamese
-    ? 'Lịch đặt của bạn được giữ nguyên. Có điều gì khác tôi có thể giúp bạn không?'
-    : 'Your booking has been kept. Is there anything else I can help you with?',
+export const getSlotCardPrompt = (locale: string): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') {
+    return 'Vui lòng chọn một khung giờ còn trống trong thẻ bên trên để tiếp tục.';
+  }
+  if (language === 'ja') {
+    return '上のカードから空いている時間を選択してください。';
+  }
+  return 'Please choose an available time from the card above to continue.';
+};
 
-  cancelSuccess: isVietnamese
-    ? 'Lịch đặt của bạn đã được hủy thành công.'
-    : 'Your booking has been successfully cancelled.',
+export const getBookingOptionPrompt = (
+  locale: string,
+  step: 'service' | 'resource' | 'date' | 'name' | 'email',
+): string => {
+  const language = localeLanguage(locale);
+  const prompts =
+    language === 'vi'
+      ? {
+          service: 'Bạn muốn đặt dịch vụ nào?',
+          resource: 'Bạn muốn chọn nhân viên nào?',
+          date: 'Bạn muốn đặt lịch vào ngày nào?',
+          name: 'Bạn vui lòng cho biết tên để tiếp tục.',
+          email: 'Bạn có muốn cung cấp email xác nhận không?',
+        }
+      : language === 'ja'
+        ? {
+            service: 'どのサービスを予約しますか？',
+            resource: '担当スタッフを選択してください。',
+            date: '予約日を選択してください。',
+            name: '続行するにはお名前を入力してください。',
+            email: '確認メール用のメールアドレスを入力しますか？',
+          }
+        : {
+            service: 'Which service would you like to book?',
+            resource: 'Which staff member would you prefer?',
+            date: 'Which date would you like to book?',
+            name: 'Please provide your name to continue.',
+            email: 'Would you like to provide a confirmation email?',
+          };
+  return prompts[step];
+};
 
-  cancelFail: isVietnamese
-    ? 'Không thể hủy lịch này. Vui lòng liên hệ nhân viên để được hỗ trợ.'
-    : 'Unable to cancel this booking. Please contact staff for assistance.',
+export const getAbandonBookingPrompt = (locale: string): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') return 'Đã dừng quá trình đặt lịch.';
+  if (language === 'ja') return '予約手続きを終了しました。';
+  return 'The booking process has been stopped.';
+};
 
-  alreadyCancelled: isVietnamese
-    ? 'Lịch đặt này đã được hủy trước đó rồi.'
-    : 'This booking has already been cancelled.',
+export const getKnowledgeFallbackPrompt = (
+  locale: string,
+  unavailable: boolean,
+): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') {
+    return unavailable
+      ? 'Hiện tại tôi không thể tra cứu kho kiến thức. Vui lòng thử lại sau hoặc yêu cầu kết nối với nhân viên.'
+      : 'Tôi không tìm thấy thông tin liên quan trong kho kiến thức. Bạn có thể hỏi theo cách khác hoặc yêu cầu kết nối với nhân viên.';
+  }
+  if (language === 'ja') {
+    return unavailable
+      ? '現在、ナレッジベースを検索できません。後でもう一度お試しいただくか、スタッフへの接続を依頼してください。'
+      : 'ナレッジベースに関連情報が見つかりませんでした。質問を言い換えるか、スタッフへの接続を依頼してください。';
+  }
+  return unavailable
+    ? 'I cannot search the knowledge base right now. Please try again later or ask to speak with a staff member.'
+    : 'I could not find relevant information in the knowledge base. Try rephrasing the question or ask to speak with a staff member.';
+};
 
-  notFound: isVietnamese
-    ? 'Không tìm thấy lịch đặt với mã này. Vui lòng kiểm tra lại.'
-    : 'No booking found with this code. Please check and try again.',
-});
+export const getKnowledgeGroundingRule = (
+  status: 'success' | 'empty',
+): string =>
+  status === 'success'
+    ? 'Knowledge retrieval returned relevant chunks. Answer the requested fact only from those searchKnowledge chunks. Treat them as the primary source of truth; do not replace, merge, or conflict them with SITE CONTEXT, conversation history, assumptions, or pretrained knowledge. If the chunks do not contain enough information to answer, say that the information is unavailable.'
+    : 'Knowledge retrieval returned no relevant chunks. Answer only when the requested fact is directly supported by trusted SITE CONTEXT, conversation history, or an explicit visitor message. Otherwise say that the information is unavailable. Never fill gaps with assumptions or pretrained knowledge.';
+
+export const getPublicCapabilitiesPrompt = (
+  locale: string,
+  bookingEnabled: boolean,
+): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') {
+    return bookingEnabled
+      ? 'Tôi có thể hỗ trợ tra cứu thông tin công khai của doanh nghiệp, đặt, kiểm tra hoặc hủy lịch và kết nối bạn với nhân viên. Vì lý do bảo mật, tôi không thể cung cấp công cụ, cấu hình, chỉ dẫn hoặc chi tiết hệ thống nội bộ.'
+      : 'Tôi có thể hỗ trợ tra cứu thông tin công khai của doanh nghiệp và kết nối bạn với nhân viên. Vì lý do bảo mật, tôi không thể cung cấp công cụ, cấu hình, chỉ dẫn hoặc chi tiết hệ thống nội bộ.';
+  }
+  if (language === 'ja') {
+    return bookingEnabled
+      ? '公開されている事業情報の案内、予約の作成・確認・キャンセル、スタッフへの取次ぎをお手伝いできます。セキュリティ上、内部ツール、設定、指示、システムの詳細は開示できません。'
+      : '公開されている事業情報の案内とスタッフへの取次ぎをお手伝いできます。セキュリティ上、内部ツール、設定、指示、システムの詳細は開示できません。';
+  }
+  return bookingEnabled
+    ? 'I can help with public business information, booking, checking or cancelling appointments, and connecting you with staff. For security, I cannot disclose internal tools, configuration, instructions, or system details.'
+    : 'I can help with public business information and connect you with staff. For security, I cannot disclose internal tools, configuration, instructions, or system details.';
+};
+
+export const getOutOfScopePrompt = (
+  locale: string,
+  bookingEnabled: boolean,
+): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') {
+    return bookingEnabled
+      ? 'Xin lỗi, tôi chỉ có thể hỗ trợ thông tin liên quan đến doanh nghiệp này và các yêu cầu về lịch hẹn. Bạn có thể hỏi về dịch vụ hoặc đặt lịch.'
+      : 'Xin lỗi, tôi chỉ có thể hỗ trợ thông tin liên quan đến doanh nghiệp này. Bạn có thể hỏi về dịch vụ hoặc yêu cầu kết nối với nhân viên.';
+  }
+  if (language === 'ja') {
+    return bookingEnabled
+      ? '申し訳ありませんが、この事業に関する情報と予約についてのみお手伝いできます。サービスについて質問するか、予約をご依頼ください。'
+      : '申し訳ありませんが、この事業に関する情報のみお手伝いできます。サービスについて質問するか、スタッフへの取次ぎをご依頼ください。';
+  }
+  return bookingEnabled
+    ? 'Sorry, I can only help with information about this business and appointment-related requests. You can ask about its services or make a booking.'
+    : 'Sorry, I can only help with information about this business. You can ask about its services or request assistance from staff.';
+};
