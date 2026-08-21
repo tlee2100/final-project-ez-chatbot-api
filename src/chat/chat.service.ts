@@ -63,6 +63,8 @@ type ChatMessageDto = Pick<
   | 'senderType'
   | 'agentId'
   | 'content'
+  | 'locale'
+  | 'components'
   | 'status'
   | 'createdAt'
   | 'feedbackRating'
@@ -1408,6 +1410,8 @@ export class ChatService {
       senderType: message.senderType,
       agentId: message.agentId,
       content: message.content,
+      locale: message.locale,
+      components: message.components,
       status: message.status,
       createdAt: message.createdAt,
       senderName: message.agent?.name ?? null,
@@ -1433,6 +1437,8 @@ export class ChatService {
     content: string,
     senderType: SenderType,
     agentId?: string,
+    locale?: string,
+    components?: Record<string, unknown>[],
   ): Promise<ChatMessage> {
     if (conversationId.startsWith('admin-test-')) {
       return {
@@ -1455,6 +1461,8 @@ export class ChatService {
       content,
       senderType,
       agentId: agentId ?? null,
+      locale: locale ?? null,
+      components: components ?? null,
     });
 
     console.log(`Message::: ${JSON.stringify(message)}`);

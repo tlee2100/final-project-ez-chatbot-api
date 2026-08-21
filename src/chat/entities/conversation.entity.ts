@@ -110,6 +110,15 @@ export class Conversation {
   @Column({ type: 'boolean', default: true })
   isAiActive: boolean;
 
+  @Column({ type: 'varchar', length: 35, default: 'en' })
+  currentLocale: string;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  activeFlow: string | null;
+
+  @Column({ type: 'varchar', length: 35, nullable: true })
+  activeFlowLocale: string | null;
+
   @OneToMany(() => ChatMessage, (msg) => msg.conversation)
   messages: ChatMessage[];
 

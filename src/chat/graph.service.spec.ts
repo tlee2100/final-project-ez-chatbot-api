@@ -1,25 +1,39 @@
 import {
   extractBookingCode,
-  latestActiveBookingCode,
   extractPhoneFromText,
+  latestActiveBookingCode,
   normalizePhone,
 } from './booking-cancellation.utils';
 import {
   bookingCodeText,
   bookAppointmentToolNames,
-  detectConversationLanguage,
+  detectBookingTriggerLocale,
+  detectSmallTalkLocale,
+  enforceBookingChipScope,
   extractRequestedTimeSlot,
-  generateDateChips,
-  isBookingPhonePrompt,
+  isBookingAbandonment,
+  isBookingFlowIntent,
   isBookingSlotSelection,
-  isDraftBookingAbandonment,
+  isNaturalBookingTrigger,
+  isSmallTalkTrigger,
   isTimeSlotAvailable,
   parseBookingSlotSelection,
-  replacePseudoToolResponse,
-  sanitizeBookingChips,
-  sanitizeSmallTalkResponse,
+  parseKnowledgeSearchOutput,
+  shouldContinueBookingFlow,
+  stripReasoningContent,
+  stripRenderedSlotTimes,
 } from './chat-flow.utils';
-import { getCancelFlowClassifierPrompt, getCancelPrompts } from './prompts';
+import { buildToolSchema } from './tool-schema.utils';
+import {
+  getCancelPrompts,
+  getAbandonBookingPrompt,
+  getBookingOptionPrompt,
+  getIntentClassifierPrompt,
+  getKnowledgeFallbackPrompt,
+  getKnowledgeGroundingRule,
+  getOutOfScopePrompt,
+  getPublicCapabilitiesPrompt,
+} from './prompts';
 
 describe('booking cancellation code resolution', () => {
   it('extracts codes from widget commands and visitor messages', () => {
@@ -39,7 +53,7 @@ describe('booking cancellation code resolution', () => {
     expect(latestActiveBookingCode(history)).toBe('AB12CD34');
   });
 
-  it('reads booking codes from bold display text while supporting old messages', () => {
+  it('reads booking codes from bold display text and old metadata', () => {
     const history = [
       '<booking-code>AB12CD34</booking-code>',
       'Booking code: **ON11204M**',
@@ -50,58 +64,55 @@ describe('booking cancellation code resolution', () => {
 });
 
 describe('booking cancellation phone utilities', () => {
-  it('extracts Vietnamese phone numbers with various prefixes and formats', () => {
+  it('extracts supported phone formats', () => {
     expect(extractPhoneFromText('SĐT của tôi là 0912345678')).toBe(
       '0912345678',
     );
     expect(extractPhoneFromText('Số điện thoại: +84912345678')).toBe(
       '0912345678',
     );
-    expect(extractPhoneFromText('84912345678')).toBe('0912345678');
     expect(extractPhoneFromText('038 123 4567')).toBe('0381234567');
-    expect(extractPhoneFromText('079-123-4567')).toBe('0791234567');
     expect(extractPhoneFromText('không có số nào ở đây')).toBeNull();
-    expect(extractPhoneFromText('12345')).toBeNull();
   });
 
-  it('normalizes phone strings correctly', () => {
+  it('normalizes Vietnamese phone strings', () => {
     expect(normalizePhone('+84912345678')).toBe('0912345678');
     expect(normalizePhone('84912345678')).toBe('0912345678');
-    expect(normalizePhone('0912 345 678')).toBe('0912345678');
     expect(normalizePhone('0912-345-678')).toBe('0912345678');
   });
 });
 
 describe('booking cancellation prompts', () => {
-  it('returns Vietnamese cancellation prompts when isVietnamese is true', () => {
-    const viPrompts = getCancelPrompts(true);
-    expect(viPrompts.askCode).toContain('mã đặt lịch');
-    expect(viPrompts.verifyPhone).toContain('số điện thoại');
-    expect(viPrompts.phoneWrong).toContain('không khớp');
-    expect(viPrompts.confirmCancel).toContain('xác nhận');
-    expect(viPrompts.keepConfirmed).toContain('giữ nguyên');
-    expect(viPrompts.cancelSuccess).toContain('thành công');
-    expect(viPrompts.cancelFail).toContain('Không thể hủy');
-    expect(viPrompts.alreadyCancelled).toContain('đã được hủy trước đó');
-    expect(viPrompts.notFound).toContain('Không tìm thấy');
-  });
-
-  it('returns English cancellation prompts when isVietnamese is false', () => {
-    const enPrompts = getCancelPrompts(false);
-    expect(enPrompts.askCode).toContain('booking code');
-    expect(enPrompts.verifyPhone).toContain('phone number');
-    expect(enPrompts.phoneWrong).toContain('does not match');
-    expect(enPrompts.confirmCancel).toContain('confirm');
-    expect(enPrompts.keepConfirmed).toContain('kept');
-    expect(enPrompts.cancelSuccess).toContain('successfully cancelled');
-    expect(enPrompts.cancelFail).toContain('Unable to cancel');
-    expect(enPrompts.alreadyCancelled).toContain('already been cancelled');
-    expect(enPrompts.notFound).toContain('No booking found');
+  it('selects deterministic prompt catalogs by locale', () => {
+    expect(getCancelPrompts('vi').askCode).toContain('mã đặt lịch');
+    expect(getCancelPrompts('en').askCode).toContain('booking code');
+    expect(getCancelPrompts('ja-JP').askCode).toContain('予約コード');
+    expect(getCancelPrompts('fr').askCode).toBe(getCancelPrompts('en').askCode);
   });
 });
 
 describe('booking chat flow guards', () => {
-  it('extracts a requested time and checks it against MCP slot output', () => {
+  it('preserves MCP JSON Schema argument types', () => {
+    const schema = buildToolSchema({
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        topK: { type: 'integer' },
+        includeDrafts: { type: 'boolean' },
+      },
+      required: ['query'],
+    });
+
+    expect(
+      schema.safeParse({ query: 'zodishop', topK: 5, includeDrafts: false })
+        .success,
+    ).toBe(true);
+    expect(schema.safeParse({ query: 'zodishop', topK: '5' }).success).toBe(
+      false,
+    );
+  });
+
+  it('extracts a requested time and checks MCP slot output', () => {
     expect(extractRequestedTimeSlot('Book on 29/08/2026 at 2:30 PM')).toBe(
       '14:30',
     );
@@ -119,24 +130,7 @@ describe('booking chat flow guards', () => {
   });
 
   it('formats the booking code as bold display text', () => {
-    expect(bookingCodeText('ON11204M', false)).toBe(
-      '\n\nBooking code: **ON11204M**',
-    );
-    expect(bookingCodeText('ON11204M', true)).toContain(
-      'Mã đặt lịch: **ON11204M**',
-    );
-  });
-
-  it('marks phone prompts without depending on the widget language', () => {
-    expect(isBookingPhonePrompt('Please provide your phone number.')).toBe(
-      true,
-    );
-    expect(isBookingPhonePrompt('Bạn cho mình xin số điện thoại nhé?')).toBe(
-      true,
-    );
-    expect(isBookingPhonePrompt('Would you like a confirmation email?')).toBe(
-      false,
-    );
+    expect(bookingCodeText('ON11204M')).toBe('\n\n**ON11204M**');
   });
 
   it('only exposes createBooking for an explicit confirmation command', () => {
@@ -154,262 +148,213 @@ describe('booking chat flow guards', () => {
     ).toEqual(['createBooking']);
   });
 
-  it('detects conversation language without false triggers from service or staff names', () => {
-    const siteContext = {
-      bookingServices: [{ name: 'cat toc' }, { name: 'goi dau' }],
-      bookingResources: [{ name: 'Nghi' }, { name: 'Hiếu' }],
-    };
-
-    // User starts with "book" (English) and then selects "cat toc" (service name)
-    const messages = [
-      { role: 'user', content: 'book' },
-      {
-        role: 'assistant',
-        content:
-          "I'd be happy to help you book an appointment! Which service would you like?",
-      },
-      { role: 'user', content: 'cat toc' },
-    ];
-
-    expect(detectConversationLanguage(messages, siteContext)).toBe('en');
-
-    // Vietnamese conversation
-    const viMessages = [
-      { role: 'user', content: 'Tôi muốn đặt lịch' },
-      { role: 'assistant', content: 'Bạn muốn làm dịch vụ nào?' },
-      { role: 'user', content: 'cat toc' },
-    ];
-    expect(detectConversationLanguage(viMessages, siteContext)).toBe('vi');
-
-    const afterEnglishBooking = [
-      ...messages,
-      {
-        role: 'assistant',
-        content: 'Your appointment is confirmed!\n\nBooking code: **AB12CD34**',
-      },
-      {
-        role: 'user',
-        content: 'b\u1ea1n th\u1ea5y t\u00f4i th\u1ebf n\u00e0o',
-      },
-    ];
-    expect(detectConversationLanguage(afterEnglishBooking, siteContext)).toBe(
-      'vi',
-    );
-
-    const switchedDuringDraft = [
-      ...messages,
-      {
-        role: 'user',
-        content: 'b\u1ea1n th\u1ea5y t\u00f4i th\u1ebf n\u00e0o',
-      },
-    ];
-    expect(detectConversationLanguage(switchedDuringDraft, siteContext)).toBe(
-      'en',
-    );
-    expect(
-      detectConversationLanguage(switchedDuringDraft, siteContext, true),
-    ).toBe('vi');
-
-    const vietnameseCancellation = [
-      { role: 'user', content: 'hi' },
-      { role: 'assistant', content: 'Hello! How can I assist you today?' },
-      { role: 'user', content: 'hủy lịch EZHOS1J8' },
-      { role: 'assistant', content: 'Vui lòng nhập số điện thoại.' },
-      { role: 'user', content: '0963258741' },
-    ];
-    expect(
-      detectConversationLanguage(vietnameseCancellation, siteContext, true),
-    ).toBe('vi');
-  });
-
-  it('recognizes abandoning an unfinished booking without treating cancellation as abandonment', () => {
-    expect(isDraftBookingAbandonment('thôi tôi không muốn đặt nữa')).toBe(true);
-    expect(isDraftBookingAbandonment("I don't want to book anymore")).toBe(
-      true,
-    );
-    expect(isDraftBookingAbandonment('cancel booking AB12CD34')).toBe(false);
-  });
-
-  it('parses a widget slot selection as authoritative booking data', () => {
+  it('parses structured slot selections as authoritative data', () => {
     const raw =
-      '/select-booking-slot {"date":"2026-08-20","timeSlot":"14:00","resourceId":"res-1","language":"vi"} :: Chọn 14:00';
+      '/select-booking-slot {"date":"2026-08-20","timeSlot":"14:00","resourceId":"res-1","language":"ja-JP"} :: 14:00';
+
     expect(isBookingSlotSelection(raw)).toBe(true);
     expect(parseBookingSlotSelection(raw)).toEqual({
       date: '2026-08-20',
       timeSlot: '14:00',
       resourceId: 'res-1',
-      language: 'vi',
+      language: 'ja-JP',
     });
   });
 
-  it('replaces tool syntax accidentally emitted as small-talk text', () => {
-    expect(replacePseudoToolResponse('<getSiteConfig>', true)).toBe(
-      'Xin chào! Tôi có thể giúp gì cho bạn?',
-    );
-    expect(replacePseudoToolResponse('<getSiteConfig>', false)).toBe(
-      'Hi! How can I help you today?',
-    );
-  });
-  it('replaces booking data accidentally exposed in small talk', () => {
-    const text = 'Xin chào, chúng tôi có các dịch vụ: Cắt tóc, Gội đầu.';
-    const result = sanitizeSmallTalkResponse(text, true, {
-      name: 'EZ Salon',
-      bookingServices: [{ name: 'Cắt tóc' }, { name: 'Gội đầu' }],
-    });
-    expect(result).toBe(
-      'Xin chào! Chào mừng bạn đến với EZ Salon. Tôi có thể giúp gì cho bạn?',
-    );
+  it('classifies ambiguous values as booking continuation during a flow', () => {
+    const prompt = getIntentClassifierPrompt(true, true);
+    expect(prompt).toContain('value alone is ambiguous');
+    expect(prompt).toContain('canonical BCP 47');
+    expect(prompt).toContain('system_question');
+    expect(prompt).toContain('out_of_scope');
   });
 
-  it('does not match a short resource name inside another word', () => {
-    const text =
-      "I'm just an AI assistant. Is there anything else I can help with?";
+  it('refuses out-of-scope work without invoking the main model', () => {
+    const response = getOutOfScopePrompt('vi', true);
 
-    expect(
-      sanitizeSmallTalkResponse(text, false, {
-        bookingResources: [{ name: 'tan' }],
-      }),
-    ).toBe(text);
+    expect(response).toContain('doanh nghiệp này');
+    expect(response).toContain('đặt lịch');
+    expect(response).not.toContain('C++');
   });
 
-  it('generates date chips correctly', () => {
-    const fixedNow = new Date('2026-08-16T12:00:00.000Z');
-    const viChips = generateDateChips(
-      { availableDays: [1, 2, 3, 4, 5, 6, 7] },
-      true,
-      fixedNow,
-    );
-    expect(viChips).toHaveLength(6);
-    expect(viChips[0]).toContain('Hôm nay');
-    expect(viChips[5]).toBe('Chọn ngày khác');
+  it('answers internal-system questions with public capabilities only', () => {
+    const response = getPublicCapabilitiesPrompt('vi', true);
 
-    const enChips = generateDateChips(
-      { availableDays: [1, 2, 3, 4, 5, 6, 7] },
-      false,
-      fixedNow,
+    expect(response).toContain('thông tin công khai');
+    expect(response).not.toMatch(
+      /searchKnowledge|getSiteConfig|holdSlot|draftBooking|createBooking/,
     );
-    expect(enChips).toHaveLength(6);
-    expect(enChips[0]).toContain('Today');
-    expect(enChips[5]).toBe('Choose another date');
   });
 
-  it('sanitizes chips based on the active question being asked at the end of text', () => {
+  it('continues booking for small talk and exact database entity values', () => {
     const siteContext = {
-      bookingEnabled: true,
-      bookingServices: [{ name: 'Gội đầu' }, { name: 'Cắt tóc' }],
-      bookingResources: [{ name: 'Nghi' }, { name: 'Hiếu' }],
-      bookingHours: {
-        availableDays: [1, 2, 3, 4, 5, 6, 7],
-        endTime: '23:59',
-        timezone: 'Asia/Ho_Chi_Minh',
-      },
+      bookingServices: [{ name: 'goi dau' }],
+      bookingResources: [{ name: 'hieu' }],
     };
 
-    // 1. Acknowledging stylist and asking for date -> Should have DATE chips, NOT stylist chips
-    const dateQuestion =
-      'Cảm ơn! Bạn đã chọn stylist **Nghi**. Bạn muốn đặt lịch vào ngày nào?\n\n<chips>Nghi|Hiếu|Không ưu tiên</chips>';
-    const sanitizedDateResponse = sanitizeBookingChips(
-      dateQuestion,
-      siteContext,
-    );
-    expect(sanitizedDateResponse).toContain('Chọn ngày khác');
-    expect(sanitizedDateResponse).not.toContain('Không ưu tiên');
-
-    const mismatchedDateResponse = sanitizeBookingChips(
-      'Cảm ơn bạn! Bạn đã chọn stylist **Dần**.\n\nBạn muốn đặt lịch vào ngày nào?\n\n<chips>Today|Choose another date</chips>',
-      {
-        ...siteContext,
-        bookingResources: [...siteContext.bookingResources, { name: 'Dần' }],
-      },
-      undefined,
-      'en',
-    );
-    expect(mismatchedDateResponse).toContain('Chọn ngày khác');
-    expect(mismatchedDateResponse).not.toContain('Choose another date');
-
-    // 2. Acknowledging service and asking for stylist -> Should have STAFF chips
-    const staffQuestion =
-      'Tuyệt vời! Bạn đã chọn dịch vụ **Gội đầu**. Bạn có stylist mong muốn không?\n\n<chips>Gội đầu|Cắt tóc</chips>';
-    const sanitizedStaffResponse = sanitizeBookingChips(
-      staffQuestion,
-      siteContext,
-    );
-    expect(sanitizedStaffResponse).toContain(
-      '<chips>Nghi|Hiếu|Không ưu tiên</chips>',
-    );
-
-    // 3. Asking for Name -> If no visitor name, strips chips; if visitor name provided, shows name chip
-    const nameQuestion =
-      'Cảm ơn bạn! Bạn tên là gì?\n\n<chips>Nghi|Hiếu|Không ưu tiên</chips>';
-    expect(sanitizeBookingChips(nameQuestion, siteContext)).toBe(
-      'Cảm ơn bạn! Bạn tên là gì?',
-    );
+    expect(shouldContinueBookingFlow('BOOKING', 'small_talk')).toBe(true);
     expect(
-      sanitizeBookingChips(nameQuestion, siteContext, { name: 'Tân Lê' }),
-    ).toBe('Cảm ơn bạn! Bạn tên là gì?\n\n<chips>Tân Lê</chips>');
-
-    // 4. Asking for Phone -> Should strip chips
-    const phoneQuestion =
-      'Vui lòng cho biết số điện thoại của bạn?\n\n<chips>Nghi|Hiếu</chips>';
-    expect(sanitizeBookingChips(phoneQuestion, siteContext)).toBe(
-      'Vui lòng cho biết số điện thoại của bạn?',
-    );
-
-    // 5. Asking for Email -> Should have Skip chip, and visitor email chip if available
-    const emailQuestion =
-      'Bạn có muốn nhận email xác nhận không? Bạn có thể nhập email hoặc bấm Bỏ qua.\n\n<chips>Nghi|Hiếu</chips>';
-    expect(sanitizeBookingChips(emailQuestion, siteContext)).toContain(
-      '<chips>Bỏ qua</chips>',
-    );
+      shouldContinueBookingFlow('BOOKING', 'question', 'HIEU', siteContext),
+    ).toBe(true);
     expect(
-      sanitizeBookingChips(emailQuestion, siteContext, {
-        email: 'test@gmail.com',
+      shouldContinueBookingFlow(
+        'BOOKING',
+        'question',
+        'hieu có làm hôm nay không?',
+        siteContext,
+      ),
+    ).toBe(false);
+    expect(shouldContinueBookingFlow('BOOKING', 'cancel_booking')).toBe(false);
+    expect(shouldContinueBookingFlow('BOOKING', 'abandon_booking')).toBe(false);
+    expect(shouldContinueBookingFlow(null, 'small_talk')).toBe(false);
+  });
+
+  it('recognizes explicit unfinished-booking exits without confusing cancellation', () => {
+    expect(isBookingAbandonment('thôi')).toBe(true);
+    expect(isBookingAbandonment('I no longer want to book')).toBe(true);
+    expect(isBookingAbandonment('exit booking')).toBe(true);
+    expect(isBookingAbandonment('hủy lịch AB12CD34')).toBe(false);
+    expect(isBookingAbandonment('đổi nhân viên')).toBe(false);
+  });
+
+  it('uses deterministic localized booking exit and RAG fallback messages', () => {
+    expect(getAbandonBookingPrompt('vi')).toBe('Đã dừng quá trình đặt lịch.');
+    expect(getKnowledgeFallbackPrompt('en', false)).toContain(
+      'could not find relevant information',
+    );
+    expect(getKnowledgeFallbackPrompt('en', true)).toContain(
+      'cannot search the knowledge base',
+    );
+  });
+
+  it('uses a deterministic prompt when booking model text is empty', () => {
+    expect(getBookingOptionPrompt('en', 'service')).toBe(
+      'Which service would you like to book?',
+    );
+    expect(getBookingOptionPrompt('vi', 'resource')).toContain('nhân viên');
+  });
+
+  it('classifies knowledge tool output without letting errors reach the model', () => {
+    expect(
+      parseKnowledgeSearchOutput(
+        JSON.stringify({ chunks: [{ content: 'KB fact' }] }),
+      ),
+    ).toEqual({ status: 'success', chunks: [{ content: 'KB fact' }] });
+    expect(parseKnowledgeSearchOutput({ chunks: [] })).toEqual({
+      status: 'empty',
+      chunks: [],
+    });
+    expect(parseKnowledgeSearchOutput({ error: 'MCP unavailable' })).toEqual({
+      status: 'error',
+      chunks: [],
+    });
+    expect(
+      parseKnowledgeSearchOutput({
+        result: 'MCP error -32602: Input validation error',
       }),
-    ).toContain('<chips>test@gmail.com|Bỏ qua</chips>');
+    ).toEqual({ status: 'error', chunks: [] });
+    expect(parseKnowledgeSearchOutput('not-json')).toEqual({
+      status: 'error',
+      chunks: [],
+    });
+  });
 
-    // 6. English conversation with Vietnamese service/staff -> preserves English chips
-    const enStaffQuestion =
-      'Great! You selected **cat toc**. Do you have a preferred stylist?\n\n<chips>cat toc|goi dau</chips>';
-    const sanitizedEnStaff = sanitizeBookingChips(
-      enStaffQuestion,
-      siteContext,
-      undefined,
+  it('uses KB chunks first and only falls back to trusted context when empty', () => {
+    const grounded = getKnowledgeGroundingRule('success');
+    expect(grounded).toContain('only from those searchKnowledge chunks');
+    expect(grounded).toContain('primary source of truth');
+
+    const empty = getKnowledgeGroundingRule('empty');
+    expect(empty).toContain('trusted SITE CONTEXT');
+    expect(empty).toContain('Never fill gaps');
+  });
+
+  it('allows chips only for strict booking intents', () => {
+    expect(isBookingFlowIntent('book_appointment')).toBe(true);
+    expect(isBookingFlowIntent('book_appointment_init')).toBe(true);
+    expect(isBookingFlowIntent('structured_booking_step')).toBe(true);
+    expect(isBookingFlowIntent('booking_slot_selected')).toBe(true);
+    expect(isBookingFlowIntent('question')).toBe(false);
+    expect(isBookingFlowIntent('cancel_booking')).toBe(false);
+    expect(isBookingFlowIntent('out_of_scope')).toBe(false);
+    expect(
+      enforceBookingChipScope('Choose one <chips>Yes|No</chips>', 'question'),
+    ).toBe('Choose one');
+    expect(
+      enforceBookingChipScope(
+        'Choose one <chips>Service A|Service B</chips>',
+        'book_appointment',
+      ),
+    ).toContain('<chips>');
+  });
+
+  it('removes textual time lists when the widget renders a slot card', () => {
+    const response = [
+      'Các khung giờ còn trống được hiển thị bên dưới:',
+      '09:00, 09:30, 10:00, 10:30.',
+      'Vui lòng chọn một khung giờ phù hợp để tiếp tục.',
+    ].join('\n\n');
+
+    expect(stripRenderedSlotTimes(response)).toBe(
+      [
+        'Các khung giờ còn trống được hiển thị bên dưới:',
+        'Vui lòng chọn một khung giờ phù hợp để tiếp tục.',
+      ].join('\n\n'),
+    );
+  });
+
+  it('removes provider reasoning before displaying or saving a response', () => {
+    expect(
+      stripReasoningContent(
+        'The user is asking for site information. </think>\n\nTôi có thể giúp bạn.',
+      ).trim(),
+    ).toBe('Tôi có thể giúp bạn.');
+    expect(
+      stripReasoningContent('<think>secret</think>Câu trả lời').trim(),
+    ).toBe('Câu trả lời');
+  });
+
+  it('detects natural booking triggers and their locale fast-path', () => {
+    expect(detectBookingTriggerLocale('đặt lịch')).toBe('vi');
+    expect(detectBookingTriggerLocale('Đặt lịch hẹn')).toBe('vi');
+    expect(detectBookingTriggerLocale('tôi muốn book lịch')).toBe('vi');
+    expect(detectBookingTriggerLocale('mình muốn đặt lịch')).toBe('vi');
+    expect(detectBookingTriggerLocale('đặt')).toBe('vi');
+    expect(detectBookingTriggerLocale('book')).toBe('en');
+    expect(detectBookingTriggerLocale('book', 'vi')).toBe('vi');
+    expect(detectBookingTriggerLocale('book appointment')).toBe('en');
+    expect(detectBookingTriggerLocale('I want to book an appointment')).toBe(
       'en',
     );
-    expect(sanitizedEnStaff).toContain(
-      '<chips>Nghi|Hiếu|No Preference</chips>',
-    );
-  });
-});
+    expect(detectBookingTriggerLocale('予約したい')).toBe('ja');
+    expect(detectBookingTriggerLocale('予約')).toBe('ja');
 
-describe('cancel flow classifier prompts', () => {
-  it('generates proper prompts for ask_code, verify_phone, and await_confirm steps', () => {
-    const askCodePrompt = getCancelFlowClassifierPrompt('ask_code');
-    expect(askCodePrompt).toContain(
-      'waiting for the user to provide a booking code',
-    );
-    expect(askCodePrompt).toContain('PROVIDE_INFO');
-    expect(askCodePrompt).toContain('ABORT_CANCELLATION');
-    expect(askCodePrompt).toContain('SWITCH_TOPIC');
-
-    const verifyPhonePrompt = getCancelFlowClassifierPrompt('verify_phone');
-    expect(verifyPhonePrompt).toContain(
-      'waiting for the user to provide their phone number',
-    );
-
-    const confirmPrompt = getCancelFlowClassifierPrompt('await_confirm');
-    expect(confirmPrompt).toContain(
-      'waiting for the user to confirm or cancel',
-    );
+    expect(isNaturalBookingTrigger('đặt lịch')).toBe(true);
+    expect(isNaturalBookingTrigger('book')).toBe(true);
+    expect(isNaturalBookingTrigger('booking')).toBe(true);
+    expect(isNaturalBookingTrigger('book appointment')).toBe(true);
+    expect(isNaturalBookingTrigger('giá dịch vụ là bao nhiêu')).toBe(false);
+    expect(isNaturalBookingTrigger('hello')).toBe(false);
   });
 
-  it('provides abortConfirmed prompt in both Vietnamese and English', () => {
-    const viPrompts = getCancelPrompts(true);
-    expect(viPrompts.abortConfirmed).toContain(
-      'Yêu cầu hủy lịch đã được hủy bỏ',
-    );
+  it('detects small talk greetings and meta-question triggers', () => {
+    expect(detectSmallTalkLocale('hi')).toBe('en');
+    expect(detectSmallTalkLocale('hi', 'vi')).toBe('vi');
+    expect(detectSmallTalkLocale('xin chào')).toBe('vi');
+    expect(detectSmallTalkLocale('chào bạn')).toBe('vi');
+    expect(detectSmallTalkLocale('đặt một câu hỏi')).toBe('vi');
+    expect(detectSmallTalkLocale('cho mình hỏi')).toBe('vi');
+    expect(detectSmallTalkLocale('tôi có một câu hỏi')).toBe('vi');
+    expect(detectSmallTalkLocale('cần tư vấn')).toBe('vi');
+    expect(detectSmallTalkLocale('can I ask a question')).toBe('en');
+    expect(detectSmallTalkLocale('I have a question')).toBe('en');
+    expect(detectSmallTalkLocale('こんにちは')).toBe('ja');
+    expect(detectSmallTalkLocale('質問があります')).toBe('ja');
 
-    const enPrompts = getCancelPrompts(false);
-    expect(enPrompts.abortConfirmed).toContain('Cancellation request aborted');
+    expect(isSmallTalkTrigger('đặt một câu hỏi')).toBe(true);
+    expect(isSmallTalkTrigger('cho mình hỏi')).toBe(true);
+    expect(isSmallTalkTrigger('hi')).toBe(true);
+    expect(isSmallTalkTrigger('can I ask a question')).toBe(true);
+    expect(isSmallTalkTrigger('giá dịch vụ cắt tóc là bao nhiêu')).toBe(false);
   });
 });

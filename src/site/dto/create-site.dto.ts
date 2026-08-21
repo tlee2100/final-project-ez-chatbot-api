@@ -51,6 +51,14 @@ export class CreateSiteDto {
   isAiActive?: boolean;
 
   @ApiPropertyOptional({
+    example: 'qwen3.7-flash',
+    description: 'LLM Model for the site',
+  })
+  @IsOptional()
+  @IsString()
+  llmModel?: string;
+
+  @ApiPropertyOptional({
     type: [String],
     description:
       'Allowed domains for the chat widget (e.g., example.com, *.example.com)',
