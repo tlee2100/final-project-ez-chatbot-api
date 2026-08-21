@@ -22,7 +22,7 @@ import { BookingStatus } from '../enums/booking-status.enum';
 @Index('IDX_bookings_site_status_start', ['siteId', 'status', 'startAt'])
 @Exclusion(
   'no_overlap',
-  `USING gist ("siteId" WITH =, COALESCE("resourceId"::text, '___NULL___') WITH =, tstzrange("startAt", "endAt") WITH &&) WHERE (status <> 'cancelled')`,
+  `USING gist ("siteId" WITH =, COALESCE("resourceId"::text, '___NULL___') WITH =, tstzrange("startAt", "endAt") WITH &&) WHERE (status = 'confirmed')`,
 )
 export class Booking {
   @AutoMap()
