@@ -81,6 +81,12 @@ export class User {
   @Column({ type: 'varchar', nullable: true })
   refreshToken: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  previousRefreshToken: string | null;
+
+  @Column({ type: 'timestamp with time zone', nullable: true })
+  previousRefreshTokenExpiresAt: Date | null;
+
   @DeleteDateColumn({ type: 'timestamp', nullable: true })
   deletedAt: Date | null;
 

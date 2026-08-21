@@ -284,6 +284,56 @@ export class AiService {
 - A booking-step marker selects only the current backend-owned option set. Output at most one marker, only for the field currently being collected, and never invent option values.`;
     }
 
+    // UI Format Instructions
+    prompt += `\n\nUI FORMATTING:
+- Never print a tool name inside angle brackets such as <getSiteConfig>. Invoke tools only through the tool-calling mechanism.
+- When you ask the user to choose from a list of options (e.g., services, staff members, resources, date), you MUST append the exact options formatted inside a <chips> tag at the very end of your response.
+- Services and resources are already provided in the context above. Use them directly to generate chips without calling getSiteConfig.
+- For staff_chips / resource_chips: Use the resources provided in context plus the localized no-preference label as chips.
+- CRITICAL: When asking for a Date initially, provide the 5 available working-date options in the <chips> tag as shown above. However, if the visitor explicitly asks to choose another date (e.g. by clicking "Choose another date" or "Chọn ngày khác"), do NOT append the <chips> tag. Instead, ask them to type their preferred date (e.g. DD/MM/YYYY).
+- For slot_picker: call getAvailableSlots once when date is selected. If staff/resource preference is known (e.g. the visitor selected or chose a specific resource like "Sân 2"), you MUST pass resourceId (either its UUID or exact name like "Sân 2") to getAvailableSlots so slots are filtered specifically for that chosen resource only. ONLY omit resourceId when the visitor explicitly chose "Không ưu tiên" or "No Preference". Ask one short sentence only. Do not append <chips>, do not list time slots in text, and do not render every slot as text chips; the widget renders the slot picker from the tool result.
+- A /select-booking-slot command contains the authoritative date, timeSlot, selected resourceId, and booking language. Accept it as the completed slot_picker step. The backend automatically holds the slot on selection, so you do NOT need to call holdSlot during name, phone, or email questions.
+- When calling \`createBooking\`, pass all collected fields (name, phone, email, date, timeSlot, resourceId, serviceId/serviceIds, slotCount).
+- For name question: If the visitor's name is known from visitor context, append <chips>[visitor_name]</chips> so they can confirm it with 1-click or type a different name. If no name in visitor context, do not append chips.
+- For phone question (field: phone): Output NO CHIPS. Never output <chips>Bỏ qua</chips> on phone.
+- For customerEmail/text_input_optional: After phone number is collected, briefly acknowledge the phone (e.g. "Cảm ơn bạn!" / "Thank you!"), then ask the optional email question at most once (e.g. "Bạn có muốn nhận email xác nhận không?" / "Would you like to receive a confirmation email?"). NEVER repeat "And your phone number" or the previous question! If the visitor's email is known from visitor context, append <chips>[visitor_email]|Bỏ qua</chips> (or <chips>[visitor_email]|Skip</chips>). If no email in visitor context, append only <chips>Bỏ qua</chips> (or <chips>Skip</chips>). If the visitor selects or types Skip/Bỏ qua, treat customerEmail as omitted and proceed to the booking summary; do not ask for email again.
+- CRITICAL CONFIRMED BOOKING IMMUTABILITY RULE (POST-CONFIRMATION):
+  * Once an appointment has been confirmed (meaning an active booking code exists in the history that has NOT been cancelled), IT IS FINALIZED AND SAVED IN THE DATABASE.
+  * An existing confirmed appointment CANNOT BE EDITED OR MODIFIED IN-PLACE.
+  * If the visitor asks to edit, change, reschedule, or modify their information or appointment after confirmation (e.g., "i want to change information", "tôi muốn đổi thông tin", "đổi ngày", "đổi thợ", "sửa lịch hẹn", "change stylist"):
+    - DO NOT edit the existing booking, DO NOT show the booking summary card, and DO NOT ask which fields to update on the finalized booking!
+    - State clearly and politely that the confirmed appointment cannot be modified directly once saved.
+    - Provide two clear options:
+      1. Cancel the current booking (so they can book again if desired).
+      2. Book a new / additional appointment.
+    - Append actionable chips:
+      * In Vietnamese: <chips>Hủy lịch hẹn [booking-code]|Đặt lịch mới</chips> (ví dụ: <chips>Hủy lịch hẹn 4OKMXUUR|Đặt lịch mới</chips>)
+      * In English: <chips>Cancel booking [booking-code]|Book new appointment</chips> (e.g. <chips>Cancel booking 4OKMXUUR|Book new appointment</chips>)
+- EDITING & CONFIRMATION ARCHITECTURE:
+  * During the 7 collection steps, do NOT call draftBooking or createBooking prematurely. Follow each step sequentially one-by-one until Step 7 (customerEmail) is answered or skipped.
+  * At Step 8, call draftBooking once to display the BookingSummaryCard on the widget.
+  * Any pre-confirmation editing (changing name, phone, email, service, stylist, date, or time) is performed interactively by the customer directly on the BookingSummaryCard UI via the [Chỉnh sửa / Edit] button.
+  * When the customer saves changes on the card, the widget sends \`/update-draft-booking\` with the updated JSON payload. You MUST call the \`draftBooking\` tool in the SAME TURN using those fields, and reply briefly asking the visitor to review and confirm on the updated card.
+  * When the customer confirms on the card, the widget sends \`/confirm-booking\` with the finalized JSON payload. In that turn, execute the \`createBooking\` tool to save to the database.
+- If the latest visitor message starts with /update-draft-booking and includes a JSON payload, use that JSON payload as the draftBooking arguments.
+- If the latest visitor message starts with /confirm-booking and includes a JSON payload, use that JSON payload exactly as the createBooking arguments.
+- When the booking confirmed card is shown, do not repeat booking code, service, staff, date, time, phone, or customer details in the chat bubble. Reply only with a short confirmation sentence and a closing/help sentence.
+- For cancel_booking: When the visitor asks to cancel an appointment or indicates they cannot/do not want to attend (e.g. "tôi muốn hủy", "không muốn đi", "hủy lịch", "cancel booking", "drop a booking"):
+  * If the booking code is not provided, ask the visitor to provide their booking code to proceed with cancellation.
+  * NEVER claim or assume a cancellation card is displayed unless the cancellation card has actually been rendered.
+- If the latest visitor message starts with /confirm-cancel-booking, use the code in that command exactly as the cancelBooking bookingCode argument. After successful cancellation, reply with one short confirmation sentence in the visitor's language.
+- STRICT IMMUTABLE LANGUAGE LOCK RULE:
+  * The conversation language has been established at the start.
+  * If the conversation started in Vietnamese: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN VIETNAMESE until the end of the booking. Never switch to English midway even if the user types an English word. Translate any English template prompts into natural Vietnamese.
+  * If the conversation started in English: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN ENGLISH until the end of the booking. Never switch to Vietnamese midway even if the user types a Vietnamese name or word. Translate any Vietnamese template step prompts into natural, polite English (e.g. ask "Which service would you like to book?" instead of "Bạn muốn đặt dịch vụ nào?").
+  * NEVER output mixed English and Vietnamese in a single turn.
+- If replying in English, use these labels exactly: "No Preference", "Choose another date", "Skip", "Edit", "Confirm".
+- If replying in Vietnamese, use these labels exactly: "Không ưu tiên", "Chọn ngày khác", "Bỏ qua", "Chỉnh sửa", "Xác nhận".
+- Keep service and staff names exactly as stored in the database.
+- Format: <chips>Option 1|Option 2|Option 3</chips>
+- STRICT CHIPS SYNTAX: The tag MUST start with the exact word '<chips>' and end with '</chips>'. NEVER omit the word 'chips' (e.g., do NOT write <Option 1|Option 2</chips> or [Option 1|Option 2]).
+- Only include the options inside the tag separated by the pipe '|' character.
+- Keep option text factual. Do not add claims like "popular", "best", or specialties unless they were returned by a tool or provided by the site.`;
     prompt += `\n\nLANGUAGE LOCK:
 - The conversation language for this turn is ${languageName} (${locale}).
 - Write every user-facing sentence and generic option label only in ${languageName}.

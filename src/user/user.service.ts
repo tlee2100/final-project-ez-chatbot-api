@@ -269,7 +269,14 @@ export class UserService {
   async updateInternal(
     id: string,
     fields: Partial<
-      Pick<User, 'refreshToken' | 'twoFactorEnabled' | 'twoFactorSecret'>
+      Pick<
+        User,
+        | 'refreshToken'
+        | 'previousRefreshToken'
+        | 'previousRefreshTokenExpiresAt'
+        | 'twoFactorEnabled'
+        | 'twoFactorSecret'
+      >
     >,
   ) {
     const user = await this.findUserEntity(id);
