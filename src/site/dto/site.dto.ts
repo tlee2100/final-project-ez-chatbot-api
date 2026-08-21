@@ -133,6 +133,14 @@ export class SiteDto {
   })
   sentimentDetection: boolean;
 
+  @AutoMap()
+  @ApiProperty({
+    description: 'LLM Model used for the site',
+    example: 'qwen3.7-flash',
+    default: 'qwen3.7-flash',
+  })
+  llmModel: string;
+
   @ApiProperty({
     example: 50,
     description: 'Max messages per chat session',
