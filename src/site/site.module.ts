@@ -9,7 +9,7 @@ import { AdminBookingController } from './admin-booking.controller';
 import { AdminBookingService } from './admin-booking.service';
 import { NotificationModule } from '../notification/notification.module';
 import { BookingResource } from './entities/booking-resources.entity';
-import { BookingService } from './entities/booking-service.entity';
+import { BookingServiceItem } from './entities/booking-service.entity';
 import { SiteBookingConfig } from './entities/site-booking-config.entity';
 import { BookingModule } from '../booking/booking.module';
 import { ChatModule } from '../chat/chat.module';
@@ -24,7 +24,7 @@ import { CrawlerModule } from '../crawler/crawler.module';
       Site,
       User,
       BookingResource,
-      BookingService,
+      BookingServiceItem,
       SiteBookingConfig,
       Booking,
       BookingBlockout,

@@ -17,7 +17,7 @@ import { Organization } from '../../organization/entities/organization.entity';
 import { CrawlerConfig } from '../../crawler/entities/crawler-config.entity';
 import { IndustryTemplate } from './industry-template.entity';
 import { SiteBookingConfig } from './site-booking-config.entity';
-import { BookingService } from './booking-service.entity';
+import { BookingServiceItem } from './booking-service.entity';
 import { BookingResource } from './booking-resources.entity';
 
 @Entity('sites')
@@ -148,9 +148,11 @@ export class Site {
   @OneToOne(() => SiteBookingConfig, (config) => config.site, { cascade: true })
   bookingConfig: SiteBookingConfig;
 
-  @AutoMap(() => [BookingService])
-  @OneToMany(() => BookingService, (service) => service.site, { cascade: true })
-  bookingServices: BookingService[];
+  @AutoMap(() => [BookingServiceItem])
+  @OneToMany(() => BookingServiceItem, (service) => service.site, {
+    cascade: true,
+  })
+  bookingServices: BookingServiceItem[];
 
   @AutoMap(() => [BookingResource])
   @OneToMany(() => BookingResource, (resource) => resource.site, {
@@ -247,4 +249,21 @@ export class Site {
   @AutoMap(() => Boolean)
   @Column({ name: 'showAvatar', type: 'boolean', default: true })
   showAvatar: boolean;
+
+  // ── BYOK — Bring Your Own Key (SEC-001 / CE-004) ──
+
+  /**
+   * When true, use the site's own encrypted OpenAI key instead of the master env key.
+   * The key is stored encrypted via AES-256-GCM in encryptedOpenAiKey.
+   */
+  @AutoMap(() => Boolean)
+  @Column({ name: 'useCustomOpenAiKey', type: 'boolean', default: false })
+  useCustomOpenAiKey: boolean;
+
+  /**
+   * AES-256-GCM encrypted OpenAI API key. Format: "<iv>:<authTag>:<ciphertext>" (hex).
+   * NEVER returned to the client — only decrypted inside the AI proxy layer.
+   */
+  @Column({ name: 'encryptedOpenAiKey', type: 'text', nullable: true })
+  encryptedOpenAiKey: string | null;
 }

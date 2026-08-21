@@ -9,7 +9,7 @@ import { SiteModule } from '../site/site.module';
 import { NotificationModule } from '../notification/notification.module';
 import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
 import { BookingResource } from '../site/entities/booking-resources.entity';
-import { BookingService as BookingServiceEntity } from '../site/entities/booking-service.entity';
+import { BookingServiceItem } from '../site/entities/booking-service.entity';
 import { SharedModule } from '../shared/shared.module';
 
 @Module({
@@ -19,7 +19,7 @@ import { SharedModule } from '../shared/shared.module';
       BookingBlockout,
       SiteBookingConfig,
       BookingResource,
-      BookingServiceEntity,
+      BookingServiceItem,
     ]),
     forwardRef(() => SiteModule),
     NotificationModule,

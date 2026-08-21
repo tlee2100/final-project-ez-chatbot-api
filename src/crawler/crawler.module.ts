@@ -32,7 +32,18 @@ import { SitemapService } from './services/sitemap.service';
       DocumentChunk,
       Site,
     ]),
-    BullModule.registerQueue({ name: CRAWLER_QUEUE }),
+    BullModule.registerQueue({
+      name: CRAWLER_QUEUE,
+      settings: {
+        lockDuration: 180_000,
+        stalledInterval: 60_000,
+        maxStalledCount: 2,
+      },
+      defaultJobOptions: {
+        removeOnComplete: true,
+        removeOnFail: { count: 200, age: 7 * 24 * 3600 },
+      },
+    }),
     forwardRef(() => SiteModule),
     DocumentModule,
   ],

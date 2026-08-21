@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsOptional, IsInt } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsInt,
+  IsUUID,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** DTO for POST /api/internal/mcp/kb/search */
@@ -37,10 +43,31 @@ export class McpCreateBookingDto {
   @IsNotEmpty()
   phone: string;
 
-  @ApiProperty({ example: 'uuid-of-service' })
+  @ApiProperty({ example: 'uuid-of-service', required: false })
   @IsString()
-  @IsNotEmpty()
-  serviceId: string;
+  @IsOptional()
+  serviceId?: string;
+
+  @ApiProperty({
+    example: ['uuid-of-service-1', 'uuid-of-service-2'],
+    required: false,
+  })
+  @IsOptional()
+  @IsUUID('4', { each: true })
+  serviceIds?: string[];
+
+  @ApiProperty({ example: 2, required: false })
+  @IsOptional()
+  slotCount?: number;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  slots?: Array<{
+    resourceId: string;
+    date: string;
+    timeSlot: string;
+    serviceId?: string;
+  }>;
 
   @ApiProperty({ example: 'uuid-of-resource' })
   @IsString()
@@ -73,10 +100,27 @@ export class McpCancelBookingDto {
 
 /** DTO for POST /api/internal/mcp/booking/hold */
 export class McpHoldSlotDto {
-  @ApiProperty({ example: 'uuid-of-service' })
+  @ApiProperty({ example: 'uuid-of-service', required: false })
   @IsString()
   @IsOptional()
   serviceId?: string;
+
+  @ApiProperty({ example: 2, required: false })
+  @IsOptional()
+  slotCount?: number;
+
+  @ApiProperty({ example: ['09:00', '09:30'], required: false })
+  @IsOptional()
+  timeSlots?: string[];
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  slots?: Array<{
+    resourceId: string;
+    date: string;
+    timeSlot: string;
+    serviceId?: string;
+  }>;
 
   @ApiProperty({ example: 'uuid-of-resource' })
   @IsString()
@@ -96,18 +140,27 @@ export class McpHoldSlotDto {
 
 /** DTO for POST /api/internal/mcp/booking/release */
 export class McpReleaseHoldDto {
-  @ApiProperty({ example: 'uuid-of-resource' })
+  @ApiProperty({ example: 'uuid-of-resource', required: false })
   @IsString()
-  @IsNotEmpty()
-  resourceId: string;
+  @IsOptional()
+  resourceId?: string;
 
-  @ApiProperty({ example: '2026-08-10' })
+  @ApiProperty({ example: '2026-08-10', required: false })
   @IsString()
-  @IsNotEmpty()
-  date: string;
+  @IsOptional()
+  date?: string;
 
-  @ApiProperty({ example: '09:00' })
+  @ApiProperty({ example: '09:00', required: false })
   @IsString()
-  @IsNotEmpty()
-  timeSlot: string;
+  @IsOptional()
+  timeSlot?: string;
+
+  @ApiProperty({ example: 2, required: false })
+  @IsOptional()
+  slotCount?: number;
+
+  @ApiProperty({ example: 'uuid-session-id', required: false })
+  @IsString()
+  @IsOptional()
+  sessionId?: string;
 }

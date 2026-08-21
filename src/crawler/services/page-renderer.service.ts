@@ -1,6 +1,11 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type { Browser, BrowserContext, HTTPResponse } from 'puppeteer-core';
 import {
+  CRAWLER_BROWSER_CONNECT_TIMEOUT_MS,
   CRAWLER_NAVIGATION_TIMEOUT_MS,
   CRAWLER_USER_AGENT,
 } from '../constants/crawler.constants';
@@ -16,6 +21,7 @@ export type RenderedPage = {
 
 @Injectable()
 export class PageRendererService {
+  private readonly logger = new Logger(PageRendererService.name);
   private readonly safeHostCache = new Map<string, number>();
 
   constructor(private readonly urlService: CrawlerUrlService) {}
@@ -128,13 +134,24 @@ export class PageRendererService {
         'BROWSER_WS_ENDPOINT is required for crawler rendering',
       );
     }
+    let timer: NodeJS.Timeout | undefined;
     try {
       const { default: puppeteer } = await import('puppeteer-core');
-      return await puppeteer.connect({ browserWSEndpoint });
-    } catch {
+      const connectPromise = puppeteer.connect({ browserWSEndpoint });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('Browser WebSocket connection timeout (15s)'));
+        }, CRAWLER_BROWSER_CONNECT_TIMEOUT_MS);
+      });
+      return await Promise.race([connectPromise, timeoutPromise]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Browser connection failed: ${detail}`);
       throw new ServiceUnavailableException(
-        'Browser rendering service is unavailable',
+        `Browser rendering service is unavailable: ${detail}`,
       );
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Get,
-  Headers,
   Param,
   Post,
   Query,
@@ -10,7 +9,9 @@ import {
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { McpSecretGuard } from './guards/mcp-secret.guard';
+import { McpContext } from './decorators/mcp-context.decorator';
 import { McpService } from './mcp.service';
+import type { McpValidatedContext } from './types/mcp.types';
 import {
   McpCancelBookingDto,
   McpCreateBookingDto,
@@ -67,10 +68,12 @@ export class McpController {
   })
   async getConversationContext(
     @Param('id') conversationId: string,
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.getConversationContext(siteId, conversationId);
+    return this.mcpService.getConversationContext(
+      context.siteId,
+      conversationId,
+    );
   }
 
   /**
@@ -86,10 +89,9 @@ export class McpController {
   })
   async getUserDetails(
     @Query('email') email: string,
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.getUserDetails(siteId, email);
+    return this.mcpService.getUserDetails(context.siteId, email);
   }
 
   /**
@@ -105,10 +107,9 @@ export class McpController {
   })
   async getSiteConfig(
     @Param('siteId') siteId: string,
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
   ) {
-    const { siteId: contextSiteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.getSiteConfig(siteId || contextSiteId);
+    return this.mcpService.getSiteConfig(siteId || context.siteId);
   }
 
   // ─── Knowledge (RAG) ──────────────────────────────────────────────────────
@@ -126,14 +127,13 @@ export class McpController {
     required: true,
   })
   async searchKnowledge(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Body() dto: McpSearchKnowledgeDto,
     @Query('topK') topK?: string,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
     return this.mcpService.searchKnowledge(
       dto.query,
-      siteId,
+      context.siteId,
       topK ? parseInt(topK, 10) : undefined,
     );
   }
@@ -150,12 +150,11 @@ export class McpController {
     description: 'Signed context carrying siteId',
     required: true,
   })
-  async listDocuments(@Headers('x-mcp-context') mcpContext: string) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return this.mcpService.listDocuments(siteId);
+  async listDocuments(@McpContext() context: McpValidatedContext) {
+    return this.mcpService.listDocuments(context.siteId);
   }
 
-  // ─── Booking (Mocked — Phase 1B) ──────────────────────────────────────────
+  // ─── Booking ──────────────────────────────────────────────────────────────
 
   /**
    * GET /api/internal/mcp/booking/slots
@@ -186,14 +185,13 @@ export class McpController {
     required: false,
   })
   async getAvailableSlots(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Query('date') date: string,
     @Query('resourceId') resourceId?: string,
     @Query('serviceId') serviceId?: string,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
     return await this.mcpService.getAvailableSlots(
-      siteId,
+      context.siteId,
       date,
       resourceId,
       serviceId,
@@ -213,11 +211,13 @@ export class McpController {
     required: true,
   })
   async holdSlot(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Body() dto: McpHoldSlotDto,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return await this.mcpService.holdSlot(siteId, dto);
+    return await this.mcpService.holdSlot(context.siteId, {
+      ...dto,
+      conversationId: context.conversationId,
+    });
   }
 
   /**
@@ -233,11 +233,13 @@ export class McpController {
     required: true,
   })
   async releaseHold(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Body() dto: McpReleaseHoldDto,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return await this.mcpService.releaseHold(siteId, dto);
+    return await this.mcpService.releaseHold(context.siteId, {
+      ...dto,
+      sessionId: dto.sessionId || context.conversationId,
+    });
   }
 
   /**
@@ -253,11 +255,10 @@ export class McpController {
     required: true,
   })
   async createBooking(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Body() dto: McpCreateBookingDto,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return await this.mcpService.createBooking(siteId, dto);
+    return await this.mcpService.createBooking(context.siteId, dto);
   }
 
   /**
@@ -273,10 +274,9 @@ export class McpController {
     required: true,
   })
   async cancelBooking(
-    @Headers('x-mcp-context') mcpContext: string,
+    @McpContext() context: McpValidatedContext,
     @Body() dto: McpCancelBookingDto,
   ) {
-    const { siteId } = this.mcpService.validateToken(mcpContext);
-    return await this.mcpService.cancelBooking(siteId, dto.bookingCode);
+    return await this.mcpService.cancelBooking(context.siteId, dto.bookingCode);
   }
 }

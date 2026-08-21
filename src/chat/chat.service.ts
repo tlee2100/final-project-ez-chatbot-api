@@ -4,6 +4,8 @@ import {
   NotFoundException,
   UnauthorizedException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   forwardRef,
   Inject,
 } from '@nestjs/common';
@@ -51,6 +53,8 @@ import { AiService } from './ai.service';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 import { Booking } from '../booking/entities/booking.entity';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
+import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
+import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -68,6 +72,12 @@ type ChatMessageDto = Pick<
 };
 const MAX_MESSAGE_LENGTH = 1000;
 
+/** In-memory state for WS rate limiting (SEC-005) */
+interface WsRateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
@@ -79,6 +89,17 @@ export class ChatService {
     string,
     { agent: Set<string>; visitor: Set<string> }
   >();
+
+  /**
+   * SEC-005 — WebSocket Rate Limiter
+   * Key = `${siteId}-${clientIp}`. Enforces WS_LIMIT requests per WS_WINDOW_MS.
+   * Entries are lazily cleaned up on the next request from the same key.
+   */
+  private readonly wsRateLimitMap = new Map<string, WsRateLimitEntry>();
+  private readonly WS_LIMIT = 30; // max messages per window
+  private readonly WS_WINDOW_MS = 60_000; // 1 minute
+  /** Active IP session tracking: `${siteId}-${clientIp}` -> Set<conversationId> */
+  private readonly ipActiveSessionsMap = new Map<string, Set<string>>();
 
   constructor(
     @InjectRepository(Site)
@@ -100,6 +121,8 @@ export class ChatService {
     private readonly chatTimeoutService: ChatTimeoutService,
     private readonly emailQueueService: EmailQueueService,
     private readonly aiService: AiService,
+    @Inject(AI_MODERATION_SERVICE)
+    private readonly moderationService: IAIModerationServiceType,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -177,16 +200,18 @@ export class ChatService {
         this.trackConversationPresence(client, visitor.conversationId);
 
         const receiverType = SenderType.VISITOR;
-        await this.markConversationDelivered(
-          visitor.conversationId,
-          receiverType,
-        );
-        this.chatGateway.server
-          .to(`conversation-${visitor.conversationId}`)
-          .emit('conversation-delivered', {
-            conversationId: visitor.conversationId,
+        if (!visitor.conversationId.startsWith('admin-test-')) {
+          await this.markConversationDelivered(
+            visitor.conversationId,
             receiverType,
-          });
+          );
+          this.chatGateway.server
+            .to(`conversation-${visitor.conversationId}`)
+            .emit('conversation-delivered', {
+              conversationId: visitor.conversationId,
+              receiverType,
+            });
+        }
 
         client.emit('connected', { message: `Connected as visitor` });
       }
@@ -369,8 +394,117 @@ export class ChatService {
         return;
       }
       payload.senderType = SenderType.VISITOR;
+
+      // ── SEC-005: WebSocket Rate Limit ──────────────────────────────────────
+      const siteIdForLimit = visitor.siteId ?? 'unknown';
+      const clientIp =
+        (client.handshake.headers['x-forwarded-for'] as string | undefined)
+          ?.split(',')[0]
+          ?.trim() ??
+        client.handshake.address ??
+        'unknown';
+      const rlKey = `${siteIdForLimit}-${clientIp}`;
+      const now = Date.now();
+      const entry = this.wsRateLimitMap.get(rlKey);
+
+      if (entry && now < entry.resetAt) {
+        if (entry.count >= this.WS_LIMIT) {
+          this.logger.warn(`WS rate limit exceeded — key: ${rlKey}`);
+          client.emit('messageError', {
+            message: 'Rate limit exceeded. Please slow down.',
+            code: 429,
+          });
+          return;
+        }
+        entry.count += 1;
+      } else {
+        // New window or expired entry
+        this.wsRateLimitMap.set(rlKey, {
+          count: 1,
+          resetAt: now + this.WS_WINDOW_MS,
+        });
+      }
+
+      // ── SEC-005: Max Messages Per Session Enforcement ──────────────────────
+      if (!payload.conversationId.startsWith('admin-test-')) {
+        const conversation = await this.conversationRepository.findOne({
+          where: { id: payload.conversationId },
+          relations: { site: true },
+        });
+        if (conversation?.site?.maxMessagesPerSession) {
+          const msgCount = await this.chatMessageRepository.count({
+            where: {
+              conversationId: payload.conversationId,
+              senderType: SenderType.VISITOR,
+            },
+          });
+          if (msgCount >= conversation.site.maxMessagesPerSession) {
+            this.logger.warn(
+              `Max messages per session cap reached (${msgCount}/${conversation.site.maxMessagesPerSession}) for conv ${payload.conversationId}`,
+            );
+            client.emit('messageError', {
+              message:
+                'Session message limit reached. Please start a new conversation.',
+              code: 429,
+            });
+            return;
+          }
+        }
+      }
+
+      // ── SEC-006: Content Moderation ────────────────────────────────────────
+      const isSafe = await this.moderationService.isSafe(payload.content);
+      if (!isSafe) {
+        this.logger.warn(
+          `Message blocked by moderation for conversation ${payload.conversationId}`,
+        );
+        client.emit('messageError', {
+          message:
+            'Your message was blocked because it violates our content policy.',
+          code: 403,
+        });
+        return;
+      }
     } else if (user) {
       payload.senderType = SenderType.AGENT;
+    }
+
+    // Ephemeral in-memory test conversation (sandbox mode)
+    if (payload.conversationId.startsWith('admin-test-')) {
+      const siteId =
+        visitor?.siteId || (client.handshake.query.siteId as string);
+      const messageEvent = {
+        id: payload.localId || `msg-test-${Date.now()}`,
+        conversationId: payload.conversationId,
+        content: payload.content,
+        senderType: SenderType.VISITOR,
+        createdAt: new Date().toISOString(),
+        status: MessageStatus.SENT,
+      };
+
+      client.emit('messageSaved', {
+        localId: payload.localId,
+        ...messageEvent,
+      });
+
+      client
+        .to(`conversation-${payload.conversationId}`)
+        .emit('newMessage', messageEvent);
+
+      this.graphService
+        .handleVisitorMessage(
+          payload.conversationId,
+          siteId,
+          undefined,
+          undefined,
+          payload.content,
+        )
+        .catch((err: unknown) =>
+          this.logger.error(
+            `AI test stream error: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      return;
     }
 
     try {
@@ -459,6 +593,7 @@ export class ChatService {
   }
 
   handleTyping(client: Socket, payload: { conversationId: string }): void {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     const user = socketData.user;
     const visitor = socketData.visitor;
@@ -482,6 +617,7 @@ export class ChatService {
     client: Socket,
     payload: { conversationId: string },
   ): Promise<void> {
+    if (!payload?.conversationId) return;
     const socketData = client.data as SocketData;
     if (!socketData.user && !socketData.visitor) return;
 
@@ -499,6 +635,7 @@ export class ChatService {
 
   async createConversation(
     dto: CreateConversationDto,
+    clientIp?: string,
   ): Promise<CreateConversationResponseDto> {
     const site = await this.siteRepository.findOne({
       where: { id: dto.siteId },
@@ -511,6 +648,18 @@ export class ChatService {
       throw new ForbiddenException(
         'Chatbot is currently disabled for this site',
       );
+    }
+
+    // ── SEC-005: Max Sessions Per IP Enforcement ────────────────────────────
+    if (clientIp && site.maxSessionsPerIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      if (sessions.size >= site.maxSessionsPerIp) {
+        throw new HttpException(
+          'Maximum active chat sessions reached for your IP address. Please continue existing conversation or try again later.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
     }
 
     const result = await this.conversationRepository.manager.transaction(
@@ -553,6 +702,13 @@ export class ChatService {
         };
       },
     );
+
+    if (clientIp) {
+      const rlKey = `${dto.siteId}-${clientIp}`;
+      const sessions = this.ipActiveSessionsMap.get(rlKey) || new Set<string>();
+      sessions.add(result.conversationId);
+      this.ipActiveSessionsMap.set(rlKey, sessions);
+    }
 
     this.logger.log(
       `New conversation ${result.conversationId} created for site ${dto.siteId}`,
@@ -605,15 +761,13 @@ export class ChatService {
    * pipeline works normally, and it does NOT fire agent notifications (unlike
    * the public createConversation) to avoid polluting the inbox.
    */
-  async createAdminTestConversation(
-    siteId: string,
-    user: JwtUser,
-  ): Promise<CreateConversationResponseDto> {
+  async assertSiteAccessForTest(siteId: string, user: JwtUser): Promise<Site> {
     const site = await this.siteRepository.findOne({
       where: { id: siteId },
       select: {
         id: true,
         ownerId: true,
+        organizationId: true,
         name: true,
         enableConversationTimeout: true,
         inactivityTimeoutMinutes: true,
@@ -629,14 +783,26 @@ export class ChatService {
       throw new NotFoundException(`Site ${siteId} not found`);
     }
 
-    // Only the site owner or a super-admin may use the test endpoint.
     const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
     const isOwner = site.ownerId === user.id;
-    if (!isSuperAdmin && !isOwner) {
+    const isOrgAdmin =
+      user.role === UserRole.ADMIN &&
+      user.organizationId !== null &&
+      site.organizationId === user.organizationId;
+    if (!isSuperAdmin && !isOwner && !isOrgAdmin) {
       throw new ForbiddenException(
-        'Only the site owner or a super-admin may create a test conversation for this site',
+        'You do not have permission to test this site',
       );
     }
+
+    return site;
+  }
+
+  async createAdminTestConversation(
+    siteId: string,
+    user: JwtUser,
+  ): Promise<CreateConversationResponseDto> {
+    const site = await this.assertSiteAccessForTest(siteId, user);
 
     const conversation = this.conversationRepository.create({
       siteId,
@@ -1117,6 +1283,13 @@ export class ChatService {
     status: ConversationStatus,
     reason?: ClosedReason,
   ): Promise<Conversation> {
+    if (id.startsWith('admin-test-')) {
+      return {
+        id,
+        status,
+        closedReason: reason,
+      } as Conversation;
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
     });
@@ -1133,6 +1306,7 @@ export class ChatService {
     if (status === ConversationStatus.CLOSED) {
       if (reason) conversation.closedReason = reason;
       this.chatTimeoutService.cancelTimer(id);
+      this.ipActiveSessionsMap.forEach((sessions) => sessions.delete(id));
     }
     conversation.lastActivityAt = new Date();
 
@@ -1162,6 +1336,14 @@ export class ChatService {
   }
 
   async getPublicConversationStatus(id: string) {
+    if (id.startsWith('admin-test-')) {
+      return {
+        conversationId: id,
+        status: ConversationStatus.OPEN,
+        handlingStatus: HandlingStatus.AI_HANDLING,
+        closedReason: null,
+      };
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
       select: {
@@ -1252,6 +1434,17 @@ export class ChatService {
     senderType: SenderType,
     agentId?: string,
   ): Promise<ChatMessage> {
+    if (conversationId.startsWith('admin-test-')) {
+      return {
+        id: `test-msg-${Date.now()}`,
+        conversationId,
+        content,
+        senderType,
+        agentId: agentId ?? null,
+        status: MessageStatus.SENT,
+        createdAt: new Date(),
+      } as ChatMessage;
+    }
     const conversation = await this.getConversationById(conversationId);
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ForbiddenException('Conversation is closed');
@@ -1308,6 +1501,9 @@ export class ChatService {
     conversationId: string,
     receiverType: SenderType,
   ): Promise<void> {
+    if (conversationId.startsWith('admin-test-')) {
+      return;
+    }
     await this.chatMessageRepository.update(
       {
         conversationId,
@@ -1325,6 +1521,10 @@ export class ChatService {
     conversationId: string,
     readerType: SenderType,
   ): Promise<void> {
+    if (conversationId.startsWith('admin-test-')) {
+      return;
+    }
+    if (!conversationId) return;
     await this.chatMessageRepository.update(
       {
         conversationId,
@@ -1344,6 +1544,14 @@ export class ChatService {
     id: string,
     reason: ClosedReason = ClosedReason.VISITOR,
   ): Promise<Conversation> {
+    if (id.startsWith('admin-test-')) {
+      this.chatGateway.notifyConversationClosed(id, 'admin-test');
+      return {
+        id,
+        status: ConversationStatus.CLOSED,
+        closedReason: reason,
+      } as Conversation;
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
       relations: { site: { owner: true } },

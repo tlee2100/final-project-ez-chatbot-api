@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Post,
+  Put,
   Req,
   UseGuards,
   Get,
@@ -138,6 +139,8 @@ export class SiteController {
       chatButtonText: site.chatButtonText,
       showAvatar: site.showAvatar,
       bookingEnabled: site.bookingEnabled,
+      industryTemplate: site.industryTemplateId ?? 'salon',
+      industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
       bookingServices:
         site.bookingServices?.map((s) => ({
           id: s.id,
@@ -313,5 +316,52 @@ export class SiteController {
     @Req() req: AuthRequest,
   ) {
     return this.siteService.removeAgent(id, agentId, req.user);
+  }
+
+  // ── BYOK — Bring Your Own Key (SEC-001 / CE-004) ──────────────────────────
+
+  @Put(':id/api-key')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Save a custom OpenAI API key for this site. Key is AES-256-GCM encrypted before storage and never returned in plain text.',
+  })
+  @ApiParam({ name: 'id', description: 'Site ID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['apiKey'],
+      properties: {
+        apiKey: { type: 'string', description: 'Raw OpenAI API key (sk-...)' },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Key saved successfully' })
+  @ApiResponse({ status: 400, description: 'Empty key provided' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @UseGuards(AuthGuard('jwt'))
+  async saveCustomApiKey(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('apiKey') apiKey: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.siteService.saveCustomApiKey(id, req.user, apiKey);
+  }
+
+  @Delete(':id/api-key')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Remove the custom OpenAI API key for this site, reverting to the shared master key.',
+  })
+  @ApiParam({ name: 'id', description: 'Site ID' })
+  @ApiResponse({ status: 200, description: 'Key removed successfully' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @UseGuards(AuthGuard('jwt'))
+  async removeCustomApiKey(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.siteService.removeCustomApiKey(id, req.user);
   }
 }

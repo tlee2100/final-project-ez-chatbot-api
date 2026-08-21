@@ -20,6 +20,7 @@
     "test:crawler:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand src/crawler/services/page-renderer.integration.spec.ts",
     "typeorm": "typeorm-ts-node-commonjs -d src/data-source.ts",
     "seed:super-admin": "ts-node -r tsconfig-paths/register src/scripts/seed-super-admin.ts",
+    "seed:general-template": "ts-node -r tsconfig-paths/register src/scripts/seed-general-template.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check .",

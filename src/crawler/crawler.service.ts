@@ -1,12 +1,14 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   OnModuleInit,
   ServiceUnavailableException,
   forwardRef,
   Inject,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bull';
@@ -40,11 +42,14 @@ import {
   CrawlRunStatus,
   CrawlRunTrigger,
   DocumentSourceKind,
+  TERMINAL_CRAWL_ITEM_STATUSES,
 } from './enums/crawler.enums';
 import { CrawlerUrlService } from './services/crawler-url.service';
 
 @Injectable()
 export class CrawlerService implements OnModuleInit {
+  private readonly logger = new Logger(CrawlerService.name);
+
   constructor(
     @InjectRepository(CrawlerConfig)
     private readonly configRepository: Repository<CrawlerConfig>,
@@ -70,6 +75,19 @@ export class CrawlerService implements OnModuleInit {
       where: { autoSyncEnabled: true },
     });
     for (const config of configs) await this.syncRepeatableJob(config);
+    await this.recoverOrphanedRuns();
+  }
+
+  @Cron('*/5 * * * *')
+  async handleOrphanedRunRecovery(): Promise<void> {
+    if (!this.isFeatureEnabled()) return;
+    try {
+      await this.recoverOrphanedRuns();
+    } catch (error) {
+      this.logger.error(
+        `Periodic orphaned run recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async getConfig(siteId: string, user: JwtUser) {
@@ -457,8 +475,9 @@ export class CrawlerService implements OnModuleInit {
         jobId: runItemId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 5_000 },
+        timeout: 120_000,
         removeOnComplete: true,
-        removeOnFail: true,
+        removeOnFail: { count: 200, age: 7 * 24 * 3600 },
       },
     );
   }
@@ -468,8 +487,134 @@ export class CrawlerService implements OnModuleInit {
       jobId: `sitemap-${runId}`,
       attempts: 1,
       removeOnComplete: true,
-      removeOnFail: true,
+      removeOnFail: { count: 200, age: 7 * 24 * 3600 },
     };
+  }
+
+  async recoverOrphanedRuns(): Promise<void> {
+    const activeRuns = await this.runRepository.find({
+      where: { status: In(ACTIVE_CRAWL_RUN_STATUSES) },
+      order: { createdAt: 'ASC' },
+    });
+    if (activeRuns.length === 0) return;
+
+    this.logger.log(
+      `Found ${activeRuns.length} active crawl run(s) to inspect for recovery`,
+    );
+
+    for (const run of activeRuns) {
+      const isSitemapDiscovery =
+        run.status === CrawlRunStatus.QUEUED ||
+        run.status === CrawlRunStatus.DISCOVERING ||
+        (run.totalPages === 0 &&
+          [CrawlRunTrigger.MANUAL_SITEMAP, CrawlRunTrigger.SCHEDULED].includes(
+            run.trigger,
+          ));
+
+      if (isSitemapDiscovery) {
+        const sitemapJobId = `sitemap-${run.id}`;
+        const existingJob = await this.queue.getJob(sitemapJobId);
+        const isJobActiveOrWaiting =
+          existingJob &&
+          !(await existingJob.isFailed()) &&
+          !(await existingJob.isCompleted());
+
+        if (!isJobActiveOrWaiting) {
+          if (existingJob) {
+            await existingJob.remove().catch(() => undefined);
+          }
+          this.logger.log(
+            `Re-enqueuing orphaned sitemap job for run ${run.id}`,
+          );
+          await this.queue.add(
+            CRAWL_SITEMAP_JOB,
+            { runId: run.id },
+            this.sitemapJobOptions(run.id),
+          );
+        }
+        continue;
+      }
+
+      const pendingItems = await this.itemRepository.find({
+        where: {
+          runId: run.id,
+          status: In([CrawlRunItemStatus.QUEUED, CrawlRunItemStatus.RENDERING]),
+        },
+      });
+
+      if (pendingItems.length === 0 && run.totalPages > 0) {
+        const terminalCount = await this.itemRepository.count({
+          where: {
+            runId: run.id,
+            status: In(TERMINAL_CRAWL_ITEM_STATUSES),
+          },
+        });
+        if (terminalCount >= run.totalPages) {
+          const failedCount = await this.itemRepository.count({
+            where: {
+              runId: run.id,
+              status: In([
+                CrawlRunItemStatus.FAILED,
+                CrawlRunItemStatus.QUOTA_EXCEEDED,
+              ]),
+            },
+          });
+          const successCount = await this.itemRepository.count({
+            where: {
+              runId: run.id,
+              status: In([
+                CrawlRunItemStatus.INDEXED,
+                CrawlRunItemStatus.UNCHANGED,
+                CrawlRunItemStatus.SKIPPED_ROBOTS,
+                CrawlRunItemStatus.SKIPPED_NOINDEX,
+              ]),
+            },
+          });
+          let finalStatus = CrawlRunStatus.COMPLETED;
+          if (failedCount > 0) {
+            finalStatus =
+              successCount > 0
+                ? CrawlRunStatus.PARTIAL_FAILED
+                : CrawlRunStatus.FAILED;
+          }
+          this.logger.log(
+            `Marking fully processed run ${run.id} as ${finalStatus}`,
+          );
+          await this.runRepository.update(run.id, {
+            status: finalStatus,
+            finishedAt: new Date(),
+          });
+          continue;
+        }
+      }
+
+      let reEnqueuedCount = 0;
+      for (const item of pendingItems) {
+        const existingJob = await this.queue.getJob(item.id);
+        const isJobActiveOrWaiting =
+          existingJob &&
+          !(await existingJob.isFailed()) &&
+          !(await existingJob.isCompleted());
+
+        if (!isJobActiveOrWaiting) {
+          if (existingJob) {
+            await existingJob.remove().catch(() => undefined);
+          }
+          if (item.status !== CrawlRunItemStatus.QUEUED) {
+            await this.itemRepository.update(item.id, {
+              status: CrawlRunItemStatus.QUEUED,
+            });
+          }
+          await this.enqueuePage(item.id);
+          reEnqueuedCount++;
+        }
+      }
+      if (reEnqueuedCount > 0) {
+        this.logger.log(
+          `Re-enqueued ${reEnqueuedCount} orphaned page job(s) for run ${run.id}`,
+        );
+      }
+    }
   }
 
   private async syncRepeatableJob(config: CrawlerConfig): Promise<void> {

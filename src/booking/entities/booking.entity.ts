@@ -4,6 +4,8 @@ import {
   Entity,
   Index,
   JoinColumn,
+  JoinTable,
+  ManyToMany,
   ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
@@ -12,7 +14,7 @@ import {
 import { AutoMap } from '@automapper/classes';
 import { Site } from '../../site/entities/site.entity';
 import { BookingResource } from '../../site/entities/booking-resources.entity';
-import { BookingService as BookingServiceEntity } from '../../site/entities/booking-service.entity';
+import { BookingServiceItem } from '../../site/entities/booking-service.entity';
 import { BookingStatus } from '../enums/booking-status.enum';
 
 @Entity('bookings')
@@ -20,7 +22,7 @@ import { BookingStatus } from '../enums/booking-status.enum';
 @Index('IDX_bookings_site_status_start', ['siteId', 'status', 'startAt'])
 @Exclusion(
   'no_overlap',
-  `USING gist ("siteId" WITH =, COALESCE("resourceId"::text, '___NULL___') WITH =, tstzrange("startAt", "endAt") WITH &&) WHERE (status <> 'cancelled')`,
+  `USING gist ("siteId" WITH =, COALESCE("resourceId"::text, '___NULL___') WITH =, tstzrange("startAt", "endAt") WITH &&) WHERE (status = 'confirmed')`,
 )
 export class Booking {
   @AutoMap()
@@ -51,12 +53,21 @@ export class Booking {
   @Column({ type: 'uuid', nullable: true })
   serviceId: string | null;
 
-  @ManyToOne(() => BookingServiceEntity, {
+  @ManyToOne(() => BookingServiceItem, {
     onDelete: 'SET NULL',
     nullable: true,
   })
   @JoinColumn({ name: 'serviceId' })
-  service: BookingServiceEntity | null;
+  service: BookingServiceItem | null;
+
+  @AutoMap(() => [BookingServiceItem])
+  @ManyToMany(() => BookingServiceItem, { cascade: false })
+  @JoinTable({
+    name: 'booking_assigned_services',
+    joinColumn: { name: 'bookingId', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'serviceId', referencedColumnName: 'id' },
+  })
+  services: BookingServiceItem[];
 
   @AutoMap()
   @Column({ type: 'timestamptz' })

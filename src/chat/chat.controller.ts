@@ -25,7 +25,7 @@ import {
   ApiBody,
   ApiResponse,
 } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -48,6 +48,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { validateAndGetImageFile } from '../utils/file-signature.util';
 import { ClosedReason } from './entities/conversation.entity';
 import { CreateAdminTestConversationDto } from './dto/create-admin-test-conversation.dto';
+import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
 
 @ApiTags('Chat')
 @Controller('chat')
@@ -66,8 +67,15 @@ export class ChatController {
   @Post('conversations')
   createConversation(
     @Body() dto: CreateConversationDto,
+    @Req() req: Request,
   ): Promise<CreateConversationResponseDto> {
-    return this.chatService.createConversation(dto);
+    const clientIp =
+      (req.headers['x-forwarded-for'] as string | undefined)
+        ?.split(',')[0]
+        ?.trim() ??
+      req.ip ??
+      req.socket?.remoteAddress;
+    return this.chatService.createConversation(dto, clientIp);
   }
 
   // ─── Admin: Create test conversation (authenticated) ──────────────────────
@@ -88,6 +96,33 @@ export class ChatController {
     @Req() req: AuthRequest,
   ): Promise<CreateConversationResponseDto> {
     return this.chatService.createAdminTestConversation(dto.siteId, req.user);
+  }
+
+  // ─── Admin: Stream test chat response (stateless SSE) ──────────────────────
+
+  /**
+   * Protected — admin/owner tests chatbot responses with live Knowledge Base & tools.
+   * Completely stateless & ephemeral: does NOT save anything to conversations or chat_messages tables.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Post('admin-test/stream')
+  @HttpCode(HttpStatus.OK)
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  @Header('Transfer-Encoding', 'chunked')
+  @Header('Cache-Control', 'no-cache')
+  @Header('Connection', 'keep-alive')
+  @Header('X-Accel-Buffering', 'no')
+  async streamAdminTestResponse(
+    @Body() dto: AdminTestStreamDto,
+    @Req() req: AuthRequest,
+    @Res() res: Response,
+  ) {
+    const site = await this.chatService.assertSiteAccessForTest(
+      dto.siteId,
+      req.user,
+    );
+    return this.graphService.handleAdminTestStream(dto, site, res);
   }
   // ─── Public: AI SSE streaming endpoint (visitor) ────────────────────────
 
@@ -128,6 +163,7 @@ export class ChatController {
     return this.chatService.getMessagesForConversation(id, cursor, limit);
   }
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Get('public/conversations/:id/status')
   getPublicConversationStatus(@Param('id') id: string) {
     return this.chatService.getPublicConversationStatus(id);
@@ -268,6 +304,7 @@ export class ChatController {
     return this.chatService.updatePublicConversationStatus(id, dto);
   }
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Patch('public/conversations/:id/call-agent')
   async callAgent(@Param('id') id: string) {
     return this.chatService.escalateToAgent(id);
@@ -275,6 +312,7 @@ export class ChatController {
 
   // ─── Attachments ────────────────────────────────────────────────────────
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Post('public/conversations/:id/upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadAttachmentPublic(

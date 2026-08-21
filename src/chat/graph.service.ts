@@ -64,7 +64,7 @@ import {
   sanitizeBookingChips,
   sanitizeSmallTalkResponse,
 } from './chat-flow.utils';
-
+import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
 // ─── Agent State ──────────────────────────────────────────────────────────────
 
 /** Intent categories the classifier node can assign */
@@ -74,6 +74,7 @@ type IntentType =
   | 'small_talk'
   | 'book_appointment'
   | 'booking_slot_selected'
+  | 'confirm_booking'
   | 'check_booking'
   | 'cancel_booking'
   | 'abort_cancel_flow'
@@ -223,6 +224,15 @@ export interface GraphRunOptions {
   hasNegativeSentiment?: boolean;
   /** Initial cancel state parsed from last AI message or explicit state */
   initialCancelState?: CancelState;
+  /**
+   * The Site entity — used by AiService.buildModelForSite() to resolve BYOK key.
+   * When provided and site.useCustomOpenAiKey is true, the per-site encrypted key is used.
+   */
+  site?: {
+    id?: string;
+    useCustomOpenAiKey?: boolean;
+    encryptedOpenAiKey?: string | null;
+  };
 }
 
 export interface GraphRunResult {
@@ -246,6 +256,7 @@ export interface GraphRunResult {
 @Injectable()
 export class GraphService {
   private readonly logger = new Logger(GraphService.name);
+  private readonly testSessionMessages = new Map<string, LLMMessage[]>();
 
   constructor(
     private readonly aiService: AiService,
@@ -273,6 +284,10 @@ export class GraphService {
    * Returns false (and logs) when AI should not respond.
    */
   async canRunAi(conversationId: string, siteId: string): Promise<boolean> {
+    if (conversationId.startsWith('admin-test-')) {
+      return true;
+    }
+
     const [conversation, site] = await Promise.all([
       this.conversationRepo.findOne({ where: { id: conversationId } }),
       this.siteRepo.findOne({ where: { id: siteId } }),
@@ -317,10 +332,103 @@ export class GraphService {
     siteId: string,
     res?: ExpressResponse,
     onNegativeSentiment?: (text: string) => Promise<void>,
+    newTestMessageContent?: string,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
       if (res) res.end();
+      return;
+    }
+
+    if (conversationId.startsWith('admin-test-')) {
+      const site = await this.siteRepo.findOne({
+        where: { id: siteId },
+        relations: {
+          industryTemplateInfo: true,
+          bookingConfig: true,
+          bookingServices: true,
+          bookingResources: true,
+        },
+      });
+
+      if (!this.testSessionMessages.has(conversationId)) {
+        this.testSessionMessages.set(conversationId, []);
+      }
+      const history = this.testSessionMessages.get(conversationId)!;
+      if (newTestMessageContent) {
+        history.push({ role: 'user', content: newTestMessageContent });
+      }
+
+      const onFinish = (text: string): Promise<void> => {
+        history.push({ role: 'assistant', content: text });
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('newMessage', {
+            id: `ai-msg-${Date.now()}`,
+            conversationId,
+            content: text,
+            senderType: 'AI',
+            createdAt: new Date().toISOString(),
+          });
+        return Promise.resolve();
+      };
+
+      const onRequestHandoff = (): Promise<void> => {
+        // No handoff in sandbox test
+        return Promise.resolve();
+      };
+
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('ai-stream-start', { conversationId });
+
+      try {
+        await this.runStream({
+          messages: [...history],
+          siteId,
+          conversationId,
+          systemPromptOverride: site?.systemPromptOverride ?? null,
+          maxTokensPerResponse: site?.maxTokensPerResponse ?? 1000,
+          visitorContext: {
+            name: 'Admin Tester',
+          },
+          siteContext: {
+            name: site?.name ?? undefined,
+            domains: site?.allowedDomains ?? [],
+            bookingEnabled: site?.bookingEnabled === true,
+            bookingServices:
+              site?.bookingServices?.map((service) => ({
+                id: service.id,
+                name: service.name,
+              })) ?? [],
+            bookingResources:
+              site?.bookingResources?.map((resource) => ({
+                id: resource.id,
+                name: resource.name,
+              })) ?? [],
+            bookingHours: site?.bookingConfig
+              ? {
+                  timezone: site.bookingConfig.bookingTimezone,
+                  availableDays: site.bookingConfig.bookingAvailableDays,
+                  startTime: site.bookingConfig.bookingStartTime,
+                  endTime: site.bookingConfig.bookingEndTime,
+                  slotDuration: site.bookingConfig.bookingSlotDuration,
+                }
+              : undefined,
+            industryTemplateConfig: site?.industryTemplateInfo?.config,
+          },
+          res,
+          server: this.chatGateway.server,
+          onFinish,
+          onRequestHandoff,
+          sentimentDetection: false,
+          site: site ?? undefined,
+        });
+      } finally {
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('ai-stream-end', { conversationId });
+      }
       return;
     }
 
@@ -444,12 +552,92 @@ export class GraphService {
         onNegativeSentiment,
         hasNegativeSentiment: conversation.hasNegativeSentiment,
         initialCancelState,
+        site: site ?? undefined,
       });
       console.log(`result::: ${JSON.stringify(result)}`);
     } finally {
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
         .emit('ai-stream-end', { conversationId });
+    }
+  }
+
+  /**
+   * High-level entry point for Admin In-Dashboard Testing (Stateless SSE).
+   * Runs the full RAG / LangGraph pipeline using in-memory conversation history.
+   * Completely bypasses database persistence (no rows in conversations or chat_messages).
+   */
+  async handleAdminTestStream(
+    dto: AdminTestStreamDto,
+    site: Site,
+    res: ExpressResponse,
+  ): Promise<void> {
+    const messages: LLMMessage[] = dto.messages.map((m) => ({
+      role:
+        m.role === 'user'
+          ? ('user' as const)
+          : m.role === 'assistant'
+            ? ('assistant' as const)
+            : ('system' as const),
+      content: m.content,
+    }));
+
+    const dummyConversationId = `admin-test-${Date.now()}`;
+
+    try {
+      await this.runStream({
+        messages,
+        siteId: site.id,
+        conversationId: dummyConversationId,
+        systemPromptOverride:
+          dto.systemPromptOverride ?? site.systemPromptOverride ?? null,
+        maxTokensPerResponse: site.maxTokensPerResponse ?? 1000,
+        visitorContext: {
+          name: 'Admin Tester',
+        },
+        siteContext: {
+          name: site.name ?? undefined,
+          domains: site.allowedDomains ?? [],
+          bookingEnabled: site.bookingEnabled === true,
+          bookingServices:
+            site.bookingServices?.map((service) => ({
+              id: service.id,
+              name: service.name,
+            })) ?? [],
+          bookingResources:
+            site.bookingResources?.map((resource) => ({
+              id: resource.id,
+              name: resource.name,
+            })) ?? [],
+          bookingHours: site.bookingConfig
+            ? {
+                timezone: site.bookingConfig.bookingTimezone,
+                availableDays: site.bookingConfig.bookingAvailableDays,
+                startTime: site.bookingConfig.bookingStartTime,
+                endTime: site.bookingConfig.bookingEndTime,
+                slotDuration: site.bookingConfig.bookingSlotDuration,
+              }
+            : undefined,
+          industryTemplateConfig: site.industryTemplateInfo?.config,
+        },
+        res,
+        server: this.chatGateway.server,
+        onFinish: async () => {
+          // In-memory test session: do not write to database
+        },
+        onRequestHandoff: async () => {
+          // In-memory test session: do not escalate to agent
+        },
+        sentimentDetection: false,
+      });
+    } catch (err) {
+      this.logger.error(`[AdminTestStream] Error: ${String(err)}`);
+      if (res && !res.writableEnded) {
+        res.write(
+          `\n\n[Error: ${err instanceof Error ? err.message : 'AI service unavailable'}]`,
+        );
+        res.end();
+      }
     }
   }
 
@@ -475,6 +663,7 @@ export class GraphService {
     let toolProvider: IToolProvider | undefined;
     let createdBookingCode: string | undefined;
     let cancelledBookingCode: string | undefined;
+    let streamedTokensCount = 0;
     const latestUserText =
       messages
         .slice()
@@ -566,11 +755,46 @@ export class GraphService {
                   .find(Boolean);
                 const services = options.siteContext?.bookingServices ?? [];
                 const resources = options.siteContext?.bookingResources ?? [];
-                const service =
-                  services.find((item) => item.id === args.serviceId) ??
-                  services.find((item) =>
-                    userMessages.includes(item.name.toLowerCase()),
+
+                const matchedServices = services.filter((item) => {
+                  if (
+                    Array.isArray(args.serviceIds) &&
+                    (args.serviceIds as string[]).includes(item.id)
+                  )
+                    return true;
+                  if (args.serviceId === item.id) return true;
+                  if (
+                    Array.isArray(args.serviceNames) &&
+                    (args.serviceNames as string[]).some(
+                      (n) => n.toLowerCase() === item.name.toLowerCase(),
+                    )
+                  )
+                    return true;
+                  if (
+                    typeof args.serviceName === 'string' &&
+                    args.serviceName.toLowerCase() === item.name.toLowerCase()
+                  )
+                    return true;
+                  return userMessages.some((msg) =>
+                    msg.includes(item.name.toLowerCase()),
                   );
+                });
+
+                const service =
+                  matchedServices[0] ??
+                  services.find((item) => item.id === args.serviceId);
+                const serviceIds =
+                  matchedServices.length > 0
+                    ? matchedServices.map((s) => s.id)
+                    : Array.isArray(args.serviceIds)
+                      ? (args.serviceIds as string[])
+                      : service?.id
+                        ? [service.id]
+                        : [];
+                const serviceNames = serviceIds
+                  .map((id) => services.find((s) => s.id === id)?.name)
+                  .filter(Boolean) as string[];
+
                 const resource =
                   resources.find((item) => item.id === args.resourceId) ??
                   resources.find(
@@ -584,12 +808,41 @@ export class GraphService {
                     ),
                   );
 
+                const slotCount =
+                  typeof args.slotCount === 'number'
+                    ? args.slotCount
+                    : (slotSelection?.slotCount ??
+                      Math.max(1, serviceIds.length));
+
+                const finalSlots = args.slots ?? slotSelection?.slots;
+                const config = options.siteContext?.bookingHours;
+                const duration = config?.slotDuration || 30;
+
+                let calculatedEndTimeSlot =
+                  (args.endTimeSlot as string) ?? slotSelection?.endTimeSlot;
+
+                if (!calculatedEndTimeSlot && slotCount > 1) {
+                  const startSlot =
+                    (args.timeSlot as string) ?? slotSelection?.timeSlot;
+                  if (startSlot) {
+                    const [h, m] = startSlot.split(':').map(Number);
+                    const totalEndMins = h * 60 + m + duration * slotCount;
+                    const endH = Math.floor(totalEndMins / 60) % 24;
+                    const endM = totalEndMins % 60;
+                    calculatedEndTimeSlot = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+                  }
+                }
+
                 toolArgs = {
                   ...args,
-                  serviceId: service?.id ?? args.serviceId,
+                  serviceId: serviceIds[0] ?? service?.id ?? args.serviceId,
+                  serviceIds: serviceIds.length > 0 ? serviceIds : undefined,
+                  slotCount,
                   resourceId: resource?.id ?? args.resourceId,
                   date: args.date ?? slotSelection?.date,
                   timeSlot: args.timeSlot ?? slotSelection?.timeSlot,
+                  endTimeSlot: calculatedEndTimeSlot,
+                  slots: finalSlots,
                 };
 
                 if (!resource) {
@@ -600,7 +853,11 @@ export class GraphService {
                   });
                 }
 
-                if (!service) {
+                if (
+                  services.length > 0 &&
+                  !service &&
+                  serviceIds.length === 0
+                ) {
                   return JSON.stringify({
                     error: 'ACTION_REQUIRED',
                     message:
@@ -616,9 +873,19 @@ export class GraphService {
                   this.logger.log(
                     `[Tool Node] Executing tool: draftBooking -> emitting bookingSummary card`,
                   );
+
                   this.chatGateway.emitBookingSummary(conversationId, {
                     ...toolArgs,
-                    serviceName: service?.name ?? args.serviceName,
+                    serviceId: serviceIds[0] ?? service?.id,
+                    serviceIds: serviceIds.length ? serviceIds : undefined,
+                    serviceName:
+                      serviceNames[0] ?? service?.name ?? args.serviceName,
+                    serviceNames: serviceNames.length
+                      ? serviceNames
+                      : undefined,
+                    slotCount,
+                    slots: finalSlots,
+                    endTimeSlot: calculatedEndTimeSlot,
                     resourceName: resource?.name ?? args.resourceName,
                     saveChangesLabel:
                       bookingLanguage === 'vi'
@@ -632,20 +899,91 @@ export class GraphService {
                       'The booking summary card has been displayed on the widget for customer review and confirmation. Ask the visitor in one short, polite sentence to review and confirm on the card below.',
                   });
                 }
+
+                const confirmMatch = lastUserMessage?.match(
+                  /^\/confirm-booking\s+((?:(?!\s*::).)*)/is,
+                )?.[1];
+                if (confirmMatch) {
+                  try {
+                    const parsedConfirm = JSON.parse(confirmMatch) as Record<
+                      string,
+                      unknown
+                    >;
+                    if (typeof parsedConfirm.slots === 'string') {
+                      try {
+                        parsedConfirm.slots = JSON.parse(parsedConfirm.slots);
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    if (typeof parsedConfirm.serviceIds === 'string') {
+                      try {
+                        parsedConfirm.serviceIds = JSON.parse(
+                          parsedConfirm.serviceIds,
+                        );
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    toolArgs = {
+                      ...toolArgs,
+                      ...parsedConfirm,
+                    };
+                  } catch (e: unknown) {
+                    this.logger.warn(
+                      `Failed to parse confirm-booking JSON: ${e instanceof Error ? e.message : String(e)}`,
+                    );
+                  }
+                }
+
+                if (conversationId.startsWith('admin-test-')) {
+                  this.logger.log(
+                    `[Tool Node] Mock booking execution in test mode: ${conversationId}`,
+                  );
+                  const mockBookingCode = `TEST-BK${Math.floor(1000 + Math.random() * 9000)}`;
+                  const mockResult = {
+                    bookingCode: mockBookingCode,
+                    status: 'confirmed',
+                    customerName: toolArgs.customerName,
+                    phone: toolArgs.phone,
+                    serviceName: service?.name ?? serviceNames[0] ?? 'Service',
+                    resourceName: resource?.name ?? 'Staff',
+                    date: toolArgs.date,
+                    timeSlot: toolArgs.timeSlot,
+                  };
+                  createdBookingCode = mockBookingCode;
+                  this.chatGateway.emitBookingSuccess(
+                    conversationId,
+                    mockResult,
+                  );
+                  return JSON.stringify(mockResult);
+                }
               }
 
               this.logger.log(`[Tool Node] Executing tool: ${def.name}`);
-              const result = await currentProvider.execute({
-                name: def.name,
-                arguments: toolArgs,
-              });
-              if (def.name === 'getAvailableSlots' && requestedTimeSlot) {
-                requestedSlotAvailability = isTimeSlotAvailable(
-                  result.output,
-                  requestedTimeSlot,
+              try {
+                const result = await currentProvider.execute({
+                  name: def.name,
+                  arguments: toolArgs,
+                });
+                if (def.name === 'getAvailableSlots' && requestedTimeSlot) {
+                  requestedSlotAvailability = isTimeSlotAvailable(
+                    result.output,
+                    requestedTimeSlot,
+                  );
+                }
+                return typeof result.output === 'string'
+                  ? result.output
+                  : JSON.stringify(result.output ?? {});
+              } catch (err) {
+                this.logger.error(
+                  `[Tool Node] Tool execution error for ${def.name}:`,
+                  err,
                 );
+                return JSON.stringify({
+                  error: err instanceof Error ? err.message : String(err),
+                });
               }
-              return JSON.stringify(result.output);
             },
           }),
       );
@@ -669,17 +1007,14 @@ export class GraphService {
           Record<NonNullable<IntentType>, string[]>
         > = {
           small_talk: [],
-          question: [
-            'getConversationContext',
-            'getSiteConfig',
-            'searchKnowledge',
-          ],
+          question: ['getConversationContext', 'searchKnowledge'],
           book_appointment: bookAppointmentToolNames(latestUserText),
           booking_slot_selected: [
             'getSiteConfig',
             'holdSlot',
             'releaseHold',
             'draftBooking',
+            'createBooking',
           ],
           cancel_booking: ['getConversationContext', 'cancelBooking'],
           check_booking: ['getConversationContext'],
@@ -727,6 +1062,11 @@ export class GraphService {
       const activeConversationBookingCode = async (
         state: typeof AgentState.State,
       ) => {
+        if (conversationId.startsWith('admin-test-')) {
+          return latestActiveBookingCode(
+            [state.summary, ...state.messages.map(messageText)].join('\n'),
+          );
+        }
         const metadataMessages = await this.chatMessageRepo.find({
           where: [
             { conversationId, content: Like('%<booking-code>%') },
@@ -956,7 +1296,16 @@ export class GraphService {
             contentStr,
           );
 
-        if (!isAskingForHuman && isBookingContinuation(state, contentStr)) {
+        const isExplicitBookingRequest =
+          /\b(?:đặt lịch|đặt hẹn|đặt phòng|đặt sân|đặt chỗ|đặt bàn|book(?:ing)?|appointment|reserve|reservation|schedule)\b/i.test(
+            contentStr,
+          );
+
+        if (
+          !isAskingForHuman &&
+          bookingEnabled &&
+          (isExplicitBookingRequest || isBookingContinuation(state, contentStr))
+        ) {
           this.logger.log('[Fast-Path Intent] book_appointment');
           return { intent: 'book_appointment' as IntentType };
         }
@@ -991,7 +1340,7 @@ export class GraphService {
         });
 
         const model = this.aiService
-          .buildModel(0, false)
+          .buildModelForSite(options.site ?? {}, 0, false)
           .withStructuredOutput(intentSchema);
 
         try {
@@ -1046,7 +1395,10 @@ export class GraphService {
 
           return { intent: intent as IntentType };
         } catch (error) {
-          this.logger.error('Failed to parse structured intent', error);
+          const errMsg = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Intent classification fallback for site ${options.site?.id ?? 'unknown'}: ${errMsg.slice(0, 150)}`,
+          );
           return { intent: 'small_talk' as IntentType };
         }
       };
@@ -1165,6 +1517,52 @@ export class GraphService {
               phoneVerified: false,
             },
             messages: [new AIMessage(`${prompts.askCode} [cancel:ask_code|]`)],
+          };
+        }
+
+        if (conversationId.startsWith('admin-test-')) {
+          const testCancellationPayload = {
+            bookingCode,
+            status: 'confirmed',
+            customerName: 'Admin Tester',
+            phone: '0901234567',
+            serviceId: undefined,
+            serviceName: 'Dịch vụ thử nghiệm',
+            resourceId: undefined,
+            resourceName: 'Nhân viên thử nghiệm',
+            date: new Date().toISOString().split('T')[0],
+            timeSlot: '10:00',
+          };
+
+          if (!/^\/confirm-cancel-booking\b/i.test(userText)) {
+            this.chatGateway.emitBookingCancellation(
+              conversationId,
+              testCancellationPayload,
+            );
+            return {
+              messages: [
+                new AIMessage(
+                  isVietnamese
+                    ? 'Vui lòng kiểm tra và xác nhận hủy lịch.'
+                    : 'Please review and confirm the booking cancellation.',
+                ),
+              ],
+            };
+          }
+
+          cancelledBookingCode = bookingCode;
+          this.chatGateway.emitBookingCancelled(conversationId, {
+            ...testCancellationPayload,
+            status: 'cancelled',
+          });
+          return {
+            messages: [
+              new AIMessage(
+                isVietnamese
+                  ? 'Lịch đặt thử nghiệm của bạn đã được hủy.'
+                  : 'Your test booking has been cancelled.',
+              ),
+            ],
           };
         }
 
@@ -1390,7 +1788,53 @@ export class GraphService {
         };
       };
 
-      const bookingSlotSelectedNode = (state: typeof AgentState.State) => {
+      const bookingSlotSelectedNode = async (
+        state: typeof AgentState.State,
+      ) => {
+        const lastMsg = state.messages[state.messages.length - 1];
+        const slotSelection = parseBookingSlotSelection(messageText(lastMsg));
+        if (
+          slotSelection?.resourceId &&
+          slotSelection.date &&
+          slotSelection.timeSlot
+        ) {
+          try {
+            const convertedMsgs = state.messages.map((m) => ({
+              role: m.constructor?.name?.includes('HumanMessage')
+                ? 'user'
+                : 'assistant',
+              content: messageText(m),
+            }));
+            const userMsgs = convertedMsgs
+              .filter((m) => m.role === 'user')
+              .map((m) => m.content.toLowerCase());
+            const services = state.siteContext?.bookingServices ?? [];
+            const matchedServices = services.filter((s) =>
+              userMsgs.some((msg) => msg.includes(s.name.toLowerCase())),
+            );
+            const calculatedSlotCount =
+              slotSelection.slotCount ?? Math.max(1, matchedServices.length);
+
+            this.logger.log(
+              `[booking_slot_selected] Auto-holding slot via tool provider: resource=${slotSelection.resourceId}, date=${slotSelection.date}, time=${slotSelection.timeSlot}, slotCount=${calculatedSlotCount}`,
+            );
+            await currentProvider.execute({
+              name: 'holdSlot',
+              arguments: {
+                resourceId: slotSelection.resourceId,
+                date: slotSelection.date,
+                timeSlot: slotSelection.timeSlot,
+                slotCount: calculatedSlotCount,
+                slots: slotSelection.slots,
+              },
+            });
+          } catch (err) {
+            this.logger.warn(
+              `[booking_slot_selected] Failed to auto-hold slot: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
         const convertedMessages = state.messages.map((m) => ({
           role: m.constructor?.name?.includes('HumanMessage')
             ? 'user'
@@ -1411,6 +1855,96 @@ export class GraphService {
         return {
           messages: [new AIMessage(`${nameQuestion}${nameChips}`)],
         };
+      };
+
+      /**
+       * confirm_booking node — deterministic fast-path execution of booking creation
+       * when the visitor clicks "Confirm" on the booking summary card.
+       */
+      const confirmBookingNode = async (state: typeof AgentState.State) => {
+        const lastMessage = state.messages[state.messages.length - 1];
+        const content =
+          typeof lastMessage.content === 'string'
+            ? lastMessage.content
+            : JSON.stringify(lastMessage.content);
+        const match = content.match(
+          /^\/confirm-booking\s+((?:(?!\s*::).)*)/is,
+        )?.[1];
+        let payload: Record<string, unknown> = {};
+        if (match) {
+          try {
+            payload = JSON.parse(match.trim()) as Record<string, unknown>;
+            if (typeof payload.slots === 'string') {
+              try {
+                payload.slots = JSON.parse(payload.slots);
+              } catch {
+                // ignore
+              }
+            }
+            if (typeof payload.serviceIds === 'string') {
+              try {
+                payload.serviceIds = JSON.parse(payload.serviceIds);
+              } catch {
+                // ignore
+              }
+            }
+          } catch (e: unknown) {
+            this.logger.warn(
+              `Failed to parse confirm-booking JSON: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        }
+
+        const convertedMessages = state.messages.map((m) => ({
+          role: m.constructor?.name?.includes('HumanMessage')
+            ? ('user' as const)
+            : ('assistant' as const),
+          content: messageText(m),
+        }));
+        const detectedLang = detectConversationLanguage(
+          convertedMessages,
+          state.siteContext,
+        );
+        const isVietnamese = detectedLang === 'vi';
+
+        try {
+          const result = (await currentProvider.execute({
+            name: 'createBooking',
+            arguments: payload,
+          })) as {
+            output?: { bookingCode?: string; error?: string; message?: string };
+          };
+
+          const bookingCode = result?.output?.bookingCode;
+          if (bookingCode) {
+            createdBookingCode = bookingCode;
+            const confirmText = isVietnamese
+              ? `Dạ, lịch hẹn của bạn đã được xác nhận thành công!\n\n<booking-code>${bookingCode}</booking-code>`
+              : `Your booking has been successfully confirmed!\n\n<booking-code>${bookingCode}</booking-code>`;
+
+            return {
+              messages: [new AIMessage(confirmText)],
+            };
+          }
+
+          throw new Error(
+            result?.output?.message || 'Unable to create booking',
+          );
+        } catch (err: unknown) {
+          const errMsg =
+            err instanceof Error
+              ? err.message
+              : (err as { message?: string })?.message;
+          this.logger.error(
+            `[confirm_booking] Failed to create booking: ${errMsg || String(err)}`,
+          );
+          const errText = isVietnamese
+            ? `Xin lỗi, có lỗi xảy ra khi tạo lịch hẹn: ${errMsg || 'Khung giờ này không còn trống'}. Bạn vui lòng thử lại nhé!`
+            : `Sorry, unable to complete booking: ${errMsg || 'Slot is no longer available'}. Please try again!`;
+          return {
+            messages: [new AIMessage(errText)],
+          };
+        }
       };
 
       /**
@@ -1462,28 +1996,83 @@ export class GraphService {
         const shouldStream = state.intent !== 'book_appointment';
         const temperature = state.intent === 'book_appointment' ? 0.0 : 0.2;
         const boundModel = this.aiService
-          .buildModel(temperature, shouldStream, options.maxTokensPerResponse)
+          .buildModelForSite(
+            options.site ?? {},
+            temperature,
+            shouldStream,
+            options.maxTokensPerResponse,
+          )
           .bindTools(visibleTools);
 
-        const response = await boundModel.invoke(messagesWithSystem, {
-          callbacks: [
-            {
-              handleLLMNewToken(token: string) {
-                if (!shouldStream) return;
-                if (token) {
-                  // 1. HTTP SSE — visitor receives tokens
-                  if (res) {
-                    res.write(token);
+        let response;
+        try {
+          response = await boundModel.invoke(messagesWithSystem, {
+            callbacks: [
+              {
+                handleLLMNewToken(token: string) {
+                  if (!shouldStream) return;
+                  if (token) {
+                    streamedTokensCount++;
+                    // 1. HTTP SSE — visitor receives tokens
+                    if (res) {
+                      res.write(token);
+                    }
+                    // 2. WebSocket — admin dashboard receives tokens
+                    server
+                      .to(`conversation-${conversationId}`)
+                      .emit('aiChunk', { token, conversationId });
                   }
-                  // 2. WebSocket — admin dashboard receives tokens
-                  server
-                    .to(`conversation-${conversationId}`)
-                    .emit('aiChunk', { token, conversationId });
-                }
+                },
               },
-            },
-          ],
-        });
+            ],
+          });
+        } catch (modelError) {
+          const errMsg =
+            modelError instanceof Error
+              ? modelError.message
+              : String(modelError);
+          const isAuthOrQuota =
+            errMsg.includes('401') ||
+            errMsg.includes('Incorrect API key') ||
+            errMsg.includes('invalid_api_key') ||
+            errMsg.includes('429') ||
+            errMsg.includes('insufficient_quota') ||
+            errMsg.includes('MODEL_AUTHENTICATION');
+
+          if (isAuthOrQuota && options.site?.useCustomOpenAiKey) {
+            this.logger.warn(
+              `Custom OpenAI key on site ${options.site?.id ?? 'unknown'} failed (${errMsg.slice(0, 100)}). Gracefully falling back to system master key...`,
+            );
+            const fallbackModel = this.aiService
+              .buildModel(
+                temperature,
+                shouldStream,
+                options.maxTokensPerResponse,
+              )
+              .bindTools(visibleTools);
+
+            response = await fallbackModel.invoke(messagesWithSystem, {
+              callbacks: [
+                {
+                  handleLLMNewToken(token: string) {
+                    if (!shouldStream) return;
+                    if (token) {
+                      streamedTokensCount++;
+                      if (res) {
+                        res.write(token);
+                      }
+                      server
+                        .to(`conversation-${conversationId}`)
+                        .emit('aiChunk', { token, conversationId });
+                    }
+                  },
+                },
+              ],
+            });
+          } else {
+            throw modelError;
+          }
+        }
 
         return { messages: [response] };
       };
@@ -1506,7 +2095,20 @@ export class GraphService {
 
         if (lastMessage instanceof ToolMessage) {
           try {
-            const parsed = JSON.parse(lastMessage.content as string) as unknown;
+            const rawContent =
+              typeof lastMessage.content === 'string'
+                ? lastMessage.content
+                : JSON.stringify(lastMessage.content);
+            let parsed: unknown = null;
+            try {
+              parsed = JSON.parse(rawContent);
+            } catch {
+              parsed = null;
+            }
+
+            if (!parsed) {
+              return {};
+            }
 
             // Handle booking tools interception
             if (lastMessage.name?.includes('getAvailableSlots')) {
@@ -1527,6 +2129,32 @@ export class GraphService {
               ) {
                 createdBookingCode = bookingCode;
                 this.chatGateway.emitBookingSuccess(conversationId, parsed);
+              }
+
+              if (p?.isSummaryCardEmitted || p?.error === 'ACTION_REQUIRED') {
+                const converted = state.messages.map((m) => ({
+                  role: m.constructor?.name?.includes('HumanMessage')
+                    ? ('user' as const)
+                    : ('assistant' as const),
+                  content: messageText(m),
+                }));
+                const isVietnamese =
+                  detectConversationLanguage(converted, state.siteContext) ===
+                  'vi';
+                const summaryMsg = isVietnamese
+                  ? 'Dạ, thông tin đặt lịch của bạn đã được cập nhật đầy đủ. Vui lòng kiểm tra và xác nhận trên phiếu đặt lịch bên dưới nhé!'
+                  : 'Your booking summary is ready. Please review and confirm your details below!';
+
+                if (res) {
+                  res.write(summaryMsg);
+                }
+                server
+                  ?.to(`conversation-${conversationId}`)
+                  ?.emit('aiChunk', { token: summaryMsg, conversationId });
+
+                return {
+                  messages: [new AIMessage(summaryMsg)],
+                };
               }
             }
 
@@ -1609,10 +2237,12 @@ export class GraphService {
             const newSummary = response.content;
             const newCount =
               state.summarizedMessageCount + messagesToSummarize.length;
-            await this.conversationRepo.update(conversationId, {
-              summary: newSummary,
-              summarizedMessageCount: newCount,
-            });
+            if (!conversationId.startsWith('admin-test-')) {
+              await this.conversationRepo.update(conversationId, {
+                summary: newSummary,
+                summarizedMessageCount: newCount,
+              });
+            }
             this.logger.log(
               `Background memory summary updated for conversation ${conversationId}`,
             );
@@ -1636,6 +2266,7 @@ export class GraphService {
         .addNode('tools', toolNode)
         .addNode('parse_tools', parseTools)
         .addNode('booking_slot_selected', bookingSlotSelectedNode)
+        .addNode('confirm_booking', confirmBookingNode)
         .addNode('cancel_booking', cancelBookingNode)
         .addNode('abort_cancel_flow', abortCancelFlowNode)
         .addNode('request_handoff', requestHandoff)
@@ -1652,6 +2283,7 @@ export class GraphService {
           small_talk: 'model_node',
           book_appointment: 'model_node',
           booking_slot_selected: 'booking_slot_selected',
+          confirm_booking: 'confirm_booking',
           check_booking: 'model_node',
           cancel_booking: 'cancel_booking',
           abort_cancel_flow: 'abort_cancel_flow',
@@ -1699,8 +2331,22 @@ export class GraphService {
       });
 
       workflow.addEdge('tools', 'parse_tools');
-      workflow.addEdge('parse_tools', 'model_node');
+      workflow.addConditionalEdges(
+        'parse_tools',
+        (state) => {
+          const lastMsg = state.messages[state.messages.length - 1];
+          if (lastMsg && lastMsg.constructor?.name?.includes('AIMessage')) {
+            return 'end';
+          }
+          return 'model_node';
+        },
+        {
+          end: 'summarize_memory',
+          model_node: 'model_node',
+        },
+      );
       workflow.addEdge('booking_slot_selected', 'summarize_memory');
+      workflow.addEdge('confirm_booking', 'summarize_memory');
       workflow.addEdge('cancel_booking', 'summarize_memory');
       workflow.addEdge('request_handoff', 'summarize_memory');
       workflow.addEdge('summarize_memory', END);
@@ -1841,11 +2487,14 @@ export class GraphService {
             `${finalResponseText}${bookingInputMetadata}${bookingMetadata}${cancelMetadata}`,
             finalState.knowledgeSources,
           );
+          if (res && streamedTokensCount === 0 && !res.writableEnded) {
+            res.write(`${sanitizedText}${bookingMetadata}`);
+          }
         }
       }
 
       // ── 8. End the HTTP SSE stream and cleanup MCP Client ─────────────────────
-      if (toolProvider.disconnect) {
+      if (toolProvider?.disconnect) {
         await toolProvider.disconnect();
       }
       if (res) {
@@ -1868,7 +2517,23 @@ export class GraphService {
             : undefined,
       };
     } catch (error) {
-      this.logger.error('LangGraph workflow error', error);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const isAuthError =
+        errMsg.includes('401') ||
+        errMsg.includes('Incorrect API key') ||
+        errMsg.includes('invalid_api_key') ||
+        errMsg.includes('MODEL_AUTHENTICATION');
+
+      if (isAuthError) {
+        this.logger.warn(
+          `LangGraph LLM authentication issue on site ${options.site?.id ?? 'unknown'}: ${errMsg.slice(0, 150)}`,
+        );
+      } else {
+        this.logger.error(
+          `LangGraph workflow error: ${errMsg}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
 
       const fallbackMsg =
         "I'm currently unable to process your request. Please try again or contact support.";

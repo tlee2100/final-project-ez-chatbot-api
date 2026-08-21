@@ -1,11 +1,32 @@
+import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsDateString,
   IsNotEmpty,
   IsObject,
   IsOptional,
   IsString,
   IsUUID,
+  ValidateNested,
 } from 'class-validator';
+
+export class SelectedSlotDto {
+  @IsUUID()
+  @IsNotEmpty()
+  resourceId: string;
+
+  @IsString()
+  @IsNotEmpty()
+  date: string;
+
+  @IsString()
+  @IsNotEmpty()
+  timeSlot: string;
+
+  @IsUUID()
+  @IsOptional()
+  serviceId?: string;
+}
 
 export class CreateBookingDto {
   @IsUUID()
@@ -19,6 +40,16 @@ export class CreateBookingDto {
   @IsUUID()
   @IsOptional()
   serviceId?: string;
+
+  @IsOptional()
+  @IsUUID('4', { each: true })
+  serviceIds?: string[];
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SelectedSlotDto)
+  @IsOptional()
+  slots?: SelectedSlotDto[];
 
   @IsDateString()
   @IsNotEmpty()
