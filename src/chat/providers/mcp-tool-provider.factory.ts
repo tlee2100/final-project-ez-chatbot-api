@@ -96,7 +96,6 @@ export class McpToolProviderFactory implements IToolProviderFactory {
       { name: 'chatbot-api-session', version: '1.0.0' },
       { capabilities: {} },
     );
-    await client.connect(transport);
 
     return new McpToolProvider(client, transport, this.cachedTools);
   }

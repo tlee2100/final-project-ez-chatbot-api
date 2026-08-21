@@ -53,6 +53,12 @@ export class ChatMessage {
   @Column('text')
   content: string;
 
+  @Column({ type: 'varchar', length: 35, nullable: true })
+  locale: string | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  components: Record<string, unknown>[] | null;
+
   @Column({
     type: 'enum',
     enum: MessageStatus,

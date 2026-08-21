@@ -21,13 +21,13 @@ export class ApiThrottlerGuard extends ThrottlerGuard {
   private readonly logger = new Logger(ApiThrottlerGuard.name);
 
   protected getTracker(request: Request): Promise<string> {
-    const params = request.params as Record<string, string>;
-    const body = request.body as Record<string, unknown>;
+    const params = request.params as Record<string, string> | undefined;
+    const body = request.body as Record<string, unknown> | undefined;
 
     // Read siteId from params first (path variable), then body (public chat endpoints)
     const siteId =
-      params['siteId'] ??
-      (typeof body['siteId'] === 'string' ? body['siteId'] : undefined) ??
+      params?.['siteId'] ??
+      (typeof body?.['siteId'] === 'string' ? body['siteId'] : undefined) ??
       'global';
 
     const ip =
