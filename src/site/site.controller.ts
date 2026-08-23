@@ -324,7 +324,7 @@ export class SiteController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Save a custom OpenAI API key for this site. Key is AES-256-GCM encrypted before storage and never returned in plain text.',
+      'Validate and save custom AI provider credentials (API key, Base URL, Model) for this site. Key is AES-256-GCM encrypted before storage.',
   })
   @ApiParam({ name: 'id', description: 'Site ID' })
   @ApiBody({
@@ -332,20 +332,90 @@ export class SiteController {
       type: 'object',
       required: ['apiKey'],
       properties: {
-        apiKey: { type: 'string', description: 'Raw OpenAI API key (sk-...)' },
+        apiKey: { type: 'string', description: 'Raw API key (e.g. sk-...)' },
+        customBaseUrl: {
+          type: 'string',
+          description:
+            'Optional custom provider URL (e.g. https://api.openai.com/v1)',
+        },
+        llmModel: {
+          type: 'string',
+          description:
+            'Optional LLM model name (e.g. gpt-4o-mini, qwen3.7-flash)',
+        },
       },
     },
   })
-  @ApiResponse({ status: 200, description: 'Key saved successfully' })
-  @ApiResponse({ status: 400, description: 'Empty key provided' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Key verified and saved successfully. Returns { useCustomOpenAiKey, customKeyStatus, customBaseUrl, keyMask, llmModel, warning? }',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid or unauthorized API key provided',
+  })
   @ApiResponse({ status: 403, description: 'Forbidden' })
   @UseGuards(AuthGuard('jwt'))
   async saveCustomApiKey(
     @Param('id', ParseUUIDPipe) id: string,
     @Body('apiKey') apiKey: string,
+    @Body('customBaseUrl') customBaseUrl: string | undefined,
+    @Body('llmModel') llmModel: string | undefined,
     @Req() req: AuthRequest,
   ) {
-    return this.siteService.saveCustomApiKey(id, req.user, apiKey);
+    return this.siteService.saveCustomApiKey(
+      id,
+      req.user,
+      apiKey,
+      customBaseUrl,
+      llmModel,
+    );
+  }
+
+  @Post(':id/api-key/test')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Test connection to AI provider on-demand without saving credentials. If apiKey is omitted, tests existing stored key.',
+  })
+  @ApiParam({ name: 'id', description: 'Site ID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        apiKey: { type: 'string', description: 'Optional API key to test' },
+        customBaseUrl: {
+          type: 'string',
+          description: 'Optional custom Base URL to test',
+        },
+        llmModel: {
+          type: 'string',
+          description: 'Optional model name to test',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns connection test results { valid, latencyMs, customKeyStatus, endpointTested, warning?, error? }',
+  })
+  @ApiResponse({ status: 400, description: 'No key available to test' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @UseGuards(AuthGuard('jwt'))
+  async testCustomApiKey(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('apiKey') apiKey: string | undefined,
+    @Body('customBaseUrl') customBaseUrl: string | undefined,
+    @Body('llmModel') llmModel: string | undefined,
+    @Req() req: AuthRequest,
+  ) {
+    return this.siteService.testCustomApiKeyConnection(id, req.user, {
+      apiKey,
+      customBaseUrl,
+      llmModel,
+    });
   }
 
   @Delete(':id/api-key')

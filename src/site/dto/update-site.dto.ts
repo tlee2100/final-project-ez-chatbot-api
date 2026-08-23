@@ -237,4 +237,19 @@ export class UpdateSiteDto {
   @IsOptional()
   @IsBoolean()
   useCustomOpenAiKey?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Validation/runtime operational status of the custom API key',
+    enum: ['unknown', 'valid', 'invalid'],
+  })
+  @IsOptional()
+  @IsString()
+  customKeyStatus?: 'unknown' | 'valid' | 'invalid';
+
+  @ApiPropertyOptional({
+    description: 'Custom AI provider endpoint URL',
+  })
+  @IsOptional()
+  @IsString()
+  customBaseUrl?: string;
 }

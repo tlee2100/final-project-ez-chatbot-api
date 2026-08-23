@@ -267,4 +267,32 @@ export class SiteDto {
     default: false,
   })
   hasCustomApiKey: boolean;
+
+  @ApiProperty({
+    example: 'valid',
+    enum: ['unknown', 'valid', 'invalid'],
+    description: 'Validation/runtime operational status of the custom API key',
+    default: 'unknown',
+  })
+  @AutoMap(() => String)
+  customKeyStatus: 'unknown' | 'valid' | 'invalid';
+
+  @ApiProperty({
+    example: 'https://api.ai-box.vn/v1',
+    description: 'Custom AI provider endpoint URL',
+    nullable: true,
+    required: false,
+  })
+  @AutoMap(() => String)
+  customBaseUrl?: string | null;
+
+  @ApiProperty({
+    example: 'sk-proj-****...3a9b',
+    description:
+      'Masked representation of the custom API key for safe UI display',
+    nullable: true,
+    required: false,
+  })
+  @AutoMap(() => String)
+  keyMask?: string | null;
 }

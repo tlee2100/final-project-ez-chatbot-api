@@ -99,6 +99,7 @@ export class AiService {
       useCustomOpenAiKey?: boolean;
       encryptedOpenAiKey?: string | null;
       llmModel?: string | null;
+      customBaseUrl?: string | null;
     },
     temperature = 0.7,
     streaming = false,
@@ -113,7 +114,11 @@ export class AiService {
         resolvedApiKey = decryptApiKey(site.encryptedOpenAiKey);
         this.logger.debug('Using site-specific OpenAI API key (BYOK)');
         resolvedBaseURL =
-          process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+          site.customBaseUrl?.trim() ||
+          process.env.DEEPSEEK_BASE_URL ||
+          process.env.OPENAI_BASE_URL ||
+          this.baseURL ||
+          'https://api.openai.com/v1';
         resolvedModelName =
           site.llmModel?.trim() ||
           process.env.OPENAI_CHAT_MODEL ||

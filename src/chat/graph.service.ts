@@ -277,6 +277,8 @@ export interface GraphRunOptions {
     id?: string;
     useCustomOpenAiKey?: boolean;
     encryptedOpenAiKey?: string | null;
+    llmModel?: string | null;
+    customBaseUrl?: string | null;
   };
 }
 
@@ -1394,6 +1396,29 @@ export class GraphService {
           return applyLocaleState(intent, response.locale);
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error);
+          const isAuthOrQuota =
+            errMsg.includes('401') ||
+            errMsg.includes('Incorrect API key') ||
+            errMsg.includes('invalid_api_key') ||
+            errMsg.includes('429') ||
+            errMsg.includes('insufficient_quota') ||
+            errMsg.includes('MODEL_AUTHENTICATION');
+
+          if (
+            isAuthOrQuota &&
+            options.site?.useCustomOpenAiKey &&
+            options.site?.id
+          ) {
+            void this.siteRepo
+              .update(options.site.id, { customKeyStatus: 'invalid' })
+              .catch((dbErr) =>
+                this.logger.error(
+                  `Failed to update customKeyStatus to 'invalid' for site ${options.site?.id}`,
+                  dbErr,
+                ),
+              );
+          }
+
           this.logger.warn(
             `Intent classification fallback for site ${options.site?.id ?? 'unknown'}: ${errMsg.slice(0, 150)}`,
           );
@@ -2200,6 +2225,19 @@ export class GraphService {
             this.logger.warn(
               `Custom OpenAI key on site ${options.site?.id ?? 'unknown'} failed (${errMsg.slice(0, 100)}). Gracefully falling back to system master key...`,
             );
+
+            // Update database so Dashboard & UI reflect that custom key is invalid and master key is in use
+            if (options.site?.id) {
+              void this.siteRepo
+                .update(options.site.id, { customKeyStatus: 'invalid' })
+                .catch((dbErr) =>
+                  this.logger.error(
+                    `Failed to update customKeyStatus to 'invalid' for site ${options.site?.id}`,
+                    dbErr,
+                  ),
+                );
+            }
+
             const fallbackModel = this.aiService
               .buildModel(
                 temperature,
