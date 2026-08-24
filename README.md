@@ -614,3 +614,8 @@ Supported event:
 - Run migrations before seeding the super admin user.
 - Keep Cloudinary credentials configured before testing document upload.
 - Use Swagger at `/api` for manual REST API testing.
+
+## ⚠️ Database Migrations & HNSW Index
+
+When running `npm run migration:generate`, TypeORM might generate a `DROP INDEX` for the `IDX_document_chunks_embedding_hnsw` index because TypeORM does not fully support `hnsw` indices natively in its decorators.
+**You MUST manually remove that `DROP INDEX` statement** from your generated migration files to prevent the database from losing this performance optimization.
