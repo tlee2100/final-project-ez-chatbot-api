@@ -278,4 +278,39 @@ export class Site {
    */
   @Column({ name: 'encryptedOpenAiKey', type: 'text', nullable: true })
   encryptedOpenAiKey: string | null;
+
+  /**
+   * Validation and runtime operational status of the custom key.
+   * 'valid': verified & working.
+   * 'invalid': rejected/unauthorized/insufficient quota.
+   * 'unknown': unverified or untested.
+   */
+  @AutoMap(() => String)
+  @Column({
+    name: 'customKeyStatus',
+    type: 'varchar',
+    length: 20,
+    default: 'unknown',
+  })
+  customKeyStatus: 'unknown' | 'valid' | 'invalid';
+
+  /**
+   * Custom AI provider endpoint URL (optional).
+   * If not set, falls back to server env DEEPSEEK_BASE_URL / OPENAI_BASE_URL.
+   */
+  @AutoMap(() => String)
+  @Column({
+    name: 'customBaseUrl',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+  })
+  customBaseUrl: string | null;
+
+  /**
+   * Masked representation of the custom API key for safe UI display (e.g. "sk-proj-****...3a9b").
+   */
+  @AutoMap(() => String)
+  @Column({ name: 'keyMask', type: 'varchar', length: 60, nullable: true })
+  keyMask: string | null;
 }

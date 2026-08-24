@@ -1810,7 +1810,8 @@ export class ChatService {
       // Only send chat transcript if emailTranscript is enabled on the site OR a transcriptEmail was explicitly requested
       if (
         conversation.site &&
-        (conversation.site.emailTranscript || transcriptEmail)
+        (conversation.site.emailTranscript || transcriptEmail) &&
+        transcriptEmail !== 'skip_email'
       ) {
         let targetEmail = transcriptEmail || conversation.visitorEmail;
         let targetName = conversation.visitorName;
