@@ -51,6 +51,7 @@ export class DocumentChunk {
   metadata: Record<string, unknown>;
 
   @Column('vector', { length: 1536 })
+  @Index('IDX_document_chunks_embedding_hnsw', { synchronize: false })
   embedding: number[];
 
   @Column({ type: 'varchar', length: 100 })
