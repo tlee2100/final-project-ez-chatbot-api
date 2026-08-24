@@ -5,6 +5,7 @@ import {
   NotFoundException,
   Inject,
   forwardRef,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
@@ -59,6 +60,8 @@ export type SlotItem =
     };
 @Injectable()
 export class BookingService {
+  private readonly logger = new Logger(BookingService.name);
+
   constructor(
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
@@ -445,6 +448,15 @@ export class BookingService {
   }
 
   async holdSlot(siteId: string, dto: HoldSlotDto) {
+    if (dto.slots && dto.slots.length > 0) {
+      return this.holdSlots(siteId, dto.slots, dto.sessionId);
+    }
+    if (!dto.resourceId || !dto.startAt || !dto.endAt) {
+      throw new BadRequestException(
+        'resourceId, startAt, and endAt are required when slots array is not provided',
+      );
+    }
+
     const site = await this.siteService.findOneEntity(siteId);
     if (!site.bookingEnabled) {
       throw new BadRequestException('Booking is disabled for this site');
@@ -577,19 +589,47 @@ export class BookingService {
   }
 
   async releaseHold(siteId: string, dto: HoldSlotDto) {
-    const key = this.buildHoldKey(
-      siteId,
-      dto.resourceId,
-      dto.startAt,
-      dto.endAt,
-    );
-    await this.redis.del(key);
+    if (dto.slots && dto.slots.length > 0) {
+      for (const slot of dto.slots) {
+        const key = this.buildHoldKey(
+          siteId,
+          slot.resourceId,
+          slot.startAt,
+          slot.endAt,
+        );
+        await this.redis.del(key);
 
-    this.bookingGateway.emitSlotReleased(siteId, {
-      resourceId: dto.resourceId,
-      startAt: dto.startAt,
-      endAt: dto.endAt,
-    });
+        this.bookingGateway.emitSlotReleased(siteId, {
+          resourceId: slot.resourceId,
+          startAt: slot.startAt,
+          endAt: slot.endAt,
+        });
+      }
+      return { success: true };
+    }
+
+    if (dto.resourceId && dto.startAt && dto.endAt) {
+      const key = this.buildHoldKey(
+        siteId,
+        dto.resourceId,
+        dto.startAt,
+        dto.endAt,
+      );
+      await this.redis.del(key);
+
+      this.bookingGateway.emitSlotReleased(siteId, {
+        resourceId: dto.resourceId,
+        startAt: dto.startAt,
+        endAt: dto.endAt,
+      });
+
+      return { success: true };
+    }
+
+    if (dto.sessionId) {
+      await this.releaseSessionHolds(siteId, dto.sessionId);
+      return { success: true };
+    }
 
     return { success: true };
   }
@@ -697,8 +737,19 @@ export class BookingService {
           : providedServices;
         serviceIndex += span.slotCount;
 
+        const spanNotes = span.slotNotes.filter(Boolean);
+        let spanNotesText: string | undefined = undefined;
+        if (dto.notes && spanNotes.length > 0) {
+          spanNotesText = `${dto.notes}\n${spanNotes.join('\n')}`;
+        } else if (spanNotes.length > 0) {
+          spanNotesText = spanNotes.join('\n');
+        } else {
+          spanNotesText = dto.notes;
+        }
+
         const subDto: CreateBookingDto = {
           ...dto,
+          notes: spanNotesText,
           slots: undefined,
           resourceId: span.resourceId,
           startAt: span.startAt,
@@ -711,6 +762,13 @@ export class BookingService {
             slotCount: span.slotCount,
             startTimeSlot: span.startTimeSlot,
             endTimeSlot: span.endTimeSlot,
+            slots: span.slots.map((s) => ({
+              date: s.date,
+              timeSlot: s.timeSlot,
+              serviceId: s.serviceId,
+              resourceId: s.resourceId,
+              notes: s.notes || s.note,
+            })),
           },
         };
 
@@ -1116,6 +1174,24 @@ export class BookingService {
 
   async cancelBooking(siteId: string, bookingId: string): Promise<Booking> {
     return this.updateBookingStatus(siteId, bookingId, BookingStatus.CANCELLED);
+  }
+
+  async bulkCancelBookings(
+    siteId: string,
+    bookingIds: string[],
+  ): Promise<{ success: boolean; cancelledCount: number }> {
+    let cancelledCount = 0;
+    for (const bookingId of bookingIds) {
+      try {
+        await this.cancelBooking(siteId, bookingId);
+        cancelledCount++;
+      } catch (err) {
+        this.logger.warn(
+          `Failed to cancel booking ${bookingId} in bulk: ${(err as Error).message}`,
+        );
+      }
+    }
+    return { success: true, cancelledCount };
   }
 
   async getBookingTimeline(siteId: string, bookingId: string) {

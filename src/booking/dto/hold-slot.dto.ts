@@ -1,6 +1,14 @@
-import { IsDateString, IsNotEmpty, IsOptional, IsUUID } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsDateString,
+  IsNotEmpty,
+  IsOptional,
+  IsUUID,
+  ValidateNested,
+} from 'class-validator';
 
-export class HoldSlotDto {
+export class HoldSlotItemDto {
   @IsUUID()
   @IsNotEmpty()
   resourceId: string;
@@ -16,8 +24,32 @@ export class HoldSlotDto {
   @IsDateString()
   @IsNotEmpty()
   endAt: string;
+}
+
+export class HoldSlotDto {
+  @IsUUID()
+  @IsOptional()
+  resourceId?: string;
+
+  @IsUUID()
+  @IsOptional()
+  serviceId?: string;
+
+  @IsDateString()
+  @IsOptional()
+  startAt?: string;
+
+  @IsDateString()
+  @IsOptional()
+  endAt?: string;
 
   @IsUUID()
   @IsNotEmpty()
   sessionId: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => HoldSlotItemDto)
+  @IsOptional()
+  slots?: HoldSlotItemDto[];
 }

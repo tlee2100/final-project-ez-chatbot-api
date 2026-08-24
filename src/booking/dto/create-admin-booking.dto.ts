@@ -32,6 +32,16 @@ export class AdminBookingSlotItemDto {
   @IsUUID()
   @IsOptional()
   serviceId?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  note?: string;
 }
 
 export class CreateAdminBookingDto {
