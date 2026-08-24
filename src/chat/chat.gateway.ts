@@ -265,31 +265,31 @@ export class ChatGateway
   emitBookingSlots(conversationId: string, payload: unknown): void {
     this.server
       .to(`conversation-${conversationId}`)
-      .emit('bookingSlots', payload);
+      .emit('bookingSlots', { conversationId, payload });
   }
 
   emitBookingSummary(conversationId: string, payload: unknown): void {
     this.server
       .to(`conversation-${conversationId}`)
-      .emit('bookingSummary', payload);
+      .emit('bookingSummary', { conversationId, payload });
   }
 
   emitBookingSuccess(conversationId: string, payload: unknown): void {
     this.server
       .to(`conversation-${conversationId}`)
-      .emit('bookingSuccess', payload);
+      .emit('bookingSuccess', { conversationId, payload });
   }
 
   emitBookingCancellation(conversationId: string, payload: unknown): void {
     this.server
       .to(`conversation-${conversationId}`)
-      .emit('bookingCancellation', payload);
+      .emit('bookingCancellation', { conversationId, payload });
   }
 
   emitBookingCancelled(conversationId: string, payload: unknown): void {
     this.server
       .to(`conversation-${conversationId}`)
-      .emit('bookingCancelled', payload);
+      .emit('bookingCancelled', { conversationId, payload });
   }
 
   // ─── Auth / Query extractors ─────────────────────────────────────────────

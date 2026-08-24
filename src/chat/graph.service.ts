@@ -409,7 +409,16 @@ export class GraphService {
         history.push({ role: 'user', content: newTestMessageContent });
       }
 
-      const onFinish = (text: string): Promise<void> => {
+      const onFinish = (
+        text: string,
+        _knowledgeSources?: {
+          documentId: string;
+          filename: string;
+          sourceUrl?: string;
+        }[],
+        locale?: string,
+        components?: ChatMessageComponent[],
+      ): Promise<void> => {
         history.push({ role: 'assistant', content: text });
         this.chatGateway.server
           .to(`conversation-${conversationId}`)
@@ -419,6 +428,8 @@ export class GraphService {
             content: text,
             senderType: 'AI',
             createdAt: new Date().toISOString(),
+            locale,
+            components,
           });
         return Promise.resolve();
       };
