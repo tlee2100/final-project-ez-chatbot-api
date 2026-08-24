@@ -1187,6 +1187,13 @@ export class GraphService {
         return JSON.stringify(message.content);
       };
 
+      const getLatestUserText = (state: typeof AgentState.State): string => {
+        const msg = [...state.messages]
+          .reverse()
+          .find((m) => m.constructor?.name?.includes('HumanMessage'));
+        return msg ? messageText(msg) : '';
+      };
+
       const activeConversationBookingCode = async (
         state: typeof AgentState.State,
       ) => {
@@ -1465,12 +1472,8 @@ export class GraphService {
         timeSlot: formatInTimeZone(booking.startAt, booking.timezone, 'HH:mm'),
       });
 
-      const getLatestUserText = (state: typeof AgentState.State): string => {
-        const msg = [...state.messages]
-          .reverse()
-          .find((m) => m.constructor?.name?.includes('HumanMessage'));
-        return msg ? messageText(msg) : '';
-      };
+      const ABORT_CHIP_VI = '\n\n<chips>/keep-booking:Không hủy nữa</chips>';
+      const ABORT_CHIP_EN = '\n\n<chips>/keep-booking:Keep my booking</chips>';
 
       const handleAskCode = async (
         state: typeof AgentState.State,
@@ -1520,6 +1523,7 @@ export class GraphService {
           };
         }
 
+        const isVietnamese = localeLanguage(state.locale) === 'vi';
         return {
           cancelState: {
             step: 'verify_phone' as CancelStep,
@@ -1528,7 +1532,7 @@ export class GraphService {
           },
           messages: [
             new AIMessage(
-              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
             ),
           ],
         };
@@ -1540,6 +1544,8 @@ export class GraphService {
         prompts: CancelPrompts,
       ) => {
         const { bookingCode } = state.cancelState;
+        const isVietnamese = localeLanguage(state.locale) === 'vi';
+        const isVi = isVietnamese;
 
         if (!bookingCode) {
           return {
@@ -1566,7 +1572,6 @@ export class GraphService {
             timeSlot: '10:00',
           };
 
-          const isVi = localeLanguage(state.locale) === 'vi';
           if (!/^\/confirm-cancel-booking\b/i.test(userText)) {
             this.chatGateway.emitBookingCancellation(
               conversationId,
@@ -1622,7 +1627,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]`,
+                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
               ),
             ],
           };
@@ -1636,7 +1641,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]`,
+                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
               ),
             ],
           };
@@ -2509,7 +2514,6 @@ export class GraphService {
           structured_booking_step: 'structured_booking_step',
           booking_slot_selected: 'model_node',
           check_booking: 'model_node',
-          cancel_booking: 'cancel_booking',
           abandon_booking: 'abandon_booking',
           request_human: 'request_handoff',
         },
@@ -2693,7 +2697,7 @@ export class GraphService {
       }
 
       // ── 8. End the HTTP SSE stream and cleanup MCP Client ─────────────────────
-      if (toolProvider.disconnect) {
+      if (toolProvider?.disconnect) {
         await toolProvider.disconnect();
       }
       if (res) {
