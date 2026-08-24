@@ -687,19 +687,20 @@ export class SiteService {
 
   /**
    * Save a custom API key for a site (BYOK).
-   * Validates the key via probe call against provider endpoints (customBaseUrl / DEEPSEEK_BASE_URL / OPENAI_BASE_URL).
+   * Validates the key and candidate model via probe chat completion against provider endpoints (customBaseUrl / DEEPSEEK_BASE_URL / OPENAI_BASE_URL).
+   * If plainKey is omitted, validates and uses the site's existing stored key.
    * The key is encrypted with AES-256-GCM before being stored in the DB.
    *
    * @param siteId         The target site
    * @param user           The requesting user (must have access to the site)
-   * @param plainKey       The raw API key
+   * @param plainKey       The raw API key (optional if site already has custom key stored)
    * @param customBaseUrl  Optional custom provider URL (e.g. https://api.openai.com/v1)
    * @param llmModel       Optional model name (e.g. gpt-4o-mini, qwen3.7-flash)
    */
   async saveCustomApiKey(
     siteId: string,
     user: JwtUser,
-    plainKey: string,
+    plainKey?: string | null,
     customBaseUrl?: string | null,
     llmModel?: string | null,
   ): Promise<{
@@ -710,19 +711,29 @@ export class SiteService {
     llmModel?: string;
     warning?: string;
   }> {
-    await this.assertSiteAccess(siteId, user);
+    const site = await this.assertSiteAccess(siteId, user);
 
-    if (!plainKey || !plainKey.trim()) {
-      throw new BadRequestException('API key must not be empty');
+    let trimmedKey: string;
+    let isNewKey = false;
+
+    if (plainKey && plainKey.trim()) {
+      trimmedKey = plainKey.trim();
+      isNewKey = true;
+    } else {
+      if (!site.encryptedOpenAiKey) {
+        throw new BadRequestException('API key must not be empty');
+      }
+      trimmedKey = decryptApiKey(site.encryptedOpenAiKey);
     }
 
-    const trimmedKey = plainKey.trim();
     const cleanBaseUrl = customBaseUrl?.trim() || null;
     const cleanModel = llmModel?.trim() || null;
+    const targetModel = cleanModel || site.llmModel || 'qwen3.7-flash';
 
     // Resolve candidate base URLs in priority order based on input and env:
     const candidateBaseUrls: string[] = [
       cleanBaseUrl,
+      site.customBaseUrl,
       process.env.DEEPSEEK_BASE_URL,
       process.env.OPENAI_BASE_URL,
       'https://api.openai.com/v1',
@@ -735,7 +746,7 @@ export class SiteService {
     let lastError: { status?: number; message: string } | null = null;
     let verifiedSuccessfully = false;
 
-    // Probe candidate endpoints with the provided key
+    // Probe candidate endpoints with the provided key and model
     for (const baseUrl of uniqueBaseUrls) {
       const probeClient = new OpenAI({
         apiKey: trimmedKey,
@@ -745,11 +756,15 @@ export class SiteService {
       });
 
       try {
-        await probeClient.models.list();
+        await probeClient.chat.completions.create({
+          model: targetModel,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+        });
         customKeyStatus = 'valid';
         verifiedSuccessfully = true;
         this.logger.log(
-          `Custom API key verified successfully for site ${siteId} via ${baseUrl}`,
+          `Custom API key & model (${targetModel}) verified successfully for site ${siteId} via ${baseUrl}`,
         );
         break;
       } catch (err: unknown) {
@@ -772,6 +787,24 @@ export class SiteService {
             `Custom API key for site ${siteId} authenticated with quota/rate warning on ${baseUrl}: ${errMsg}`,
           );
           break;
+        }
+
+        const isModelError =
+          status === 404 ||
+          (status === 400 &&
+            (errMsg.toLowerCase().includes('model') ||
+              errMsg.toLowerCase().includes('not found') ||
+              errMsg.toLowerCase().includes('does not exist') ||
+              errMsg.toLowerCase().includes('invalid_request_error') ||
+              errMsg.toLowerCase().includes('unsupported')));
+
+        if (isModelError) {
+          this.logger.warn(
+            `Model validation failed for site ${siteId} on ${baseUrl} with model '${targetModel}': ${errMsg}`,
+          );
+          throw new BadRequestException(
+            `Model '${targetModel}' is not found or not supported by this provider: ${errMsg.slice(0, 150)}`,
+          );
         }
       }
     }
@@ -799,22 +832,23 @@ export class SiteService {
       } else {
         customKeyStatus = 'unknown';
         warning =
-          'API key saved, but provider verification endpoint could not be reached within timeout.';
+          'API credentials saved, but provider verification endpoint could not be reached within timeout.';
         this.logger.warn(
           `Could not reach provider probe endpoint for site ${siteId} (${errMsg}). Saved with status 'unknown'.`,
         );
       }
     }
 
-    const encrypted = encryptApiKey(trimmedKey);
-    const keyMask = this.generateKeyMask(trimmedKey);
+    const encrypted = isNewKey ? encryptApiKey(trimmedKey) : undefined;
+    const keyMask = isNewKey
+      ? this.generateKeyMask(trimmedKey)
+      : site.keyMask || null;
 
     await this.siteRepository.update(siteId, {
-      encryptedOpenAiKey: encrypted,
+      ...(isNewKey ? { encryptedOpenAiKey: encrypted, keyMask } : {}),
       useCustomOpenAiKey: true,
       customKeyStatus,
       customBaseUrl: cleanBaseUrl,
-      keyMask,
       ...(cleanModel ? { llmModel: cleanModel } : {}),
     });
 
@@ -826,7 +860,7 @@ export class SiteService {
       customKeyStatus,
       customBaseUrl: cleanBaseUrl,
       keyMask,
-      llmModel: cleanModel || undefined,
+      llmModel: cleanModel || site.llmModel || undefined,
       warning,
     };
   }
@@ -871,6 +905,9 @@ export class SiteService {
       process.env.OPENAI_BASE_URL ||
       'https://api.openai.com/v1';
 
+    const targetModel =
+      candidateData?.llmModel?.trim() || site.llmModel || 'qwen3.7-flash';
+
     const probeClient = new OpenAI({
       apiKey: testKey,
       baseURL: targetBaseUrl,
@@ -880,7 +917,11 @@ export class SiteService {
 
     const startTime = Date.now();
     try {
-      await probeClient.models.list();
+      await probeClient.chat.completions.create({
+        model: targetModel,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+      });
       const latencyMs = Date.now() - startTime;
 
       if (!candidateData?.apiKey && site.encryptedOpenAiKey) {
@@ -891,7 +932,7 @@ export class SiteService {
         valid: true,
         latencyMs,
         customKeyStatus: 'valid',
-        endpointTested: targetBaseUrl,
+        endpointTested: `${targetBaseUrl} (model: ${targetModel})`,
       };
     } catch (err: unknown) {
       const latencyMs = Date.now() - startTime;
@@ -909,8 +950,32 @@ export class SiteService {
           valid: true,
           latencyMs,
           customKeyStatus: 'valid',
-          endpointTested: targetBaseUrl,
+          endpointTested: `${targetBaseUrl} (model: ${targetModel})`,
           warning: 'Key is valid, but currently rate-limited or out of quota.',
+        };
+      }
+
+      const isModelError =
+        status === 404 ||
+        (status === 400 &&
+          (errMsg.toLowerCase().includes('model') ||
+            errMsg.toLowerCase().includes('not found') ||
+            errMsg.toLowerCase().includes('does not exist') ||
+            errMsg.toLowerCase().includes('invalid_request_error') ||
+            errMsg.toLowerCase().includes('unsupported')));
+
+      if (isModelError) {
+        if (!candidateData?.apiKey && site.encryptedOpenAiKey) {
+          void this.siteRepository.update(siteId, {
+            customKeyStatus: 'invalid',
+          });
+        }
+        return {
+          valid: false,
+          latencyMs,
+          customKeyStatus: 'invalid',
+          endpointTested: targetBaseUrl,
+          error: `Model '${targetModel}' not found or not supported: ${errMsg.slice(0, 150)}`,
         };
       }
 

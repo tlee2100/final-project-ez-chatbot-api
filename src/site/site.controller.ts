@@ -330,9 +330,12 @@ export class SiteController {
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['apiKey'],
       properties: {
-        apiKey: { type: 'string', description: 'Raw API key (e.g. sk-...)' },
+        apiKey: {
+          type: 'string',
+          description:
+            'Raw API key (e.g. sk-...). If omitted, validates and uses existing stored key.',
+        },
         customBaseUrl: {
           type: 'string',
           description:
@@ -353,13 +356,13 @@ export class SiteController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Invalid or unauthorized API key provided',
+    description: 'Invalid or unauthorized API key or model provided',
   })
   @ApiResponse({ status: 403, description: 'Forbidden' })
   @UseGuards(AuthGuard('jwt'))
   async saveCustomApiKey(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body('apiKey') apiKey: string,
+    @Body('apiKey') apiKey: string | undefined,
     @Body('customBaseUrl') customBaseUrl: string | undefined,
     @Body('llmModel') llmModel: string | undefined,
     @Req() req: AuthRequest,
