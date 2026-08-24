@@ -4,8 +4,7 @@ export function createRepositoryMock() {
     findAndCount: jest.fn(),
     find: jest.fn(),
     save: jest.fn(),
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    create: jest.fn((data) => data),
+    create: jest.fn((data: unknown) => data),
     remove: jest.fn(),
     softRemove: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
