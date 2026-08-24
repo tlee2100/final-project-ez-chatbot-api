@@ -153,6 +153,7 @@ const AgentState = Annotation.Root({
     name?: string;
     domains?: string[];
     bookingEnabled?: boolean;
+    humanHandoffEnabled?: boolean;
     bookingServices?: { id: string; name: string }[];
     bookingResources?: { id: string; name: string }[];
     bookingHours?: {
@@ -222,6 +223,7 @@ export interface GraphRunOptions {
     name?: string;
     domains?: string[];
     bookingEnabled?: boolean;
+    humanHandoffEnabled?: boolean;
     bookingServices?: { id: string; name: string }[];
     bookingResources?: { id: string; name: string }[];
     bookingHours?: {
@@ -582,6 +584,7 @@ export class GraphService {
           name: site?.name ?? undefined,
           domains: site?.allowedDomains ?? [],
           bookingEnabled: site?.bookingEnabled === true,
+          humanHandoffEnabled: site?.humanHandoff === true,
           bookingServices:
             site?.bookingServices?.map((service) => ({
               id: service.id,
@@ -1350,6 +1353,7 @@ export class GraphService {
               getIntentClassifierPrompt(
                 bookingEnabled,
                 activeFlow === 'BOOKING',
+                state.siteContext.humanHandoffEnabled === true,
               ),
             ),
             new HumanMessage(`<user_input>\n${contentStr}\n</user_input>`),
@@ -1417,7 +1421,24 @@ export class GraphService {
        * request_handoff — updates the conversation status, notifies agents,
        * and writes a canned handoff message.
        */
-      const requestHandoff = async () => {
+      const requestHandoff = async (state: typeof AgentState.State) => {
+        if (!options.siteContext?.humanHandoffEnabled) {
+          const isVi = localeLanguage(state.locale) === 'vi';
+          const noHandoffMsg = isVi
+            ? 'Tính năng kết nối trực tiếp với nhân viên hiện không khả dụng. Tôi là trợ lý ảo AI, tôi có thể tiếp tục hỗ trợ bạn giải đáp các thông tin.'
+            : 'Live agent support is currently unavailable. I am an AI assistant and will continue to help you with your inquiries.';
+
+          if (res) {
+            res.write(noHandoffMsg);
+          }
+
+          server
+            .to(`conversation-${conversationId}`)
+            .emit('aiChunk', { token: noHandoffMsg, conversationId });
+
+          return { messages: [new AIMessage(noHandoffMsg)] };
+        }
+
         await onRequestHandoff();
 
         const handoffMsg =

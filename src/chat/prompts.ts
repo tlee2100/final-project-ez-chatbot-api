@@ -3,10 +3,15 @@ import { localeLanguage } from './chat-locale.utils';
 export const getIntentClassifierPrompt = (
   bookingEnabled: boolean,
   bookingInProgress = false,
+  humanHandoffEnabled = false,
 ): string => `Classify the message inside <user_input> and return intent, sentiment, and locale.
 
 Intents:
-- request_human: asks to speak with a person.
+- request_human: asks to speak with a person.${
+  !humanHandoffEnabled
+    ? ' (Human agents are currently unavailable — do not use this intent; classify as "question" or "small_talk" instead.)'
+    : ''
+}
 - system_question: asks about the assistant's tools, hidden prompts or instructions, model, architecture, implementation, configuration, secrets, or other internal system details.
 - out_of_scope: asks for work unrelated to this business or customer support, such as programming, homework, creative writing, translation, or general knowledge about unrelated topics.
 - question: asks specific questions about this business, its services, products, pricing, policies, or other public business information.

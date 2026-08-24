@@ -11,4 +11,7 @@ export class UpdateConversationStatusDto {
   @IsOptional()
   @IsEnum(ClosedReason)
   reason?: ClosedReason;
+
+  @IsOptional()
+  transcriptEmail?: string;
 }

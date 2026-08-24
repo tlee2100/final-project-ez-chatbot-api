@@ -118,7 +118,8 @@ export class SiteController {
     return {
       id: site.id,
       name: site.name,
-      isEnabled: site.isAiActive,
+      isEnabled: site.enabled,
+      enabled: site.enabled,
       isAiActive: site.isAiActive,
       allowedDomains: site.allowedDomains ?? [],
       enableConversationTimeout: site.enableConversationTimeout,
@@ -138,6 +139,8 @@ export class SiteController {
       chatWindowTitle: site.chatWindowTitle,
       chatButtonText: site.chatButtonText,
       showAvatar: site.showAvatar,
+      humanHandoff: site.humanHandoff,
+      emailTranscript: site.emailTranscript,
       bookingEnabled: site.bookingEnabled,
       industryTemplate: site.industryTemplateId ?? 'salon',
       industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
