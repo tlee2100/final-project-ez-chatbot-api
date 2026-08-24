@@ -122,13 +122,18 @@ export const getSlotCardPrompt = (locale: string): string => {
 export const getBookingOptionPrompt = (
   locale: string,
   step: 'service' | 'resource' | 'date' | 'name' | 'email',
+  template?: string,
 ): string => {
   const language = localeLanguage(locale);
+  const isGeneral =
+    template === 'general' || (template !== undefined && template !== 'salon');
   const prompts =
     language === 'vi'
       ? {
           service: 'Bạn muốn đặt dịch vụ nào?',
-          resource: 'Bạn muốn chọn nhân viên nào?',
+          resource: isGeneral
+            ? 'Bạn muốn chọn sân/tài nguyên nào?'
+            : 'Bạn muốn chọn nhân viên nào?',
           date: 'Bạn muốn đặt lịch vào ngày nào?',
           name: 'Bạn vui lòng cho biết tên để tiếp tục.',
           email: 'Bạn có muốn cung cấp email xác nhận không?',
@@ -136,14 +141,18 @@ export const getBookingOptionPrompt = (
       : language === 'ja'
         ? {
             service: 'どのサービスを予約しますか？',
-            resource: '担当スタッフを選択してください。',
+            resource: isGeneral
+              ? 'ご希望の施設・リソースを選択してください。'
+              : '担当スタッフを選択してください。',
             date: '予約日を選択してください。',
             name: '続行するにはお名前を入力してください。',
             email: '確認メール用のメールアドレスを入力しますか？',
           }
         : {
             service: 'Which service would you like to book?',
-            resource: 'Which staff member would you prefer?',
+            resource: isGeneral
+              ? 'Which court/resource would you prefer?'
+              : 'Which staff member would you prefer?',
             date: 'Which date would you like to book?',
             name: 'Please provide your name to continue.',
             email: 'Would you like to provide a confirmation email?',

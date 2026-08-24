@@ -77,8 +77,7 @@ export const isBookingOptionSelection = (text: string): boolean =>
 
 export const bookingOptionNeedsModel = (
   selection: BookingOptionSelection,
-): boolean =>
-  selection.action === 'submit_text' || selection.action === 'skip_email';
+): boolean => Boolean(selection && false);
 
 export const extractBookingCommandJson = (
   text: string,
@@ -112,7 +111,20 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
       /<booking-step>\s*(service|resource|date|name|email)\s*<\/booking-step>/i,
     )?.[1]
     ?.toLowerCase();
-  return (step as BookingOptionStep | undefined) ?? null;
+  if (step) return step as BookingOptionStep;
+
+  if (
+    /<chips>.*?@.*?\..*?\|.*?(bỏ qua|skip|スキップ).*?<\/chips>/i.test(text) ||
+    (/<chips>.*?(bỏ qua|skip|スキップ).*?<\/chips>/i.test(text) &&
+      /(email|xác nhận|thư điện tử|メール)/i.test(text)) ||
+    /(?:nhận\s*email|email\s*xác\s*nhận|cung\s*cấp\s*email|địa\s*chỉ\s*email|confirmation\s*email|receive\s*(?:a\s*)?(?:confirmation\s*)?email|provide\s*(?:your\s*)?email|email\s*address|メール)/i.test(
+      text,
+    )
+  ) {
+    return 'email';
+  }
+
+  return null;
 };
 
 export const stripModelBookingDirectives = (text: string): string =>
@@ -206,7 +218,7 @@ export const buildChatMessageComponents = (
   fallbackStep: BookingOptionStep | null = null,
 ): ChatMessageComponent[] => {
   const selectedOption = parseBookingOptionSelection(latestUserText);
-  const step = selectedOption
+  let step = selectedOption
     ? selectedOption.action === 'select_service'
       ? 'resource'
       : selectedOption.action === 'select_resource' ||
@@ -214,6 +226,21 @@ export const buildChatMessageComponents = (
         ? 'date'
         : null
     : (bookingStepFromText(text) ?? fallbackStep);
+
+  // Auto-fallback if step is service but site has no services configured
+  if (step === 'service' && (siteContext?.bookingServices ?? []).length === 0) {
+    step =
+      (siteContext?.bookingResources ?? []).length > 0 ? 'resource' : 'date';
+  }
+
+  // Fallback to email step after phone submission if model omitted tags
+  if (
+    !step &&
+    /^[+0-9\s().-]{7,25}$/.test(latestUserText.trim()) &&
+    !latestUserText.trim().startsWith('/')
+  ) {
+    step = 'email';
+  }
 
   let items: BookingChipItem[] = [];
   if (step === 'service') {

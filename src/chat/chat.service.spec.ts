@@ -24,7 +24,7 @@ describe('ChatService saveMessage', () => {
     const conversationRepository = createRepositoryMock();
     const chatMessageRepository = createRepositoryMock();
     const userRepository = createRepositoryMock();
-    const bookingRepository = createRepositoryMock();
+    const bookingService = { getBookingByCode: jest.fn() };
     const notificationService = { create: jest.fn() };
     const chatGateway = {
       notifyAgentsOfNewConversation: jest.fn(),
@@ -50,7 +50,7 @@ describe('ChatService saveMessage', () => {
       conversationRepository as never,
       chatMessageRepository as never,
       userRepository as never,
-      bookingRepository as never,
+      bookingService as never,
       notificationService as never,
       chatGateway as never,
       graphService as never,

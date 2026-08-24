@@ -51,7 +51,7 @@ import { CreateConversationResponseDto } from './dto/create-conversation-respons
 import { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
 import { AiService } from './ai.service';
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
-import { Booking } from '../booking/entities/booking.entity';
+import { BookingService } from '../booking/booking.service';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
 import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
 import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
@@ -112,8 +112,8 @@ export class ChatService {
     private readonly chatMessageRepository: Repository<ChatMessage>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
-    @InjectRepository(Booking)
-    private readonly bookingRepository: Repository<Booking>,
+    @Inject(forwardRef(() => BookingService))
+    private readonly bookingService: BookingService,
     private readonly notificationService: NotificationService,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
@@ -1718,9 +1718,9 @@ export class ChatService {
           const bookingCode = latestActiveBookingCode(fullChatContent);
 
           if (bookingCode) {
-            const booking = await this.bookingRepository.findOne({
-              where: { code: bookingCode },
-            });
+            const booking = await this.bookingService
+              .getBookingByCode(conversation.siteId, bookingCode)
+              .catch(() => null);
             if (booking && booking.customerEmail) {
               targetEmail = booking.customerEmail;
               targetName = booking.customerName || targetName;

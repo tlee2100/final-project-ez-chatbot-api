@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
   Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Booking } from './entities/booking.entity';
@@ -69,11 +70,21 @@ export class BookingService {
     private resourceRepository: Repository<BookingResource>,
     @InjectRepository(BookingServiceItem)
     private serviceEntityRepository: Repository<BookingServiceItem>,
+    @Inject(forwardRef(() => SiteService))
     private siteService: SiteService,
     private emailQueueService: EmailQueueService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
     private readonly bookingGateway: BookingGateway,
   ) {}
+
+  private buildHoldKey(
+    siteId: string,
+    resourceId: string,
+    startAt: string,
+    endAt: string,
+  ): string {
+    return `booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}`;
+  }
 
   async getSiteBookingConfig(siteId: string): Promise<SiteBookingConfig> {
     const config = await this.configRepository.findOne({ where: { siteId } });
@@ -296,7 +307,12 @@ export class BookingService {
       for (const slot of slotTimes) {
         if (!slot.isPast) {
           expectedKeys.push(
-            `booking_hold:site:${siteId}:resource:${resourceId}:time:${slot.slotStart.toISOString()}_${slot.slotEnd.toISOString()}`,
+            this.buildHoldKey(
+              siteId,
+              resourceId,
+              slot.slotStart.toISOString(),
+              slot.slotEnd.toISOString(),
+            ),
           );
         }
       }
@@ -305,7 +321,12 @@ export class BookingService {
         if (!slot.isPast) {
           for (const resource of allResources) {
             expectedKeys.push(
-              `booking_hold:site:${siteId}:resource:${resource.id}:time:${slot.slotStart.toISOString()}_${slot.slotEnd.toISOString()}`,
+              this.buildHoldKey(
+                siteId,
+                resource.id,
+                slot.slotStart.toISOString(),
+                slot.slotEnd.toISOString(),
+              ),
             );
           }
         }
@@ -355,7 +376,12 @@ export class BookingService {
         });
 
         if (!isOverlapping && !isBlocked) {
-          const key = `booking_hold:site:${siteId}:resource:${resourceId}:time:${slotStart.toISOString()}_${slotEnd.toISOString()}`;
+          const key = this.buildHoldKey(
+            siteId,
+            resourceId,
+            slotStart.toISOString(),
+            slotEnd.toISOString(),
+          );
           const isHolding = redisMap.has(key);
 
           availableSlots.push({
@@ -391,7 +417,12 @@ export class BookingService {
         if (freeResources.length > 0) {
           let availableResourcesCount = 0;
           for (const resource of freeResources) {
-            const key = `booking_hold:site:${siteId}:resource:${resource.id}:time:${slotStart.toISOString()}_${slotEnd.toISOString()}`;
+            const key = this.buildHoldKey(
+              siteId,
+              resource.id,
+              slotStart.toISOString(),
+              slotEnd.toISOString(),
+            );
             if (!redisMap.has(key)) {
               availableResourcesCount++;
             }
@@ -443,7 +474,12 @@ export class BookingService {
       );
     }
 
-    const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+    const key = this.buildHoldKey(
+      siteId,
+      dto.resourceId,
+      dto.startAt,
+      dto.endAt,
+    );
 
     // If slot is already held, check if it belongs to the same session
     const existing = await this.redis.get(key);
@@ -480,6 +516,36 @@ export class BookingService {
     return { success: true };
   }
 
+  async holdSlots(
+    siteId: string,
+    slots: Array<{
+      resourceId: string;
+      startAt: string;
+      endAt: string;
+      serviceId?: string;
+    }>,
+    sessionId: string,
+  ): Promise<{ sessionId: string }> {
+    const newKeys = slots.map((s) =>
+      this.buildHoldKey(siteId, s.resourceId, s.startAt, s.endAt),
+    );
+
+    // Release any other slots previously held by this session
+    await this.releaseSessionHolds(siteId, sessionId, newKeys);
+
+    for (const slot of slots) {
+      await this.holdSlot(siteId, {
+        resourceId: slot.resourceId,
+        serviceId: slot.serviceId,
+        startAt: slot.startAt,
+        endAt: slot.endAt,
+        sessionId,
+      });
+    }
+
+    return { sessionId };
+  }
+
   private async scanKeys(pattern: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
       const stream = this.redis.scanStream({ match: pattern, count: 100 });
@@ -511,7 +577,12 @@ export class BookingService {
   }
 
   async releaseHold(siteId: string, dto: HoldSlotDto) {
-    const key = `booking_hold:site:${siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+    const key = this.buildHoldKey(
+      siteId,
+      dto.resourceId,
+      dto.startAt,
+      dto.endAt,
+    );
     await this.redis.del(key);
 
     this.bookingGateway.emitSlotReleased(siteId, {
@@ -565,7 +636,7 @@ export class BookingService {
     startAt: string,
     endAt: string,
   ): Promise<{ sessionId: string } | null> {
-    const holdKey = `booking_hold:site:${siteId}:resource:${resourceId}:time:${startAt}_${endAt}`;
+    const holdKey = this.buildHoldKey(siteId, resourceId, startAt, endAt);
     const holdDataStr = await this.redis.get(holdKey);
     if (!holdDataStr) return null;
     try {
@@ -594,8 +665,15 @@ export class BookingService {
       );
 
       const totalSlots = dto.slots.length;
+      const slotServiceIds = dto.slots.map((s) => s.serviceId).filter(Boolean);
       const providedServices =
-        dto.serviceIds ?? (dto.serviceId ? [dto.serviceId] : []);
+        dto.serviceIds && dto.serviceIds.length > 0
+          ? dto.serviceIds
+          : slotServiceIds.length === totalSlots
+            ? (slotServiceIds as string[])
+            : dto.serviceId
+              ? [dto.serviceId]
+              : [];
 
       if (isSalon && totalSlots > 1) {
         if (providedServices.length !== totalSlots) {
@@ -610,7 +688,12 @@ export class BookingService {
 
       for (const span of groupedSpans) {
         const spanServiceIds = isSalon
-          ? providedServices.slice(serviceIndex, serviceIndex + span.slotCount)
+          ? span.serviceIds && span.serviceIds.length === span.slotCount
+            ? span.serviceIds
+            : providedServices.slice(
+                serviceIndex,
+                serviceIndex + span.slotCount,
+              )
           : providedServices;
         serviceIndex += span.slotCount;
 
@@ -631,7 +714,11 @@ export class BookingService {
           },
         };
 
-        const singleBooking = await this.createSingleBooking(subDto, site);
+        const singleBooking = await this.createSingleBooking(
+          subDto,
+          site,
+          config,
+        );
         createdBookings.push(singleBooking);
       }
 
@@ -648,12 +735,13 @@ export class BookingService {
     }
 
     // Single booking mode
-    return this.createSingleBooking(dto, site);
+    return this.createSingleBooking(dto, site, config);
   }
 
   private async createSingleBooking(
     dto: CreateBookingDto,
     site: { id: string; name: string; industryTemplateId?: string },
+    config?: SiteBookingConfig,
   ): Promise<Booking> {
     const bookingDate = new Date(dto.startAt);
 
@@ -662,8 +750,9 @@ export class BookingService {
       throw new BadRequestException('Cannot create a booking for a past day');
     }
 
-    const config = await this.getSiteBookingConfig(dto.siteId);
-    const duration = config.bookingSlotDuration || 30;
+    const bookingConfig =
+      config || (await this.getSiteBookingConfig(dto.siteId));
+    const duration = bookingConfig.bookingSlotDuration || 30;
     const diffMins = Math.round(
       (parseISO(dto.endAt).getTime() - parseISO(dto.startAt).getTime()) / 60000,
     );
@@ -737,7 +826,12 @@ export class BookingService {
       let subStart = parseISO(dto.startAt);
       for (let i = 0; i < slotCount; i++) {
         const subEnd = addMinutes(subStart, duration);
-        const subKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${subStart.toISOString()}_${subEnd.toISOString()}`;
+        const subKey = this.buildHoldKey(
+          dto.siteId,
+          dto.resourceId,
+          subStart.toISOString(),
+          subEnd.toISOString(),
+        );
         const holdDataStr = await this.redis.get(subKey);
         if (holdDataStr) {
           const holdData = JSON.parse(holdDataStr) as { sessionId: string };
@@ -752,15 +846,59 @@ export class BookingService {
     // Generate a code, for simplicity we can use a random short string
     const code = Math.random().toString(36).substring(2, 10).toUpperCase();
 
+    // Resolve all service names for providedServices
+    const serviceNames: string[] = [];
+    if (providedServices.length) {
+      for (const sId of providedServices) {
+        const s = await this.getServiceById(dto.siteId, sId);
+        if (s) serviceNames.push(s.name);
+      }
+    }
+
+    // Build slot-level breakdown if multiple slots
+    let slotsBreakdown =
+      (dto.templateFields?.slots as Array<Record<string, unknown>>) || [];
+    if (!slotsBreakdown || slotsBreakdown.length === 0) {
+      let subStart = parseISO(dto.startAt);
+      slotsBreakdown = [];
+      for (let i = 0; i < slotCount; i++) {
+        const sId = providedServices[i] || providedServices[0];
+        const sName = serviceNames[i] || serviceNames[0];
+        const timeStr = formatInTimeZone(
+          subStart,
+          dto.timezone || 'UTC',
+          'HH:mm',
+        );
+        slotsBreakdown.push({
+          timeSlot: timeStr,
+          serviceId: sId,
+          serviceName: sName,
+          resourceId: dto.resourceId,
+        });
+        subStart = addMinutes(subStart, duration);
+      }
+    } else {
+      slotsBreakdown = slotsBreakdown.map((s, idx) => ({
+        ...s,
+        serviceName: s.serviceName || serviceNames[idx] || serviceNames[0],
+      }));
+    }
+
+    // Deduplicate IDs for ManyToMany relation to respect primary key (bookingId, serviceId)
+    const uniqueServiceIds = Array.from(new Set(providedServices));
+    const assignedServices = uniqueServiceIds.map(
+      (id) => ({ id }) as unknown as BookingServiceItem,
+    );
+
     const booking = this.bookingRepository.create({
       ...dto,
       serviceId: providedServices[0] ?? dto.serviceId ?? null,
-      services: providedServices.map(
-        (id) => ({ id }) as unknown as BookingServiceItem,
-      ),
+      services: assignedServices,
       templateFields: {
         ...dto.templateFields,
         serviceIds: providedServices,
+        serviceNames,
+        slots: slotsBreakdown,
         slotCount,
       },
       code,
@@ -776,7 +914,12 @@ export class BookingService {
         const end = parseISO(dto.endAt);
         while (isBefore(curr, end)) {
           const next = addMinutes(curr, duration);
-          const subKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${curr.toISOString()}_${next.toISOString()}`;
+          const subKey = this.buildHoldKey(
+            dto.siteId,
+            dto.resourceId,
+            curr.toISOString(),
+            next.toISOString(),
+          );
           await this.redis.del(subKey);
           this.bookingGateway.emitSlotConfirmed(dto.siteId, {
             resourceId: dto.resourceId,
@@ -785,19 +928,16 @@ export class BookingService {
           });
           curr = next;
         }
-        const fullSpanKey = `booking_hold:site:${dto.siteId}:resource:${dto.resourceId}:time:${dto.startAt}_${dto.endAt}`;
+        const fullSpanKey = this.buildHoldKey(
+          dto.siteId,
+          dto.resourceId,
+          dto.startAt,
+          dto.endAt,
+        );
         await this.redis.del(fullSpanKey);
       }
 
       if (savedBooking.customerEmail) {
-        const serviceNames: string[] = [];
-        if (providedServices.length) {
-          for (const sId of providedServices) {
-            const s = await this.getServiceById(dto.siteId, sId);
-            if (s) serviceNames.push(s.name);
-          }
-        }
-
         const serviceName = serviceNames.length
           ? serviceNames.join(', ')
           : 'N/A';
@@ -843,6 +983,7 @@ export class BookingService {
     const qb = this.bookingRepository
       .createQueryBuilder('booking')
       .leftJoinAndSelect('booking.service', 'service')
+      .leftJoinAndSelect('booking.services', 'services')
       .leftJoinAndSelect('booking.resource', 'resource')
       .where('booking.siteId = :siteId', { siteId });
 
@@ -876,6 +1017,7 @@ export class BookingService {
     const query = this.bookingRepository
       .createQueryBuilder('booking')
       .leftJoinAndSelect('booking.service', 'service')
+      .leftJoinAndSelect('booking.services', 'services')
       .leftJoinAndSelect('booking.resource', 'resource')
       .where('booking.siteId = :siteId', { siteId });
 

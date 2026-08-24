@@ -4,7 +4,10 @@ import {
   IsOptional,
   IsInt,
   IsUUID,
+  IsEmail,
+  ValidateIf,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** DTO for POST /api/internal/mcp/kb/search */
@@ -34,7 +37,16 @@ export class McpCreateBookingDto {
   customerName: string;
 
   @ApiProperty({ example: 'customer@example.com', required: false })
-  @IsString()
+  @Transform(({ value }) =>
+    value && typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined,
+  )
+  @ValidateIf(
+    (o: { customerEmail?: unknown }) =>
+      typeof o.customerEmail === 'string' && o.customerEmail.trim().length > 0,
+  )
+  @IsEmail()
   @IsOptional()
   customerEmail?: string;
 
