@@ -28,6 +28,18 @@ export class SiteProfile extends AutomapperProfile {
           (d) => d.hasCustomApiKey,
           mapFrom((s) => Boolean(s.encryptedOpenAiKey)),
         ),
+        forMember(
+          (d) => d.customKeyStatus,
+          mapFrom((s) => s.customKeyStatus ?? 'unknown'),
+        ),
+        forMember(
+          (d) => d.customBaseUrl,
+          mapFrom((s) => s.customBaseUrl ?? null),
+        ),
+        forMember(
+          (d) => d.keyMask,
+          mapFrom((s) => s.keyMask ?? null),
+        ),
       );
     };
   }

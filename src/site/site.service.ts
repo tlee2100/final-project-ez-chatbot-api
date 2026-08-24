@@ -9,6 +9,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { encryptApiKey, decryptApiKey } from '../shared/utils/encryption.util';
+import OpenAI from 'openai';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Booking } from '../booking/entities/booking.entity';
@@ -643,36 +644,394 @@ export class SiteService {
   // ── BYOK — Bring Your Own Key (SEC-001 / CE-004) ──────────────────────────
 
   /**
-   * Save a custom OpenAI API key for a site.
+   * Save a custom API key for a site (BYOK).
+   * Validates the key via probe call against provider endpoints (DEEPSEEK_BASE_URL / OPENAI_BASE_URL).
    * The key is encrypted with AES-256-GCM before being stored in the DB.
-   * The plaintext key is NEVER persisted.
    *
    * @param siteId    The target site
    * @param user      The requesting user (must have access to the site)
-   * @param plainKey  The raw OpenAI API key (e.g. "sk-...")
+   * @param plainKey  The raw API key
+   */
+  /**
+   * Safe helper to extract status code and message from unknown caught errors.
+   */
+  private extractErrorDetails(err: unknown): {
+    status?: number;
+    message: string;
+  } {
+    if (err instanceof Error) {
+      const errObj = err as unknown as Record<string, unknown>;
+      const status =
+        typeof errObj.status === 'number'
+          ? errObj.status
+          : typeof errObj.statusCode === 'number'
+            ? errObj.statusCode
+            : undefined;
+      return { status, message: err.message };
+    }
+    if (typeof err === 'object' && err !== null) {
+      const obj = err as Record<string, unknown>;
+      const status =
+        typeof obj.status === 'number'
+          ? obj.status
+          : typeof obj.statusCode === 'number'
+            ? obj.statusCode
+            : undefined;
+      const message =
+        typeof obj.message === 'string'
+          ? obj.message
+          : typeof obj.error === 'string'
+            ? obj.error
+            : 'Unknown provider error';
+      return { status, message };
+    }
+    return { message: typeof err === 'string' ? err : 'Unknown error' };
+  }
+
+  /**
+   * Helper to generate a safe masked string for API key display (e.g. "sk-proj-••••...3a9b").
+   */
+  private generateKeyMask(key: string): string {
+    const trimmed = key.trim();
+    if (trimmed.length <= 8) {
+      return '••••' + trimmed.slice(-4);
+    }
+    const prefix = trimmed.startsWith('sk-proj-')
+      ? 'sk-proj-'
+      : trimmed.startsWith('sk-')
+        ? 'sk-'
+        : trimmed.slice(0, 4);
+    const suffix = trimmed.slice(-4);
+    return `${prefix}••••...${suffix}`;
+  }
+
+  /**
+   * Save a custom API key for a site (BYOK).
+   * Validates the key and candidate model via probe chat completion against provider endpoints (customBaseUrl / DEEPSEEK_BASE_URL / OPENAI_BASE_URL).
+   * If plainKey is omitted, validates and uses the site's existing stored key.
+   * The key is encrypted with AES-256-GCM before being stored in the DB.
+   *
+   * @param siteId         The target site
+   * @param user           The requesting user (must have access to the site)
+   * @param plainKey       The raw API key (optional if site already has custom key stored)
+   * @param customBaseUrl  Optional custom provider URL (e.g. https://api.openai.com/v1)
+   * @param llmModel       Optional model name (e.g. gpt-4o-mini, qwen3.7-flash)
    */
   async saveCustomApiKey(
     siteId: string,
     user: JwtUser,
-    plainKey: string,
-  ): Promise<{ useCustomOpenAiKey: boolean }> {
-    await this.assertSiteAccess(siteId, user);
+    plainKey?: string | null,
+    customBaseUrl?: string | null,
+    llmModel?: string | null,
+  ): Promise<{
+    useCustomOpenAiKey: boolean;
+    customKeyStatus: 'unknown' | 'valid' | 'invalid';
+    customBaseUrl?: string | null;
+    keyMask?: string | null;
+    llmModel?: string;
+    warning?: string;
+  }> {
+    const site = await this.assertSiteAccess(siteId, user);
 
-    if (!plainKey || !plainKey.trim()) {
-      throw new BadRequestException('API key must not be empty');
+    let trimmedKey: string;
+    let isNewKey = false;
+
+    if (plainKey && plainKey.trim()) {
+      trimmedKey = plainKey.trim();
+      isNewKey = true;
+    } else {
+      if (!site.encryptedOpenAiKey) {
+        throw new BadRequestException('API key must not be empty');
+      }
+      trimmedKey = decryptApiKey(site.encryptedOpenAiKey);
     }
 
-    const encrypted = encryptApiKey(plainKey.trim());
+    const cleanBaseUrl = customBaseUrl?.trim() || null;
+    const cleanModel = llmModel?.trim() || null;
+    const targetModel = cleanModel || site.llmModel || 'qwen3.7-flash';
+
+    // Resolve candidate base URLs in priority order based on input and env:
+    const candidateBaseUrls: string[] = [
+      cleanBaseUrl,
+      site.customBaseUrl,
+      process.env.DEEPSEEK_BASE_URL,
+      process.env.OPENAI_BASE_URL,
+      'https://api.openai.com/v1',
+    ].filter((url): url is string => Boolean(url && url.trim()));
+
+    const uniqueBaseUrls = Array.from(new Set(candidateBaseUrls));
+
+    let customKeyStatus: 'unknown' | 'valid' | 'invalid' = 'unknown';
+    let warning: string | undefined;
+    let lastError: { status?: number; message: string } | null = null;
+    let verifiedSuccessfully = false;
+
+    // Probe candidate endpoints with the provided key and model
+    for (const baseUrl of uniqueBaseUrls) {
+      const probeClient = new OpenAI({
+        apiKey: trimmedKey,
+        baseURL: baseUrl,
+        timeout: 8000,
+        maxRetries: 0,
+      });
+
+      try {
+        await probeClient.chat.completions.create({
+          model: targetModel,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+        });
+        customKeyStatus = 'valid';
+        verifiedSuccessfully = true;
+        this.logger.log(
+          `Custom API key & model (${targetModel}) verified successfully for site ${siteId} via ${baseUrl}`,
+        );
+        break;
+      } catch (err: unknown) {
+        const { status, message: errMsg } = this.extractErrorDetails(err);
+        lastError = { status, message: errMsg };
+
+        const isQuotaOrRateLimit =
+          status === 429 ||
+          errMsg.includes('429') ||
+          errMsg.includes('insufficient_quota') ||
+          errMsg.includes('rate_limit') ||
+          errMsg.includes('Rate limit');
+
+        if (isQuotaOrRateLimit) {
+          customKeyStatus = 'valid';
+          verifiedSuccessfully = true;
+          warning =
+            'API key is valid, but currently rate-limited or out of quota.';
+          this.logger.warn(
+            `Custom API key for site ${siteId} authenticated with quota/rate warning on ${baseUrl}: ${errMsg}`,
+          );
+          break;
+        }
+
+        const isModelError =
+          status === 404 ||
+          (status === 400 &&
+            (errMsg.toLowerCase().includes('model') ||
+              errMsg.toLowerCase().includes('not found') ||
+              errMsg.toLowerCase().includes('does not exist') ||
+              errMsg.toLowerCase().includes('invalid_request_error') ||
+              errMsg.toLowerCase().includes('unsupported')));
+
+        if (isModelError) {
+          this.logger.warn(
+            `Model validation failed for site ${siteId} on ${baseUrl} with model '${targetModel}': ${errMsg}`,
+          );
+          throw new BadRequestException(
+            `Model '${targetModel}' is not found or not supported by this provider: ${errMsg.slice(0, 150)}`,
+          );
+        }
+      }
+    }
+
+    if (!verifiedSuccessfully && lastError) {
+      const { status, message: errMsg } = lastError;
+
+      const isAuthError =
+        status === 401 ||
+        status === 403 ||
+        errMsg.includes('401') ||
+        errMsg.includes('403') ||
+        errMsg.includes('Incorrect API key') ||
+        errMsg.includes('invalid_api_key') ||
+        errMsg.includes('Unauthorized') ||
+        errMsg.includes('Authentication');
+
+      if (isAuthError) {
+        this.logger.warn(
+          `Custom API key validation failed across provider endpoints for site ${siteId}: ${errMsg}`,
+        );
+        throw new BadRequestException(
+          `API key is invalid or unauthorized: ${errMsg.slice(0, 150)}`,
+        );
+      } else {
+        customKeyStatus = 'unknown';
+        warning =
+          'API credentials saved, but provider verification endpoint could not be reached within timeout.';
+        this.logger.warn(
+          `Could not reach provider probe endpoint for site ${siteId} (${errMsg}). Saved with status 'unknown'.`,
+        );
+      }
+    }
+
+    const encrypted = isNewKey ? encryptApiKey(trimmedKey) : undefined;
+    const keyMask = isNewKey
+      ? this.generateKeyMask(trimmedKey)
+      : site.keyMask || null;
 
     await this.siteRepository.update(siteId, {
-      encryptedOpenAiKey: encrypted,
+      ...(isNewKey ? { encryptedOpenAiKey: encrypted, keyMask } : {}),
       useCustomOpenAiKey: true,
+      customKeyStatus,
+      customBaseUrl: cleanBaseUrl,
+      ...(cleanModel ? { llmModel: cleanModel } : {}),
     });
 
     this.logger.log(
-      `Custom OpenAI key saved for site ${siteId} by user ${user.id}`,
+      `Custom API key saved for site ${siteId} by user ${user.id} with status ${customKeyStatus}`,
     );
-    return { useCustomOpenAiKey: true };
+    return {
+      useCustomOpenAiKey: true,
+      customKeyStatus,
+      customBaseUrl: cleanBaseUrl,
+      keyMask,
+      llmModel: cleanModel || site.llmModel || undefined,
+      warning,
+    };
+  }
+
+  /**
+   * Test connection to AI provider on-demand without altering saved credentials.
+   * If apiKey is supplied in candidateData, tests that key.
+   * If apiKey is omitted, tests the site's currently stored and decrypted custom key.
+   */
+  async testCustomApiKeyConnection(
+    siteId: string,
+    user: JwtUser,
+    candidateData?: {
+      apiKey?: string;
+      customBaseUrl?: string;
+      llmModel?: string;
+    },
+  ): Promise<{
+    valid: boolean;
+    latencyMs: number;
+    customKeyStatus: 'valid' | 'invalid' | 'unknown';
+    endpointTested: string;
+    warning?: string;
+    error?: string;
+  }> {
+    const site = await this.assertSiteAccess(siteId, user);
+
+    let testKey = candidateData?.apiKey?.trim();
+    if (!testKey) {
+      if (!site.encryptedOpenAiKey) {
+        throw new BadRequestException(
+          'No custom API key configured for this site to test.',
+        );
+      }
+      testKey = decryptApiKey(site.encryptedOpenAiKey);
+    }
+
+    const targetBaseUrl =
+      candidateData?.customBaseUrl?.trim() ||
+      site.customBaseUrl ||
+      process.env.DEEPSEEK_BASE_URL ||
+      process.env.OPENAI_BASE_URL ||
+      'https://api.openai.com/v1';
+
+    const targetModel =
+      candidateData?.llmModel?.trim() || site.llmModel || 'qwen3.7-flash';
+
+    const probeClient = new OpenAI({
+      apiKey: testKey,
+      baseURL: targetBaseUrl,
+      timeout: 10000,
+      maxRetries: 0,
+    });
+
+    const startTime = Date.now();
+    try {
+      await probeClient.chat.completions.create({
+        model: targetModel,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+      });
+      const latencyMs = Date.now() - startTime;
+
+      if (!candidateData?.apiKey && site.encryptedOpenAiKey) {
+        void this.siteRepository.update(siteId, { customKeyStatus: 'valid' });
+      }
+
+      return {
+        valid: true,
+        latencyMs,
+        customKeyStatus: 'valid',
+        endpointTested: `${targetBaseUrl} (model: ${targetModel})`,
+      };
+    } catch (err: unknown) {
+      const latencyMs = Date.now() - startTime;
+      const { status, message: errMsg } = this.extractErrorDetails(err);
+
+      const isQuotaOrRateLimit =
+        status === 429 ||
+        errMsg.includes('429') ||
+        errMsg.includes('insufficient_quota') ||
+        errMsg.includes('rate_limit') ||
+        errMsg.includes('Rate limit');
+
+      if (isQuotaOrRateLimit) {
+        return {
+          valid: true,
+          latencyMs,
+          customKeyStatus: 'valid',
+          endpointTested: `${targetBaseUrl} (model: ${targetModel})`,
+          warning: 'Key is valid, but currently rate-limited or out of quota.',
+        };
+      }
+
+      const isModelError =
+        status === 404 ||
+        (status === 400 &&
+          (errMsg.toLowerCase().includes('model') ||
+            errMsg.toLowerCase().includes('not found') ||
+            errMsg.toLowerCase().includes('does not exist') ||
+            errMsg.toLowerCase().includes('invalid_request_error') ||
+            errMsg.toLowerCase().includes('unsupported')));
+
+      if (isModelError) {
+        if (!candidateData?.apiKey && site.encryptedOpenAiKey) {
+          void this.siteRepository.update(siteId, {
+            customKeyStatus: 'invalid',
+          });
+        }
+        return {
+          valid: false,
+          latencyMs,
+          customKeyStatus: 'invalid',
+          endpointTested: targetBaseUrl,
+          error: `Model '${targetModel}' not found or not supported: ${errMsg.slice(0, 150)}`,
+        };
+      }
+
+      const isAuthError =
+        status === 401 ||
+        status === 403 ||
+        errMsg.includes('401') ||
+        errMsg.includes('403') ||
+        errMsg.includes('Incorrect API key') ||
+        errMsg.includes('invalid_api_key') ||
+        errMsg.includes('Unauthorized') ||
+        errMsg.includes('Authentication');
+
+      if (isAuthError) {
+        if (!candidateData?.apiKey && site.encryptedOpenAiKey) {
+          void this.siteRepository.update(siteId, {
+            customKeyStatus: 'invalid',
+          });
+        }
+        return {
+          valid: false,
+          latencyMs,
+          customKeyStatus: 'invalid',
+          endpointTested: targetBaseUrl,
+          error: `Unauthorized or invalid API key: ${errMsg.slice(0, 150)}`,
+        };
+      }
+
+      return {
+        valid: false,
+        latencyMs,
+        customKeyStatus: 'unknown',
+        endpointTested: targetBaseUrl,
+        error: `Connection error or timeout (${errMsg.slice(0, 150)})`,
+      };
+    }
   }
 
   /**
@@ -684,18 +1043,21 @@ export class SiteService {
   async removeCustomApiKey(
     siteId: string,
     user: JwtUser,
-  ): Promise<{ useCustomOpenAiKey: boolean }> {
+  ): Promise<{ useCustomOpenAiKey: boolean; customKeyStatus: 'unknown' }> {
     await this.assertSiteAccess(siteId, user);
 
     await this.siteRepository.update(siteId, {
       encryptedOpenAiKey: null,
       useCustomOpenAiKey: false,
+      customKeyStatus: 'unknown',
+      customBaseUrl: null,
+      keyMask: null,
     });
 
     this.logger.log(
       `Custom OpenAI key removed for site ${siteId} by user ${user.id}`,
     );
-    return { useCustomOpenAiKey: false };
+    return { useCustomOpenAiKey: false, customKeyStatus: 'unknown' };
   }
 
   /**
