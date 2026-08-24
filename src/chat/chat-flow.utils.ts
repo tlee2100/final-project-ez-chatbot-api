@@ -124,7 +124,7 @@ export const detectBookingTriggerLocale = (
 
   // Vietnamese triggers
   if (
-    /^(?:(?:tôi|mình|em|anh|chị)?\s*(?:muốn|cần)?\s*)?(?:đặt\s*lịch(?:\s*hẹn)?|đặt\s*hẹn|lên\s*lịch(?:\s*hẹn)?|book\s*lịch|book\s*hẹn|đăng\s*ký\s*đặt\s*lịch|đặt)[\s!.]*$/i.test(
+    /^(?:(?:hello|hi|hey|xin\s*ch[àa]o|ch[àa]o(?:\s*b[ạa]n)?|al[ôo]|good\s*(?:morning|afternoon|evening))\s*[,.!~]?\s*)?(?:(?:tôi|mình|em|anh|chị)?\s*(?:muốn|cần)?\s*)?(?:(?:đ[ặăa]t|dat)\s*(?:l[ịi]ch(?:\s*h[ẹe]n)?|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|l[êe]n\s*l[ịi]ch(?:\s*h[ẹe]n)?|book\s*(?:l[ịi]ch|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|đăng\s*k[ýy]\s*(?:đ[ặăa]t\s*)?l[ịi]ch|đ[ặăa]t)[\s!.]*$/i.test(
       trimmed,
     )
   ) {
@@ -133,7 +133,7 @@ export const detectBookingTriggerLocale = (
 
   // Japanese triggers
   if (
-    /^(?:予約(?:したい|する|をお願いします|を取りたい)?|予約)[\s!.]*$/i.test(
+    /^(?:(?:こんにちは|こんばんは|おはようございます|hello|hi)\s*[,.!~]?\s*)?(?:予約(?:したい|する|をお願いします|を取りたい)?|予約)[\s!.]*$/i.test(
       trimmed,
     )
   ) {
@@ -150,7 +150,7 @@ export const detectBookingTriggerLocale = (
 
   // English triggers
   if (
-    /^(?:(?:i\s*(?:want|would\s*like|need)\s*to\s*)?(?:book|schedule|make)(?:\s*(?:an?|my))?\s*(?:appointment|booking|slot)?|book\s*now|booking|book|appointment)[\s!.]*$/i.test(
+    /^(?:(?:hello|hi|hey|good\s*(?:morning|afternoon|evening))\s*[,.!~]?\s*)?(?:(?:i\s*(?:want|would\s*like|need)\s*to\s*)?(?:book|schedule|make)(?:\s*(?:an?|my))?\s*(?:appointment|booking|slot)?|book\s*now|booking|book|appointment)[\s!.]*$/i.test(
       trimmed,
     )
   ) {

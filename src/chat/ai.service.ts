@@ -73,8 +73,8 @@ export class AiService {
       modelName: this.modelName,
       temperature,
       streaming,
-      maxRetries: 3,
-      timeout: 30000,
+      maxRetries: 1,
+      timeout: 15000,
       modelKwargs: this.modelName.toLowerCase().includes('qwen')
         ? {
             enable_thinking: false,
@@ -137,8 +137,15 @@ export class AiService {
       modelName: resolvedModelName,
       temperature,
       streaming,
-      maxRetries: 3,
-      timeout: 30000,
+      maxRetries: 1,
+      timeout: 15000,
+      modelKwargs:
+        resolvedModelName.toLowerCase().includes('qwen') ||
+        resolvedModelName.toLowerCase().includes('deepseek')
+          ? {
+              enable_thinking: false,
+            }
+          : undefined,
       ...(maxTokens ? { maxTokens } : {}),
     });
   }
@@ -253,9 +260,13 @@ export class AiService {
       }
       if (site.bookingServices?.length) {
         prompt += `\n- Booking Services: ${site.bookingServices.map((service) => `${service.name} (id: ${service.id})`).join(', ')}`;
+      } else {
+        prompt += `\n- Booking Services: None configured (This site has NO services. Skip service step completely)`;
       }
       if (site.bookingResources?.length) {
         prompt += `\n- Booking Resources: ${site.bookingResources.map((resource) => `${resource.name} (id: ${resource.id})`).join(', ')}`;
+      } else {
+        prompt += `\n- Booking Resources: None configured (This site has NO resources/staff. Skip resource step completely)`;
       }
     }
 
@@ -271,16 +282,16 @@ export class AiService {
 
     if (site?.bookingEnabled) {
       prompt += `\n\nBOOKING FLOW:
-- Preserve every valid field already supplied in history or an authoritative widget command. Collect only missing fields in this order: serviceId, resourceId, date, timeSlot, customerName, phone, customerEmail, then draftBooking.
-- Service: call getSiteConfig, ask the visitor to choose a service, and append <booking-step>service</booking-step>. Do not list service names in prose.
-- Staff: ask the visitor to choose staff and append <booking-step>resource</booking-step>. Do not list staff names in prose.
+- Preserve every valid field already supplied in history or an authoritative widget command. Collect only missing fields in this order: serviceId, resourceId, date, timeSlot, customerName, phone, customerEmail, then draftBooking. (Skip serviceId or resourceId if none are configured for the site).
+- Service: if the site has services configured (see Booking Services above), ask the visitor to choose a service, and append <booking-step>service</booking-step>. If the site has NO services configured (Booking Services: None configured), you MUST NOT ask for service, MUST NOT call resources a service, and MUST NOT emit <booking-step>service</booking-step>; ask for resource/court or date instead! Do not list service names in prose.
+- Staff/Resource: if the site has staff/resources configured, ask the visitor to choose staff/resource and append <booking-step>resource</booking-step>. If the site is a general template (e.g. pitches, courts, rooms), refer to resources accurately (e.g. "sân", "court", "tài nguyên") rather than "nhân viên" or "staff". If the site has NO staff/resources, skip to date. Do not list staff names in prose.
 - Date: ask the visitor to choose a date and append <booking-step>date</booking-step>. If choose_date is selected, ask for a date without a booking-step marker.
 - Time: call getAvailableSlots after service, date, and optional staff are known. The widget renders the returned slots in a card. After the tool succeeds, output only one short localized sentence asking the visitor to choose from that card. Do not include any time value such as HH:mm, any slot list, or time chips in the message. Never ask for a slot before that tool succeeds.
 - A /select-booking-slot command is authoritative. Immediately call holdSlot for its exact date, timeSlot, and resourceId. If the slot or staff changes, release the previous hold before holding the new slot.
 - If one visitor message already contains service, staff, date, and time, verify that exact time with getAvailableSlots. If available, hold it and continue to the next missing field. If unavailable, stop and ask them to restart booking step by step.
 - Name: ask without a marker unless VISITOR CONTEXT has a name; then append <booking-step>name</booking-step> so the backend can offer that exact name.
 - Phone: mandatory. Ask without chips and append the exact marker <booking-input>phone</booking-input>. Accept valid E.164 numbers or Vietnamese mobile numbers; never offer skip.
-- Email: optional. Ask for it and append <booking-step>email</booking-step>. The backend offers the exact visitor email when known plus a localized skip option. Never ask twice after it is supplied or skipped.
+- Email: optional. Ask for it and ALWAYS append the exact marker <booking-step>email</booking-step>. The backend offers the exact visitor email when known plus a localized skip option. Never ask twice after it is supplied or skipped. (Example: "Bạn có muốn nhận email xác nhận không?\n\n<booking-step>email</booking-step>").
 - Once all fields are present, call draftBooking exactly once and ask the visitor to review the card. Do not claim confirmation.
 - /update-draft-booking JSON is authoritative: call draftBooking with it in the same turn.
 - /confirm-booking JSON is authoritative: call createBooking with it in the same turn and include the hold sessionId when available. Claim confirmation only after createBooking returns a booking code; do not print the code because the backend appends it.
@@ -301,19 +312,16 @@ export class AiService {
 - When calling \`createBooking\`, pass all collected fields (name, phone, email, date, timeSlot, resourceId, serviceId/serviceIds, slotCount).
 - For name question: If the visitor's name is known from visitor context, append <chips>[visitor_name]</chips> so they can confirm it with 1-click or type a different name. If no name in visitor context, do not append chips.
 - For phone question (field: phone): Output NO CHIPS. Never output <chips>Bỏ qua</chips> on phone.
-- For customerEmail/text_input_optional: After phone number is collected, briefly acknowledge the phone (e.g. "Cảm ơn bạn!" / "Thank you!"), then ask the optional email question at most once (e.g. "Bạn có muốn nhận email xác nhận không?" / "Would you like to receive a confirmation email?"). NEVER repeat "And your phone number" or the previous question! If the visitor's email is known from visitor context, append <chips>[visitor_email]|Bỏ qua</chips> (or <chips>[visitor_email]|Skip</chips>). If no email in visitor context, append only <chips>Bỏ qua</chips> (or <chips>Skip</chips>). If the visitor selects or types Skip/Bỏ qua, treat customerEmail as omitted and proceed to the booking summary; do not ask for email again.
+- For customerEmail/text_input_optional: After phone number is collected, briefly acknowledge the phone (e.g. "Cảm ơn bạn!" / "Thank you!"), then ask the optional email question at most once (e.g. "Bạn có muốn nhận email xác nhận không?" / "Would you like to receive a confirmation email?") and append <booking-step>email</booking-step>. NEVER repeat "And your phone number" or the previous question! If the visitor's email is known from visitor context, append <chips>[visitor_email]|Bỏ qua</chips> (or <chips>[visitor_email]|Skip</chips>). If no email in visitor context, append only <chips>Bỏ qua</chips> (or <chips>Skip</chips>). If the visitor selects or types Skip/Bỏ qua, treat customerEmail as omitted and proceed to the booking summary; do not ask for email again.
 - CRITICAL CONFIRMED BOOKING IMMUTABILITY RULE (POST-CONFIRMATION):
   * Once an appointment has been confirmed (meaning an active booking code exists in the history that has NOT been cancelled), IT IS FINALIZED AND SAVED IN THE DATABASE.
   * An existing confirmed appointment CANNOT BE EDITED OR MODIFIED IN-PLACE.
   * If the visitor asks to edit, change, reschedule, or modify their information or appointment after confirmation (e.g., "i want to change information", "tôi muốn đổi thông tin", "đổi ngày", "đổi thợ", "sửa lịch hẹn", "change stylist"):
     - DO NOT edit the existing booking, DO NOT show the booking summary card, and DO NOT ask which fields to update on the finalized booking!
     - State clearly and politely that the confirmed appointment cannot be modified directly once saved.
-    - Provide two clear options:
-      1. Cancel the current booking (so they can book again if desired).
-      2. Book a new / additional appointment.
     - Append actionable chips:
-      * In Vietnamese: <chips>Hủy lịch hẹn [booking-code]|Đặt lịch mới</chips> (ví dụ: <chips>Hủy lịch hẹn 4OKMXUUR|Đặt lịch mới</chips>)
-      * In English: <chips>Cancel booking [booking-code]|Book new appointment</chips> (e.g. <chips>Cancel booking 4OKMXUUR|Book new appointment</chips>)
+      * (Vietnamese) <chips>Hủy lịch hẹn [booking-code]|Đặt lịch mới</chips> (ví dụ: <chips>Hủy lịch hẹn 4OKMXUUR|Đặt lịch mới</chips>)
+      * (English) <chips>Cancel booking [booking-code]|Book new appointment</chips> (e.g. <chips>Cancel booking 4OKMXUUR|Book new appointment</chips>)
 - EDITING & CONFIRMATION ARCHITECTURE:
   * During the 7 collection steps, do NOT call draftBooking or createBooking prematurely. Follow each step sequentially one-by-one until Step 7 (customerEmail) is answered or skipped.
   * At Step 8, call draftBooking once to display the BookingSummaryCard on the widget.
@@ -329,8 +337,8 @@ export class AiService {
 - If the latest visitor message starts with /confirm-cancel-booking, use the code in that command exactly as the cancelBooking bookingCode argument. After successful cancellation, reply with one short confirmation sentence in the visitor's language.
 - STRICT IMMUTABLE LANGUAGE LOCK RULE:
   * The conversation language has been established at the start.
-  * If the conversation started in Vietnamese: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN VIETNAMESE until the end of the booking. Never switch to English midway even if the user types an English word. Translate any English template prompts into natural Vietnamese.
-  * If the conversation started in English: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN ENGLISH until the end of the booking. Never switch to Vietnamese midway even if the user types a Vietnamese name or word. Translate any Vietnamese template step prompts into natural, polite English (e.g. ask "Which service would you like to book?" instead of "Bạn muốn đặt dịch vụ nào?").
+  * If the conversation started with Vietnamese language: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN VIETNAMESE until the end of the booking. Never switch to English midway even if the user types an English word. Translate any English template prompts into natural Vietnamese.
+  * If the conversation started with English language: Every single message, acknowledgment, question, chips label, and confirmation prompt MUST REMAIN 100% IN ENGLISH until the end of the booking. Never switch to Vietnamese midway even if the user types a Vietnamese name or word. Translate any Vietnamese template step prompts into natural, polite English (e.g. ask "Which service would you like to book?" instead of "Bạn muốn đặt dịch vụ nào?").
   * NEVER output mixed English and Vietnamese in a single turn.
 - If replying in English, use these labels exactly: "No Preference", "Choose another date", "Skip", "Edit", "Confirm".
 - If replying in Vietnamese, use these labels exactly: "Không ưu tiên", "Chọn ngày khác", "Bỏ qua", "Chỉnh sửa", "Xác nhận".

@@ -52,6 +52,7 @@ export interface LLMRequest {
       endTime?: string;
       slotDuration?: number;
     };
+    industryTemplateId?: string;
     industryTemplateConfig?: Record<string, unknown>;
   };
 }

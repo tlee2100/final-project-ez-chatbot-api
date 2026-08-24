@@ -31,6 +31,7 @@ import type { Server as SocketServer } from 'socket.io';
 import { formatInTimeZone } from 'date-fns-tz';
 import { AiService } from './ai.service';
 import { ChatService } from './chat.service';
+import { BookingService } from '../booking/booking.service';
 import { TOOL_PROVIDER } from './interfaces/tool-provider.interface';
 import type {
   IToolProviderFactory,
@@ -45,8 +46,6 @@ import {
 import { Site } from '../site/entities/site.entity';
 import { ChatGateway } from './chat.gateway';
 import { NotificationService } from '../notification/notification.service';
-import { Booking } from '../booking/entities/booking.entity';
-import { BookingStatus } from '../booking/enums/booking-status.enum';
 import {
   extractBookingCode,
   latestActiveBookingCode,
@@ -163,6 +162,7 @@ const AgentState = Annotation.Root({
       endTime?: string;
       slotDuration?: number;
     };
+    industryTemplateId?: string;
     industryTemplateConfig?: Record<string, unknown>;
   }>({
     reducer: (_, y) => y,
@@ -233,6 +233,7 @@ export interface GraphRunOptions {
       endTime?: string;
       slotDuration?: number;
     };
+    industryTemplateId?: string;
     industryTemplateConfig?: Record<string, unknown>;
   };
   /** Existing rolling summary (loaded from conversation.summary) */
@@ -319,8 +320,8 @@ export class GraphService {
     private readonly chatMessageRepo: Repository<ChatMessageEntity>,
     @InjectRepository(Site)
     private readonly siteRepo: Repository<Site>,
-    @InjectRepository(Booking)
-    private readonly bookingRepo: Repository<Booking>,
+    @Inject(forwardRef(() => BookingService))
+    private readonly bookingService: BookingService,
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
     private readonly notificationService: NotificationService,
@@ -464,6 +465,7 @@ export class GraphService {
                   slotDuration: site.bookingConfig.bookingSlotDuration,
                 }
               : undefined,
+            industryTemplateId: site?.industryTemplateId,
             industryTemplateConfig: site?.industryTemplateInfo?.config,
           },
           res,
@@ -606,6 +608,7 @@ export class GraphService {
                 slotDuration: site.bookingConfig.bookingSlotDuration,
               }
             : undefined,
+          industryTemplateId: site?.industryTemplateId,
           industryTemplateConfig: site?.industryTemplateInfo?.config,
         },
         existingSummary: conversation.summary ?? undefined,
@@ -1480,7 +1483,18 @@ export class GraphService {
         return { messages: [new AIMessage(handoffMsg)] };
       };
 
-      const buildCancellationPayload = (booking: Booking) => ({
+      const buildCancellationPayload = (booking: {
+        code: string;
+        status: string;
+        customerName: string;
+        phone: string;
+        serviceId?: string | null;
+        service?: { name: string } | null;
+        resourceId?: string | null;
+        resource?: { name: string } | null;
+        startAt: Date;
+        timezone: string;
+      }) => ({
         bookingCode: booking.code,
         status: booking.status,
         customerName: booking.customerName,
@@ -1516,9 +1530,9 @@ export class GraphService {
           };
         }
 
-        const booking = await this.bookingRepo.findOne({
-          where: { siteId: state.siteId, code: bookingCode },
-        });
+        const booking = await this.bookingService
+          .getBookingByCode(state.siteId, bookingCode)
+          .catch(() => null);
 
         if (!booking) {
           await clearActiveFlow();
@@ -1532,7 +1546,7 @@ export class GraphService {
           };
         }
 
-        if (booking.status === BookingStatus.CANCELLED) {
+        if (booking.status.toLowerCase() === 'cancelled') {
           await clearActiveFlow();
           return {
             cancelState: {
@@ -1625,10 +1639,9 @@ export class GraphService {
           };
         }
 
-        const booking = await this.bookingRepo.findOne({
-          where: { siteId: state.siteId, code: bookingCode },
-          relations: { service: true, resource: true },
-        });
+        const booking = await this.bookingService
+          .getBookingByCode(state.siteId, bookingCode)
+          .catch(() => null);
 
         if (!booking) {
           await clearActiveFlow();
@@ -1742,10 +1755,9 @@ export class GraphService {
           }
 
           cancelledBookingCode = bookingCode;
-          const booking = await this.bookingRepo.findOne({
-            where: { siteId: state.siteId, code: bookingCode },
-            relations: { service: true, resource: true },
-          });
+          const booking = await this.bookingService
+            .getBookingByCode(state.siteId, bookingCode)
+            .catch(() => null);
           if (booking) {
             this.chatGateway.emitBookingCancelled(conversationId, {
               ...buildCancellationPayload(booking),
@@ -1767,10 +1779,9 @@ export class GraphService {
         }
 
         if (bookingCode) {
-          const booking = await this.bookingRepo.findOne({
-            where: { siteId: state.siteId, code: bookingCode },
-            relations: { service: true, resource: true },
-          });
+          const booking = await this.bookingService
+            .getBookingByCode(state.siteId, bookingCode)
+            .catch(() => null);
           if (booking) {
             this.chatGateway.emitBookingCancellation(conversationId, {
               ...buildCancellationPayload(booking),
@@ -1831,10 +1842,41 @@ export class GraphService {
       });
 
       const initBookingNode = (state: typeof AgentState.State) => {
-        const prompt = getBookingOptionPrompt(state.locale, 'service');
+        const services = options.siteContext?.bookingServices ?? [];
+        const resources = options.siteContext?.bookingResources ?? [];
+        const templateId = options.siteContext?.industryTemplateId;
+        if (services.length > 0) {
+          const prompt = getBookingOptionPrompt(
+            state.locale,
+            'service',
+            templateId,
+          );
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>service</booking-step>`,
+              ),
+            ],
+          };
+        }
+        if (resources.length > 0) {
+          const prompt = getBookingOptionPrompt(
+            state.locale,
+            'resource',
+            templateId,
+          );
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>resource</booking-step>`,
+              ),
+            ],
+          };
+        }
+        const prompt = getBookingOptionPrompt(state.locale, 'date', templateId);
         return {
           messages: [
-            new AIMessage(`${prompt}\n\n<booking-step>service</booking-step>`),
+            new AIMessage(`${prompt}\n\n<booking-step>date</booking-step>`),
           ],
         };
       };
@@ -1867,11 +1909,85 @@ export class GraphService {
             const resource = resources.find(
               (r) => r.id === draftPayload.resourceId,
             );
+
+            const holdDate =
+              typeof draftPayload.date === 'string' ? draftPayload.date : '';
+            const holdTimeSlot =
+              typeof draftPayload.timeSlot === 'string'
+                ? draftPayload.timeSlot
+                : '';
+            const holdResourceId =
+              typeof draftPayload.resourceId === 'string'
+                ? draftPayload.resourceId
+                : '';
+
+            // Execute holdSlot immediately for the updated slot/resource to ensure it is locked
+            let updatedSessionId =
+              typeof draftPayload.sessionId === 'string'
+                ? draftPayload.sessionId
+                : undefined;
+            if (currentProvider && holdResourceId && holdDate && holdTimeSlot) {
+              try {
+                this.logger.log(
+                  `[Structured Step] Updating hold on draft edit: date=${holdDate}, timeSlot=${holdTimeSlot}, resourceId=${holdResourceId}`,
+                );
+                const holdResult = await currentProvider.execute({
+                  name: 'holdSlot',
+                  arguments: {
+                    resourceId: holdResourceId,
+                    serviceId: draftPayload.serviceId,
+                    date: holdDate,
+                    timeSlot: holdTimeSlot,
+                    slotCount:
+                      typeof draftPayload.slotCount === 'number'
+                        ? draftPayload.slotCount
+                        : Array.isArray(draftPayload.slots)
+                          ? draftPayload.slots.length
+                          : 1,
+                    slots: draftPayload.slots,
+                    sessionId: draftPayload.sessionId,
+                  },
+                });
+                if (
+                  holdResult?.output &&
+                  typeof holdResult.output === 'object' &&
+                  'sessionId' in holdResult.output
+                ) {
+                  updatedSessionId = (
+                    holdResult.output as { sessionId: string }
+                  ).sessionId;
+                }
+              } catch (holdErr) {
+                this.logger.error(
+                  '[Structured Step] Failed to hold slot on update-draft-booking',
+                  holdErr,
+                );
+              }
+            }
+
+            // Resolve ordered serviceNames if serviceIds is present
+            const rawServiceIds = Array.isArray(draftPayload.serviceIds)
+              ? (draftPayload.serviceIds as string[])
+              : draftPayload.serviceId
+                ? [draftPayload.serviceId as string]
+                : [];
+            const serviceNames: string[] = [];
+            for (const sId of rawServiceIds) {
+              const matched = services.find((s) => s.id === sId);
+              if (matched) serviceNames.push(matched.name);
+            }
+
             this.chatGateway.emitBookingSummary(conversationId, {
               ...draftPayload,
+              sessionId: updatedSessionId,
               locale: activeFlowLocale ?? currentLocale,
+              serviceId: rawServiceIds[0] ?? service?.id,
+              serviceIds: rawServiceIds.length > 0 ? rawServiceIds : undefined,
               serviceName:
-                service?.name ?? (draftPayload.serviceName as string),
+                serviceNames[0] ??
+                service?.name ??
+                (draftPayload.serviceName as string),
+              serviceNames: serviceNames.length > 0 ? serviceNames : undefined,
               resourceName:
                 resource?.name ?? (draftPayload.resourceName as string),
             });
@@ -1903,12 +2019,43 @@ export class GraphService {
               string,
               unknown
             >;
+            const cleanedConfirmPayload = { ...confirmPayload };
+            if (
+              typeof cleanedConfirmPayload.serviceId === 'string' &&
+              !cleanedConfirmPayload.serviceId.trim()
+            ) {
+              delete cleanedConfirmPayload.serviceId;
+            }
+            if (Array.isArray(cleanedConfirmPayload.serviceIds)) {
+              const filtered = (
+                cleanedConfirmPayload.serviceIds as string[]
+              ).filter((id) => typeof id === 'string' && id.trim().length > 0);
+              if (filtered.length > 0) {
+                cleanedConfirmPayload.serviceIds = filtered;
+              } else {
+                delete cleanedConfirmPayload.serviceIds;
+              }
+            }
+            if (Array.isArray(cleanedConfirmPayload.slots)) {
+              cleanedConfirmPayload.slots = (
+                cleanedConfirmPayload.slots as Array<Record<string, unknown>>
+              ).map((s) => {
+                const cleanedSlot = { ...s };
+                if (
+                  typeof cleanedSlot.serviceId === 'string' &&
+                  !cleanedSlot.serviceId.trim()
+                ) {
+                  delete cleanedSlot.serviceId;
+                }
+                return cleanedSlot;
+              });
+            }
             this.logger.log(
-              `[Structured Step] Executing createBooking directly: ${JSON.stringify(confirmPayload)}`,
+              `[Structured Step] Executing createBooking directly: ${JSON.stringify(cleanedConfirmPayload)}`,
             );
             const result = await currentProvider.execute({
               name: 'createBooking',
-              arguments: confirmPayload,
+              arguments: cleanedConfirmPayload,
             });
             const p = result.output;
             if (p && !p.error && typeof p.bookingCode === 'string') {
@@ -1941,11 +2088,12 @@ export class GraphService {
           }
         }
 
+        const templateId = options.siteContext?.industryTemplateId;
         // 3. Handle /select-booking-option actions
         if (bookingOption) {
           if (bookingOption.action === 'select_service') {
             if (resources.length === 0) {
-              const prompt = getBookingOptionPrompt(locale, 'date');
+              const prompt = getBookingOptionPrompt(locale, 'date', templateId);
               return {
                 messages: [
                   new AIMessage(
@@ -1954,7 +2102,11 @@ export class GraphService {
                 ],
               };
             }
-            const prompt = getBookingOptionPrompt(locale, 'resource');
+            const prompt = getBookingOptionPrompt(
+              locale,
+              'resource',
+              templateId,
+            );
             return {
               messages: [
                 new AIMessage(
@@ -1968,7 +2120,7 @@ export class GraphService {
             bookingOption.action === 'select_resource' ||
             bookingOption.action === 'no_preference'
           ) {
-            const prompt = getBookingOptionPrompt(locale, 'date');
+            const prompt = getBookingOptionPrompt(locale, 'date', templateId);
             return {
               messages: [
                 new AIMessage(`${prompt}\n\n<booking-step>date</booking-step>`),
@@ -2061,13 +2213,149 @@ export class GraphService {
               };
             }
           }
+
+          if (
+            bookingOption.action === 'submit_text' &&
+            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bookingOption.value || '')
+          ) {
+            const prompt =
+              lang === 'vi'
+                ? 'Bạn vui lòng cho biết số điện thoại để tiếp tục.\n\n<booking-input>phone</booking-input>'
+                : lang === 'ja'
+                  ? '電話番号を入力してください。\n\n<booking-input>phone</booking-input>'
+                  : 'Please provide your phone number to continue.\n\n<booking-input>phone</booking-input>';
+            return {
+              messages: [new AIMessage(prompt)],
+            };
+          }
+
+          if (
+            bookingOption.action === 'skip_email' ||
+            (bookingOption.action === 'submit_text' &&
+              /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bookingOption.value || ''))
+          ) {
+            const userMessages = state.messages
+              .filter((m) => m.constructor?.name?.includes('HumanMessage'))
+              .map(messageText);
+
+            const latestSlotSel = state.messages
+              .slice()
+              .reverse()
+              .filter((m) => m.constructor?.name?.includes('HumanMessage'))
+              .map((m) => parseBookingSlotSelection(messageText(m)))
+              .find(Boolean);
+
+            const serviceOpt = userMessages
+              .map((t) => parseBookingOptionSelection(t))
+              .filter((o) => o?.action === 'select_service')
+              .pop();
+
+            const resourceOpt = userMessages
+              .map((t) => parseBookingOptionSelection(t))
+              .filter(
+                (o) =>
+                  o?.action === 'select_resource' ||
+                  o?.action === 'no_preference',
+              )
+              .pop();
+
+            const nameOpt = userMessages
+              .map((t) => parseBookingOptionSelection(t))
+              .filter(
+                (o) =>
+                  o?.action === 'submit_text' &&
+                  !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(o.value || ''),
+              )
+              .shift();
+
+            const phoneMsg = userMessages
+              .filter(
+                (t) =>
+                  /^[+0-9\s().-]{7,25}$/.test(t.trim()) &&
+                  !t.startsWith('/select-') &&
+                  !t.startsWith('/confirm-') &&
+                  !t.startsWith('/update-'),
+              )
+              .pop();
+
+            const submittedEmail =
+              bookingOption.action === 'submit_text' &&
+              /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(bookingOption.value || '')
+                ? bookingOption.value
+                : undefined;
+
+            const rawName =
+              nameOpt?.value ??
+              nameOpt?.label ??
+              options.visitorContext?.name ??
+              '';
+
+            const serviceId =
+              serviceOpt?.value ??
+              services.find((s) => s.id === serviceOpt?.value)?.id ??
+              (services.length > 0 ? services[0]?.id : undefined);
+
+            const resourceId =
+              latestSlotSel?.resourceId ??
+              (resourceOpt?.action === 'no_preference'
+                ? undefined
+                : (resourceOpt?.value ?? resources[0]?.id));
+
+            const service = services.find((s) => s.id === serviceId);
+            const resource = resources.find((r) => r.id === resourceId);
+            const slotCount =
+              latestSlotSel?.slotCount ??
+              (Array.isArray(latestSlotSel?.slots)
+                ? latestSlotSel.slots.length
+                : 1);
+
+            const serviceIds = serviceId
+              ? Array(slotCount).fill(serviceId)
+              : undefined;
+            const serviceNames = service
+              ? Array(slotCount).fill(service.name)
+              : undefined;
+
+            this.chatGateway.emitBookingSummary(conversationId, {
+              locale: activeFlowLocale ?? currentLocale,
+              customerName: rawName || 'Khách hàng',
+              phone: phoneMsg?.trim() ?? '',
+              customerEmail: submittedEmail,
+              serviceId,
+              serviceIds,
+              serviceName: service?.name,
+              serviceNames,
+              resourceId,
+              resourceName: resource?.name,
+              date: latestSlotSel?.date,
+              timeSlot: latestSlotSel?.timeSlot,
+              endTimeSlot: latestSlotSel?.endTimeSlot,
+              slotCount,
+              slots: latestSlotSel?.slots,
+            });
+
+            const prompt =
+              lang === 'vi'
+                ? 'Vui lòng xem và xác nhận thông tin đặt lịch trong thẻ bên dưới.'
+                : lang === 'ja'
+                  ? '下のカードで予約内容を確認し、確定してください。'
+                  : 'Please review and confirm your booking details in the card below.';
+            return {
+              messages: [new AIMessage(prompt)],
+            };
+          }
         }
 
         // 4. Handle /select-booking-slot
         if (slotSelection && currentProvider) {
           try {
+            const slotCount =
+              slotSelection.slotCount ??
+              (Array.isArray(slotSelection.slots)
+                ? slotSelection.slots.length
+                : 1);
             this.logger.log(
-              `[Structured Step] Calling holdSlot directly: date=${slotSelection.date}, timeSlot=${slotSelection.timeSlot}, resourceId=${slotSelection.resourceId}`,
+              `[Structured Step] Calling holdSlot directly: date=${slotSelection.date}, timeSlot=${slotSelection.timeSlot}, resourceId=${slotSelection.resourceId}, slotCount=${slotCount}`,
             );
             await currentProvider.execute({
               name: 'holdSlot',
@@ -2075,6 +2363,8 @@ export class GraphService {
                 date: slotSelection.date,
                 timeSlot: slotSelection.timeSlot,
                 resourceId: slotSelection.resourceId,
+                slotCount,
+                slots: slotSelection.slots,
               },
             });
           } catch (err) {
@@ -2534,7 +2824,9 @@ export class GraphService {
           book_appointment_init: 'init_booking',
           structured_booking_step: 'structured_booking_step',
           booking_slot_selected: 'model_node',
+          confirm_booking: 'model_node',
           check_booking: 'model_node',
+          cancel_booking: 'cancel_booking',
           abandon_booking: 'abandon_booking',
           request_human: 'request_handoff',
         },
@@ -2686,7 +2978,11 @@ export class GraphService {
                   ? 'name'
                   : null;
         const fallbackText = componentStep
-          ? getBookingOptionPrompt(detectedLang, componentStep)
+          ? getBookingOptionPrompt(
+              detectedLang,
+              componentStep,
+              options.siteContext?.industryTemplateId,
+            )
           : '';
         const finalResponseText = bookingSlotsEmitted
           ? stripRenderedSlotTimes(sanitizedText) ||

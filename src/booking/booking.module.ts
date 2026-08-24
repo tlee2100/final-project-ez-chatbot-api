@@ -24,15 +24,17 @@ import { SharedModule } from '../shared/shared.module';
     forwardRef(() => SiteModule),
     NotificationModule,
     SharedModule,
-    (() => {
-      const jwtSecret = process.env.JWT_SECRET;
-      if (!jwtSecret) {
-        throw new Error(
-          'Missing JWT_SECRET environment variable. Please set JWT_SECRET in your .env',
-        );
-      }
-      return JwtModule.register({ secret: jwtSecret });
-    })(),
+    JwtModule.registerAsync({
+      useFactory: () => {
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+          throw new Error(
+            'Missing JWT_SECRET environment variable. Please set JWT_SECRET in your .env',
+          );
+        }
+        return { secret: jwtSecret };
+      },
+    }),
   ],
   providers: [BookingService, BookingGateway],
   exports: [BookingService, BookingGateway],

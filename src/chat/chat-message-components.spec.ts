@@ -139,6 +139,20 @@ describe('chat message components', () => {
       },
       { action: 'skip_email', labelKey: 'chip.skip' },
     ]);
+    expect(
+      buildChatMessageComponents(
+        'Cảm ơn bạn! Bạn có muốn nhận email xác nhận không? <chips>visitor@example.com|Bỏ qua</chips>',
+        siteContext,
+        visitorContext,
+      )[0].items,
+    ).toEqual([
+      {
+        action: 'submit_text',
+        value: 'visitor@example.com',
+        label: 'visitor@example.com',
+      },
+      { action: 'skip_email', labelKey: 'chip.skip' },
+    ]);
   });
 
   it('does not create options without a backend-supported step', () => {
@@ -163,14 +177,14 @@ describe('chat message components', () => {
     });
   });
 
-  it('routes free-text and skip actions through the booking model', () => {
+  it('fast-paths structured actions directly without routing to LLM model', () => {
     expect(
       bookingOptionNeedsModel({
         action: 'submit_text',
         value: 'Nguyen Huu Hem',
       }),
-    ).toBe(true);
-    expect(bookingOptionNeedsModel({ action: 'skip_email' })).toBe(true);
+    ).toBe(false);
+    expect(bookingOptionNeedsModel({ action: 'skip_email' })).toBe(false);
     expect(bookingOptionNeedsModel({ action: 'select_service' })).toBe(false);
   });
 

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
@@ -177,6 +178,10 @@ export class McpService {
       relations: { industryTemplateInfo: true },
     });
 
+    if (!site) {
+      throw new NotFoundException(`Site with ID ${siteId} not found`);
+    }
+
     let bookingHours: SiteConfigBookingHours = {};
     let services: SiteConfigServiceItem[] = [];
     let resources: SiteConfigResourceItem[] = [];
@@ -207,24 +212,6 @@ export class McpService {
       this.logger.warn(`Failed to fetch booking config for site ${siteId}`);
     }
 
-    if (!site) {
-      return {
-        siteId,
-        name: 'Default Site',
-        url: 'http://localhost',
-        isAiActive: true,
-        knowledgeBaseStatus: 'READY',
-        allowedDomains: ['*'],
-        bookingEnabled: true,
-        industryTemplate: 'salon',
-        industryTemplateConfig: null,
-        timezone: 'Asia/Ho_Chi_Minh',
-        bookingHours,
-        services,
-        resources,
-      };
-    }
-
     return {
       siteId: site.id,
       name: site.name,
@@ -235,7 +222,7 @@ export class McpService {
       bookingEnabled: site.bookingEnabled ?? true,
       industryTemplate: site.industryTemplateId || 'salon',
       industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
-      timezone: 'Asia/Ho_Chi_Minh',
+      timezone: bookingHours.timezone || 'Asia/Ho_Chi_Minh',
       bookingHours,
       services,
       resources,
@@ -464,69 +451,43 @@ export class McpService {
     const sessionId =
       payload.sessionId || payload.conversationId || randomUUID();
 
+    const slotsToHold: Array<{
+      resourceId: string;
+      startAt: string;
+      endAt: string;
+      serviceId?: string;
+    }> = [];
+
     // Direct multi-slot list
     if (payload.slots && payload.slots.length > 0) {
-      const newKeys: string[] = [];
       for (const slot of payload.slots) {
         const localStart = `${slot.date}T${slot.timeSlot}:00`;
         const utcStart = fromZonedTime(localStart, timezone);
         const utcEnd = addMinutes(utcStart, duration);
-        newKeys.push(
-          `booking_hold:site:${siteId}:resource:${slot.resourceId}:time:${utcStart.toISOString()}_${utcEnd.toISOString()}`,
-        );
-      }
-
-      // Release any other slots previously held by this session
-      await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
-
-      for (const slot of payload.slots) {
-        const localStart = `${slot.date}T${slot.timeSlot}:00`;
-        const utcStart = fromZonedTime(localStart, timezone);
-        const utcEnd = addMinutes(utcStart, duration);
-        await this.bookingService.holdSlot(siteId, {
+        slotsToHold.push({
           resourceId: slot.resourceId,
-          serviceId: slot.serviceId ?? payload.serviceId,
           startAt: utcStart.toISOString(),
           endAt: utcEnd.toISOString(),
-          sessionId,
+          serviceId: slot.serviceId ?? payload.serviceId,
         });
       }
-
-      return { sessionId };
+    } else {
+      const slotCount = Math.max(1, payload.slotCount ?? 1);
+      const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
+      let currStart = fromZonedTime(localDateTimeStr, timezone);
+      for (let i = 0; i < slotCount; i++) {
+        const currEnd = addMinutes(currStart, duration);
+        slotsToHold.push({
+          resourceId: payload.resourceId,
+          startAt: currStart.toISOString(),
+          endAt: currEnd.toISOString(),
+          serviceId: payload.serviceId,
+        });
+        currStart = currEnd;
+      }
     }
 
-    const slotCount = Math.max(1, payload.slotCount ?? 1);
-    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
-    const initialUtcStart = fromZonedTime(localDateTimeStr, timezone);
-
-    const newKeys: string[] = [];
-    let calcStart = initialUtcStart;
-    for (let i = 0; i < slotCount; i++) {
-      const calcEnd = addMinutes(calcStart, duration);
-      newKeys.push(
-        `booking_hold:site:${siteId}:resource:${payload.resourceId}:time:${calcStart.toISOString()}_${calcEnd.toISOString()}`,
-      );
-      calcStart = calcEnd;
-    }
-
-    // Release any other slots previously held by this session (e.g. user changed time, staff, or date)
-    await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
-
-    // Hold each sub-slot in the span
-    let currStart = initialUtcStart;
-    for (let i = 0; i < slotCount; i++) {
-      const currEnd = addMinutes(currStart, duration);
-      await this.bookingService.holdSlot(siteId, {
-        resourceId: payload.resourceId,
-        serviceId: payload.serviceId,
-        startAt: currStart.toISOString(),
-        endAt: currEnd.toISOString(),
-        sessionId,
-      });
-      currStart = currEnd;
-    }
-
-    return { sessionId };
+    return this.bookingService.holdSlots(siteId, slotsToHold, sessionId);
   }
 
   /**
@@ -612,27 +573,51 @@ export class McpService {
       resourceName = resource.name;
     }
 
-    const resolvedServiceId = await this.resolveServiceId(
-      siteId,
-      payload.serviceId,
-    );
+    const cleanServiceId =
+      payload.serviceId && payload.serviceId.trim()
+        ? payload.serviceId.trim()
+        : undefined;
+
+    const resolvedServiceId = cleanServiceId
+      ? await this.resolveServiceId(siteId, cleanServiceId)
+      : undefined;
 
     const serviceNames: string[] = [];
-    const allServiceIdsRaw =
-      payload.serviceIds ?? (resolvedServiceId ? [resolvedServiceId] : []);
+    const allServiceIdsRaw = (
+      Array.isArray(payload.serviceIds)
+        ? payload.serviceIds
+        : resolvedServiceId
+          ? [resolvedServiceId]
+          : []
+    ).filter((s) => typeof s === 'string' && s.trim().length > 0);
     const resolvedAllServiceIds: string[] = [];
 
     for (const sId of allServiceIdsRaw) {
       const actualId = (await this.resolveServiceId(siteId, sId)) || sId;
-      resolvedAllServiceIds.push(actualId);
-      const service = await this.bookingService.getServiceById(
-        siteId,
-        actualId,
-      );
-      if (service) {
-        serviceNames.push(service.name);
+      if (actualId && actualId.trim()) {
+        resolvedAllServiceIds.push(actualId);
+        const service = await this.bookingService.getServiceById(
+          siteId,
+          actualId,
+        );
+        if (service) {
+          serviceNames.push(service.name);
+        }
       }
     }
+
+    const sanitizedSlots = payload.slots
+      ? payload.slots.map((s) => {
+          const slotCopy = { ...s };
+          if (
+            typeof slotCopy.serviceId === 'string' &&
+            !slotCopy.serviceId.trim()
+          ) {
+            delete slotCopy.serviceId;
+          }
+          return slotCopy;
+        })
+      : undefined;
 
     const slotCount = Math.max(1, payload.slotCount ?? 1);
     const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
@@ -641,42 +626,43 @@ export class McpService {
 
     let sessionId = payload.sessionId;
 
-    if (!sessionId) {
-      const activeHold = await this.bookingService.getHold(
-        siteId,
-        resolvedResourceId,
-        utcStartAt.toISOString(),
-        addMinutes(utcStartAt, duration).toISOString(),
-      );
+    const activeHold = await this.bookingService.getHold(
+      siteId,
+      resolvedResourceId,
+      utcStartAt.toISOString(),
+      addMinutes(utcStartAt, duration).toISOString(),
+    );
 
-      if (activeHold?.sessionId) {
-        sessionId = activeHold.sessionId;
-      } else {
+    if (activeHold?.sessionId) {
+      sessionId = activeHold.sessionId;
+    } else {
+      if (!sessionId) {
         sessionId = randomUUID();
-        await this.holdSlot(siteId, {
-          resourceId: resolvedResourceId,
-          serviceId: resolvedServiceId,
-          date: payload.date,
-          timeSlot: payload.timeSlot,
-          slotCount,
-          slots: payload.slots,
-        });
       }
+      await this.holdSlot(siteId, {
+        resourceId: resolvedResourceId,
+        serviceId: resolvedServiceId,
+        date: payload.date,
+        timeSlot: payload.timeSlot,
+        slotCount,
+        slots: sanitizedSlots,
+        sessionId,
+      });
     }
 
     const booking = await this.bookingService.createBooking({
       siteId,
       resourceId: resolvedResourceId,
-      serviceId: resolvedServiceId,
+      serviceId: resolvedServiceId || undefined,
       serviceIds:
         resolvedAllServiceIds.length > 0 ? resolvedAllServiceIds : undefined,
-      slots: payload.slots,
+      slots: sanitizedSlots,
       startAt: utcStartAt.toISOString(),
       endAt: utcEndAt.toISOString(),
       timezone,
       customerName: payload.customerName,
       phone: normalizePhoneNumber(payload.phone),
-      customerEmail: payload.customerEmail,
+      customerEmail: payload.customerEmail?.trim() || undefined,
       templateFields: {},
       sessionId,
     });
