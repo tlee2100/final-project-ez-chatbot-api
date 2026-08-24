@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional } from 'class-validator';
+import { IsEnum, IsOptional, IsString } from 'class-validator';
 import {
   ConversationStatus,
   ClosedReason,
@@ -13,5 +13,10 @@ export class UpdateConversationStatusDto {
   reason?: ClosedReason;
 
   @IsOptional()
+  @IsString()
   transcriptEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  siteId?: string;
 }

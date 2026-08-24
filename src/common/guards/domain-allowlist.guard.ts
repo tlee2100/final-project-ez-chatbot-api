@@ -8,7 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Request } from 'express';
 import { Repository } from 'typeorm';
-import { Site } from 'src/site/entities/site.entity';
+import { Site } from '../../site/entities/site.entity';
 
 /**
  * Domain Allowlist Validation
@@ -19,7 +19,7 @@ import { Site } from 'src/site/entities/site.entity';
  *
  * Validation Rules:
  * 1. No siteId in request → Pass (not a site-scoped endpoint).
- * 2. No Origin header    → Pass (non-browser, server-to-server, or Postman requests).
+ * 2. No Origin header    → Reject with 403 Forbidden (Origin header is required).
  * 3. Origin matches allowedDomains → Pass.
  * 4. Otherwise → Reject with 403 Forbidden.
  *
@@ -53,13 +53,14 @@ export class DomainAllowlistGuard implements CanActivate {
 
     const origin = request.headers['origin'] ?? '';
 
-    // No Origin header → same-origin, server-to-server, or non-browser request
-    // (e.g. Postman, curl, testchat.html from local filesystem). Allow through.
+    // No Origin header → block request (must be a valid browser request with Origin header)
     if (!origin) {
-      this.logger.debug(
-        `[DomainAllowlistGuard] No Origin header — allowing site: ${siteId}`,
+      this.logger.warn(
+        `[DomainAllowlistGuard] Missing Origin header — blocking request for siteId=${siteId}`,
       );
-      return true;
+      throw new ForbiddenException(
+        'Origin header is required for public widget requests',
+      );
     }
 
     let site: Site | null;

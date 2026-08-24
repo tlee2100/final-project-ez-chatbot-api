@@ -349,10 +349,40 @@ export class ChatService {
     client: Socket,
     payload: { conversationId: string },
   ): Promise<void> {
+    const socketData = client.data as SocketData;
+
+    // Authenticated user (agent/admin): verify site ownership/access
+    if (socketData.user) {
+      try {
+        await this.assertConversationSiteAccess(
+          payload.conversationId,
+          socketData.user,
+        );
+      } catch {
+        client.emit('subscribeError', {
+          message: 'You do not have access to this conversation',
+          code: 403,
+        });
+        return;
+      }
+    }
+
+    // Visitor: verify they are only subscribing to their own conversation
+    if (
+      socketData.visitor &&
+      socketData.visitor.conversationId &&
+      socketData.visitor.conversationId !== payload.conversationId
+    ) {
+      client.emit('subscribeError', {
+        message: 'Unauthorized conversation',
+        code: 403,
+      });
+      return;
+    }
+
     void client.join(`conversation-${payload.conversationId}`);
     this.trackConversationPresence(client, payload.conversationId);
 
-    const socketData = client.data as SocketData;
     if (socketData.user) {
       const receiverType = SenderType.AGENT;
       await this.markConversationDelivered(
@@ -1148,14 +1178,6 @@ export class ChatService {
     conversationId: string,
     agentUser: JwtUser,
   ): Promise<{ conversation: Conversation; isNewAssignment: boolean }> {
-    const conversation = await this.conversationRepository.findOne({
-      where: { id: conversationId },
-      relations: { site: true },
-    });
-    if (!conversation) {
-      throw new NotFoundException(`Conversation ${conversationId} not found`);
-    }
-
     if (
       agentUser.role === UserRole.SUPER_ADMIN ||
       agentUser.role === UserRole.ADMIN
@@ -1164,6 +1186,11 @@ export class ChatService {
         'Admins and Super Admins can only view conversations, they cannot take over.',
       );
     }
+
+    const conversation = await this.assertConversationSiteAccess(
+      conversationId,
+      agentUser,
+    );
 
     // Block if another agent already owns it
     if (conversation.agentId && conversation.agentId !== agentUser.id) {
@@ -1248,6 +1275,65 @@ export class ChatService {
   }
 
   /**
+   * Asserts that a user has access to a conversation based on their role and organization/site ownership.
+   * - SUPER_ADMIN: has unrestricted access to all conversations.
+   * - ADMIN: can only access conversations belonging to sites in their organization.
+   * - AGENT: can only access conversations belonging to sites they own or are assigned to.
+   */
+  async assertConversationSiteAccess(
+    conversationId: string,
+    user: JwtUser,
+  ): Promise<Conversation> {
+    if (conversationId.startsWith('admin-test-')) {
+      return {
+        id: conversationId,
+        status: ConversationStatus.OPEN,
+        handlingStatus: HandlingStatus.AI_HANDLING,
+        closedReason: null,
+      } as Conversation;
+    }
+
+    const conversation = await this.getConversationById(conversationId);
+
+    if (user.role === UserRole.SUPER_ADMIN) {
+      return conversation;
+    }
+
+    const site = await this.siteRepository.findOne({
+      where: { id: conversation.siteId },
+      relations: { agents: true },
+    });
+
+    if (!site) {
+      throw new NotFoundException(
+        `Site for conversation ${conversationId} not found`,
+      );
+    }
+
+    // Every non-super-admin user must belong to the same organization as the site
+    if (!user.organizationId || site.organizationId !== user.organizationId) {
+      throw new ForbiddenException(
+        'You do not have permission to access this conversation',
+      );
+    }
+
+    if (user.role === UserRole.ADMIN) {
+      return conversation;
+    }
+
+    // For AGENT: must be owner or assigned agent of the site
+    const isOwner = site.ownerId === user.id;
+    const isAssignedAgent = site.agents?.some((agent) => agent.id === user.id);
+    if (!isOwner && !isAssignedAgent) {
+      throw new ForbiddenException(
+        'You do not have permission to access this conversation',
+      );
+    }
+
+    return conversation;
+  }
+
+  /**
    * Fetch a conversation enforcing visibility for the requesting user.
    * Agents may only view unclaimed conversations or their own; a conversation
    * already claimed by another agent is blocked (403). Admins/superadmins see
@@ -1257,7 +1343,7 @@ export class ChatService {
     id: string,
     user: JwtUser,
   ): Promise<Conversation> {
-    const conversation = await this.getConversationById(id);
+    const conversation = await this.assertConversationSiteAccess(id, user);
 
     const isAdminOrAbove =
       user.role === UserRole.SUPER_ADMIN || user.role === UserRole.ADMIN;
@@ -1338,12 +1424,17 @@ export class ChatService {
   async updateConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
+    user?: JwtUser,
   ): Promise<Conversation> {
+    if (user) {
+      await this.assertConversationSiteAccess(id, user);
+    }
     return this.updateStatusAndNotify(
       id,
       dto.status,
       dto.reason || ClosedReason.AGENT,
       dto.transcriptEmail,
+      user,
     );
   }
 
@@ -1351,6 +1442,18 @@ export class ChatService {
     id: string,
     dto: UpdateConversationStatusDto,
   ): Promise<Conversation> {
+    if (!id.startsWith('admin-test-')) {
+      const conversation = await this.conversationRepository.findOne({
+        where: { id },
+        select: { id: true, siteId: true },
+      });
+      if (!conversation) {
+        throw new NotFoundException(`Conversation ${id} not found`);
+      }
+      if (dto.siteId && conversation.siteId !== dto.siteId) {
+        throw new ForbiddenException('siteId does not match conversation');
+      }
+    }
     return this.updateStatusAndNotify(
       id,
       dto.status,
@@ -1395,12 +1498,14 @@ export class ChatService {
     status: ConversationStatus,
     reason?: ClosedReason,
     transcriptEmail?: string,
+    user?: JwtUser,
   ): Promise<Conversation> {
     if (status === ConversationStatus.CLOSED) {
       const closedConv = await this.closeConversation(
         id,
         reason,
         transcriptEmail,
+        user,
       );
       this.chatGateway.emitConversationStatusChanged(id, closedConv.status);
       return closedConv;
@@ -1579,7 +1684,11 @@ export class ChatService {
     id: string,
     reason: ClosedReason = ClosedReason.VISITOR,
     transcriptEmail?: string,
+    user?: JwtUser,
   ): Promise<Conversation> {
+    if (user) {
+      await this.assertConversationSiteAccess(id, user);
+    }
     if (id.startsWith('admin-test-')) {
       this.chatGateway.notifyConversationClosed(id, 'admin-test');
       return {
@@ -1804,7 +1913,10 @@ export class ChatService {
     }
   }
 
-  async deleteConversation(id: string): Promise<Conversation> {
+  async deleteConversation(id: string, user?: JwtUser): Promise<Conversation> {
+    if (user) {
+      await this.assertConversationSiteAccess(id, user);
+    }
     const conversation = await this.conversationRepository.findOne({
       where: { id },
     });
