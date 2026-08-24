@@ -46,6 +46,10 @@ describe('ChatService saveMessage', () => {
     const aiService = { invoke: jest.fn() };
     // Mock moderation service — always safe so existing test behaviour is unchanged
     const moderationService = { isSafe: jest.fn().mockResolvedValue(true) };
+    const jwtService = {
+      signAsync: jest.fn().mockResolvedValue('mock-signed-visitor-token'),
+      verifyAsync: jest.fn(),
+    };
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,
@@ -59,6 +63,7 @@ describe('ChatService saveMessage', () => {
       emailQueueService as never,
       aiService as never,
       moderationService,
+      jwtService as never,
     );
 
     return {
@@ -67,6 +72,7 @@ describe('ChatService saveMessage', () => {
       conversationRepository,
       chatMessageRepository,
       userRepository,
+      jwtService,
     };
   }
 
@@ -405,6 +411,66 @@ describe('ChatService saveMessage', () => {
         }),
       );
       expect((client as { join: jest.Mock }).join).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createConversation visitorToken (INTERNSHIP-207)', () => {
+    it('issues signed visitorToken when creating a conversation', async () => {
+      const { service, siteRepository, conversationRepository, jwtService } =
+        makeService();
+
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        enabled: true,
+        isAiActive: true,
+        ownerId: 'owner-1',
+        agents: [],
+      });
+
+      const mockSavedConversation = {
+        id: 'conv-123',
+        siteId: 'site-1',
+        visitorName: 'John Doe',
+        visitorEmail: 'john@example.com',
+        status: ConversationStatus.OPEN,
+        handlingStatus: 'AI_HANDLING',
+      };
+
+      (
+        conversationRepository as unknown as {
+          manager: { transaction: jest.Mock };
+        }
+      ).manager = {
+        transaction: jest
+          .fn()
+          .mockImplementation(
+            (cb: (em: { create: jest.Mock; save: jest.Mock }) => unknown) => {
+              const transactionalEntityManager = {
+                create: jest.fn().mockReturnValue(mockSavedConversation),
+                save: jest.fn().mockResolvedValue(mockSavedConversation),
+              };
+              return Promise.resolve(cb(transactionalEntityManager));
+            },
+          ),
+      };
+
+      const result = await service.createConversation({
+        siteId: 'site-1',
+        visitorName: 'John Doe',
+        visitorEmail: 'john@example.com',
+      });
+
+      expect(jwtService.signAsync).toHaveBeenCalledWith(
+        {
+          sub: 'conv-123',
+          conversationId: 'conv-123',
+          siteId: 'site-1',
+          type: 'visitor',
+        },
+        { expiresIn: '7d' },
+      );
+      expect(result.visitorToken).toBe('mock-signed-visitor-token');
+      expect(result.conversationId).toBe('conv-123');
     });
   });
 });

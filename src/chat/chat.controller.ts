@@ -43,6 +43,7 @@ import {
   MessageFeedbackResponseDto,
 } from './dto/submit-message-feedback.dto';
 import { DomainAllowlistGuard } from 'src/common/guards/domain-allowlist.guard';
+import { VisitorTokenGuard } from 'src/common/guards/visitor-token.guard';
 import { ApiThrottlerGuard } from 'src/common/guards/api-throttler.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { validateAndGetImageFile } from '../utils/file-signature.util';
@@ -153,7 +154,9 @@ export class ChatController {
 
   /**
    * Public — visitor gets their messages for a conversation.
+   * Scoped to the specific conversation via VisitorTokenGuard.
    */
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Get('public/conversations/:id/messages')
   getPublicConversationMessages(
     @Param('id') id: string,

@@ -9,6 +9,7 @@ import {
   forwardRef,
   Inject,
 } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { WsException } from '@nestjs/websockets';
 import { Socket } from 'socket.io';
 import {
@@ -125,6 +126,7 @@ export class ChatService {
     private readonly aiService: AiService,
     @Inject(AI_MODERATION_SERVICE)
     private readonly moderationService: IAIModerationServiceType,
+    private readonly jwtService: JwtService,
   ) {
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -736,6 +738,16 @@ export class ChatService {
 
         this.chatGateway.notifyAgentsOfNewConversation(savedConversation);
 
+        const visitorToken = await this.jwtService.signAsync(
+          {
+            sub: savedConversation.id,
+            conversationId: savedConversation.id,
+            siteId: savedConversation.siteId,
+            type: 'visitor',
+          },
+          { expiresIn: '7d' },
+        );
+
         return {
           conversationId: savedConversation.id,
           siteId: savedConversation.siteId,
@@ -743,6 +755,7 @@ export class ChatService {
           visitorEmail: savedConversation.visitorEmail,
           status: savedConversation.status,
           handlingStatus: savedConversation.handlingStatus,
+          visitorToken,
         };
       },
     );
