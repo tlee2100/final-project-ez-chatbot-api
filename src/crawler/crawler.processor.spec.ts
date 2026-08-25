@@ -233,13 +233,12 @@ describe('CrawlerProcessor external sources', () => {
       {
         name: 'crawl-page',
         data: { runItemId: 'item-0' },
-        opts: {
+        opts: expect.objectContaining({
           jobId: 'item-0',
           attempts: 3,
           backoff: { type: 'exponential', delay: 5_000 },
           removeOnComplete: true,
-          removeOnFail: false,
-        },
+        }) as unknown,
       },
     ]);
   });

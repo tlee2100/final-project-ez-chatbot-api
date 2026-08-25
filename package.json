@@ -26,6 +26,7 @@
     "format:check": "prettier --check .",
     "prepare": "husky",
     "type-check": "tsc --noEmit",
+    "validate": "npm run lint && npm run type-check && npm test",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/data-source.ts",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/data-source.ts"

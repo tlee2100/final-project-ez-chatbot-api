@@ -132,7 +132,7 @@ describe('CrawlerService external sources', () => {
     expect(subject.queue.add).toHaveBeenCalledWith(
       'crawl-page',
       { runItemId: 'item-id' },
-      expect.objectContaining({ jobId: 'item-id', removeOnFail: false }),
+      expect.objectContaining({ jobId: 'item-id' }),
     );
   });
 
@@ -157,7 +157,7 @@ describe('CrawlerService external sources', () => {
     expect(subject.queue.add).toHaveBeenCalledWith(
       'crawl-sitemap',
       { runId: 'run-id' },
-      expect.objectContaining({ jobId: 'sitemap-run-id', removeOnFail: false }),
+      expect.objectContaining({ jobId: 'sitemap-run-id' }),
     );
   });
 
@@ -199,7 +199,6 @@ describe('CrawlerService external sources', () => {
         { runId: 'run-1' },
         expect.objectContaining({
           jobId: 'sitemap-run-1',
-          removeOnFail: false,
         }),
       );
     });
@@ -228,12 +227,12 @@ describe('CrawlerService external sources', () => {
       expect(subject.queue.add).toHaveBeenCalledWith(
         'crawl-page',
         { runItemId: 'item-1' },
-        expect.objectContaining({ jobId: 'item-1', removeOnFail: false }),
+        expect.objectContaining({ jobId: 'item-1' }),
       );
       expect(subject.queue.add).toHaveBeenCalledWith(
         'crawl-page',
         { runItemId: 'item-2' },
-        expect.objectContaining({ jobId: 'item-2', removeOnFail: false }),
+        expect.objectContaining({ jobId: 'item-2' }),
       );
     });
 

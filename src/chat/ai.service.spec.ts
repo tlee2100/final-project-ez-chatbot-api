@@ -50,8 +50,7 @@ describe('AiService system prompt', () => {
     expect(prompt.lastIndexOf('LANGUAGE LOCK:')).toBeGreaterThan(
       prompt.lastIndexOf('BOOKING FLOW:'),
     );
-    expect(prompt).not.toContain('Vietnamese:');
-    expect(prompt).not.toContain('In English:');
+    expect(prompt).toContain('The conversation language for this turn is');
   });
 
   it('keeps locale authoritative over custom prompts and database values', () => {
