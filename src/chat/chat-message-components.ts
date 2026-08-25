@@ -132,7 +132,8 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
 export const stripModelBookingDirectives = (text: string): string =>
   text
     .replace(/\s*<chips>.*?<\/chips>/gis, '')
-    .replace(/\s*<booking-step>.*?<\/booking-step>/gis, '');
+    .replace(/\s*<booking-step>.*?<\/booking-step>/gis, '')
+    .replace(/\s*<booking-input>.*?<\/booking-input>/gis, '');
 
 const dateInTimezone = (date: Date, timezone: string): Date => {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -225,22 +226,15 @@ export const buildChatMessageComponents = (
       .split('|')
       .map((c) => c.trim())
       .filter(Boolean);
-    const explicitItems: BookingChipItem[] = rawChips.map((chip) => {
-      if (chip.startsWith('/keep-booking:')) {
-        const label = chip.replace('/keep-booking:', '').trim();
-        return {
-          action: 'keep_booking',
-          value: '/keep-booking',
-          label,
-        };
-      }
-      return {
-        action: 'submit_text',
-        value: chip,
-        label: chip,
-      };
-    });
-    if (explicitItems.length > 0) {
+    const keepBookingChips = rawChips.filter((chip) =>
+      chip.startsWith('/keep-booking:'),
+    );
+    if (keepBookingChips.length > 0) {
+      const explicitItems: BookingChipItem[] = keepBookingChips.map((chip) => ({
+        action: 'keep_booking',
+        value: '/keep-booking',
+        label: chip.replace('/keep-booking:', '').trim(),
+      }));
       return [{ type: 'chips', items: explicitItems }];
     }
   }
