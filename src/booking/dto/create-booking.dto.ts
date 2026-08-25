@@ -28,6 +28,14 @@ export class SelectedSlotDto {
   @IsUUID()
   @IsOptional()
   serviceId?: string;
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @IsString()
+  @IsOptional()
+  note?: string;
 }
 
 export class CreateBookingDto {

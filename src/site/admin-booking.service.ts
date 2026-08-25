@@ -280,6 +280,15 @@ export class AdminBookingService {
     );
   }
 
+  async bulkCancelBookings(
+    siteId: string,
+    bookingIds: string[],
+    user: JwtUser,
+  ) {
+    await this.siteService.assertSiteAccess(siteId, user);
+    return this.coreBookingService.bulkCancelBookings(siteId, bookingIds);
+  }
+
   async getAvailableSlots(
     siteId: string,
     startDate: string,
