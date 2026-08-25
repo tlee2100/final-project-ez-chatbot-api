@@ -542,6 +542,10 @@ export class ChatService {
     }
 
     try {
+      this.logger.log(
+        `💬 [Chat Incoming Message] [Conv: ${payload.conversationId}] [Sender: ${payload.senderType}] Content: "${payload.content}"`,
+      );
+
       const { savedMessage, conversation } = await this.processIncomingMessage(
         payload.conversationId,
         payload.content,
@@ -1617,6 +1621,13 @@ export class ChatService {
       hasComponents: Boolean(components?.length),
       hasLocale: Boolean(locale),
     });
+
+    if (senderType === SenderType.AI) {
+      this.logger.log(
+        `🤖 [AI Message Saved to DB] [Conv: ${conversationId}] [Locale: ${locale ?? 'auto'}]\n${content}`,
+      );
+    }
+
     const savedMessage = await this.chatMessageRepository.save(message);
 
     if (agentId) {

@@ -39,6 +39,7 @@ export class AiService {
   private readonly baseURL: string;
   private readonly defaultSystemPrompt: string;
   private readonly modelName: string;
+  private readonly timeoutMs: number;
 
   constructor() {
     this.apiKey = process.env.DEEPSEEK_API_KEY ?? '';
@@ -48,6 +49,7 @@ export class AiService {
     this.defaultSystemPrompt =
       process.env.SYSTEM_PROMPT ??
       'You are a helpful customer support chatbot. Assist the visitor with their inquiry.';
+    this.timeoutMs = parseInt(process.env.LLM_TIMEOUT_MS ?? '45000', 10);
 
     if (!this.apiKey) {
       this.logger.warn('DEEPSEEK_API_KEY is not set; LLM calls will fail.');
@@ -73,8 +75,8 @@ export class AiService {
       modelName: this.modelName,
       temperature,
       streaming,
-      maxRetries: 1,
-      timeout: 15000,
+      maxRetries: 2,
+      timeout: this.timeoutMs,
       modelKwargs: this.modelName.toLowerCase().includes('qwen')
         ? {
             enable_thinking: false,
@@ -146,8 +148,8 @@ export class AiService {
       modelName: resolvedModelName,
       temperature,
       streaming,
-      maxRetries: 1,
-      timeout: 15000,
+      maxRetries: 2,
+      timeout: this.timeoutMs,
       modelKwargs:
         resolvedModelName.toLowerCase().includes('qwen') ||
         resolvedModelName.toLowerCase().includes('deepseek')
@@ -293,11 +295,11 @@ export class AiService {
     if (site?.bookingEnabled) {
       prompt += `\n\nBOOKING FLOW:
 - Preserve every valid field already supplied in history or an authoritative widget command. Collect only missing fields in this order: serviceId, resourceId, date, timeSlot, customerName, phone, customerEmail, then draftBooking. (Skip serviceId or resourceId if none are configured for the site).
-- Service: if the site has services configured (see Booking Services above), ask the visitor to choose a service, and append <booking-step>service</booking-step>. If the visitor specifies multiple services (e.g. 'cắt tóc và gội đầu'), collect all of them and map to serviceIds. In the salon template, each service requires 1 slot (e.g. 2 services = 2 slots, slotCount = 2). If the site has NO services configured (Booking Services: None configured), you MUST NOT ask for service, MUST NOT call resources a service, and MUST NOT emit <booking-step>service</booking-step>; ask for resource/court or date instead! Do not list service names in prose.
+- Service: if the site has services configured (see Booking Services above), ask the visitor to choose a service, and append <booking-step>service</booking-step>. If the visitor specifies multiple services (e.g. 'cắt tóc và gội đầu'), collect all of them and map to serviceIds. In the salon template, each service requires 1 slot (e.g. 2 services = 2 slots, slotCount = 2). If the visitor chooses 2 or more services but only chooses 1 time slot (or fewer slots than services), inform them clearly that they must choose N slots for N services, or choose only 1 service. If the site has NO services configured (Booking Services: None configured), you MUST NOT ask for service, MUST NOT call resources a service, and MUST NOT emit <booking-step>service</booking-step>; ask for resource/court or date instead! Do not list service names in prose.
 - Staff/Resource: if the site has staff/resources configured, ask the visitor to choose staff/resource and append <booking-step>resource</booking-step>. If the site is a general template (e.g. pitches, courts, rooms), refer to resources accurately (e.g. "sân", "court", "tài nguyên") rather than "nhân viên" or "staff". If the site has NO staff/resources, skip to date. Do not list staff names in prose.
 - Date: ask the visitor to choose a date and append <booking-step>date</booking-step>. If choose_date is selected, ask for a date without a booking-step marker.
 - Time: call getAvailableSlots after service, date, and optional staff are known. The widget renders the returned slots in a card. After the tool succeeds, output only one short localized sentence asking the visitor to choose from that card. Do not include any time value such as HH:mm, any slot list, or time chips in the message. Never ask for a slot before that tool succeeds.
-- Multi-slot and Multi-date Scheduling: The system supports booking multiple slots across consecutive times, non-consecutive times, or different dates (e.g. 1 slot tonight at 20:00 and 1 slot tomorrow at 07:00). When multiple slots or dates are requested, construct the \`slots\` array with each slot's \`date\`, \`timeSlot\`, \`resourceId\`, and optional \`serviceId\` and pass it to \`draftBooking\`.
+- Multi-slot and Multi-date Scheduling: The system supports booking multiple slots across consecutive times, non-consecutive times, or different dates (e.g. 1 slot tonight at 20:00 and 1 slot tomorrow at 07:00). When multiple slots or dates are requested, construct the \`slots\` array with each slot's \`date\`, \`timeSlot\`, \`resourceId\`, and optional \`serviceId\` and pass it to \`draftBooking\`. If N services (N >= 2) were selected, ensure exactly N slots are chosen.
 - A /select-booking-slot command is authoritative. Immediately call holdSlot for its exact date, timeSlot, resourceId, or slots array. If the slot or staff changes, release the previous hold before holding the new slot.
 - If one visitor message already contains service(s), staff, date, and time(s), verify that exact time with getAvailableSlots. If available, hold it and continue to the next missing field. If unavailable, stop and ask them to restart booking step by step.
 - Name: ask without a marker unless VISITOR CONTEXT has a name; then append <booking-step>name</booking-step> so the backend can offer that exact name.
