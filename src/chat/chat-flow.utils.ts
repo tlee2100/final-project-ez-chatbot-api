@@ -230,6 +230,9 @@ export const isBookingFlowIntent = (intent: string | null | undefined) =>
   intent === 'book_appointment_init' ||
   intent === 'structured_booking_step';
 
+export const isCancelFlowIntent = (intent: string | null | undefined) =>
+  intent === 'cancel_booking' || intent === 'abort_cancel_flow';
+
 export const shouldContinueBookingFlow = (
   activeFlow: string | null | undefined,
   classifiedIntent: string,
@@ -254,7 +257,7 @@ export const enforceBookingChipScope = (
   text: string,
   intent: string | null | undefined,
 ) =>
-  isBookingFlowIntent(intent)
+  isBookingFlowIntent(intent) || isCancelFlowIntent(intent)
     ? text
     : text.replace(/\s*<chips>.*?<\/chips>/gis, '');
 
