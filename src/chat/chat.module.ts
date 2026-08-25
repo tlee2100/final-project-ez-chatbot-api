@@ -14,27 +14,28 @@ import { ChatMessage } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { Site } from '../site/entities/site.entity';
 import { NotificationModule } from '../notification/notification.module';
-import { Booking } from '../booking/entities/booking.entity';
 import { SiteModule } from '../site/site.module';
 import { BookingModule } from '../booking/booking.module';
 import { SecurityModule } from '../security/security.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Conversation, ChatMessage, Site, User, Booking]),
+    TypeOrmModule.forFeature([Conversation, ChatMessage, Site, User]),
     NotificationModule,
     forwardRef(() => SiteModule),
     forwardRef(() => BookingModule),
     SecurityModule,
-    (() => {
-      const jwtSecret = process.env.JWT_SECRET;
-      if (!jwtSecret) {
-        throw new Error(
-          'Missing JWT_SECRET environment variable. Please set JWT_SECRET in your .env',
-        );
-      }
-      return JwtModule.register({ secret: jwtSecret });
-    })(),
+    JwtModule.registerAsync({
+      useFactory: () => {
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+          throw new Error(
+            'Missing JWT_SECRET environment variable. Please set JWT_SECRET in your .env',
+          );
+        }
+        return { secret: jwtSecret };
+      },
+    }),
   ],
   controllers: [ChatController],
   providers: [

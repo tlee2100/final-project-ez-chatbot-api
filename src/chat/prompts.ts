@@ -20,7 +20,7 @@ Intents:
     ? `
 - book_appointment: starts or continues an appointment booking.
 - check_booking: asks for details or status of an existing booking.
-- cancel_booking: asks to cancel a confirmed booking.${
+- cancel_booking: explicitly asks to cancel a confirmed appointment or booking (e.g., "hủy lịch hẹn", "tôi muốn hủy đặt lịch", "cancel appointment", "drop booking"). Do NOT classify unrelated messages as cancel_booking just because they contain the word "hủy" (e.g. "kẻ hủy diệt", "tiêu hủy", "hủy hoại", "destroy") — classify those as "out_of_scope" or "small_talk".${
         bookingInProgress
           ? `
 - The booking flow is active. Treat names, contact details, service/staff choices, dates, times, skip answers, and field corrections as book_appointment even when the value alone is ambiguous.
@@ -101,6 +101,56 @@ const japaneseCancelPrompts: CancelPrompts = {
   notFound: 'このコードの予約が見つかりません。確認して再度お試しください。',
 };
 
+export type CancelFlowAction =
+  'PROVIDE_INFO' | 'ABORT_CANCELLATION' | 'SWITCH_TOPIC';
+
+export const ABORT_CHIP_VI = '\n\n<chips>/keep-booking:Không hủy nữa</chips>';
+export const ABORT_CHIP_EN = '\n\n<chips>/keep-booking:Keep my booking</chips>';
+export const ABORT_CHIP_JA =
+  '\n\n<chips>/keep-booking:キャンセルしない</chips>';
+
+export const getAbortChip = (locale: string): string => {
+  const language = localeLanguage(locale);
+  if (language === 'vi') return ABORT_CHIP_VI;
+  if (language === 'ja') return ABORT_CHIP_JA;
+  return ABORT_CHIP_EN;
+};
+
+export const getCancelFlowClassifierPrompt = (
+  step: CancelStep,
+  locale: string,
+): string => {
+  const language = localeLanguage(locale);
+  const stepDesc =
+    step === 'ask_code'
+      ? 'waiting for the user to provide a booking code'
+      : step === 'verify_phone'
+        ? 'waiting for the user to provide their phone number for identity verification'
+        : 'waiting for the user to confirm or cancel their booking';
+
+  if (language === 'vi') {
+    return `Bạn đang phân tích tin nhắn người dùng trong quá trình hủy đặt lịch.
+Bot hiện đang ở bước: ${stepDesc}.
+
+Phân loại ý định của người dùng thành đúng 1 trong các loại sau:
+- "PROVIDE_INFO": Người dùng đang cung cấp thông tin được yêu cầu (mã đặt lịch, số điện thoại, chữ số, xác nhận đồng ý hủy, v.v.).
+- "ABORT_CANCELLATION": Người dùng rõ ràng muốn dừng quá trình hủy lịch (ví dụ: "thôi", "không hủy nữa", "keep my booking", "đổi ý rồi", "bỏ qua", "giữ lịch giùm tôi", "/keep-booking").
+- "SWITCH_TOPIC": Người dùng đang hỏi một câu hỏi hoàn toàn khác hoặc nói chuyện không liên quan đến việc hủy lịch (ví dụ: chào hỏi, hỏi giá, hỏi dịch vụ, "whyyyy", "là sao", "kẻ hủy diệt", hỏi giờ mở cửa, v.v.).
+
+Chỉ trả về 1 trong 3 từ: PROVIDE_INFO, ABORT_CANCELLATION, SWITCH_TOPIC`;
+  }
+
+  return `You are analyzing a user message during a booking cancellation flow.
+The bot is currently ${stepDesc}.
+
+Classify the user's intent as exactly one of:
+- "PROVIDE_INFO": The user is providing the requested information (booking code, phone number, confirmation, digits, etc.).
+- "ABORT_CANCELLATION": The user explicitly wants to stop the cancellation process (e.g., "nevermind", "thôi không hủy nữa", "keep my booking", "đổi ý rồi", "bỏ qua", "stop", "cancel this", "giữ lịch giùm tôi", "/keep-booking").
+- "SWITCH_TOPIC": The user is asking a completely different question or talking about unrelated topics (e.g., greeting, asking about pricing, services, hours, "whyyyy", "what do you mean", etc.).
+
+Respond with ONLY one of: PROVIDE_INFO, ABORT_CANCELLATION, SWITCH_TOPIC`;
+};
+
 export const getCancelPrompts = (locale: string): CancelPrompts => {
   const language = localeLanguage(locale);
   if (language === 'vi') return vietnameseCancelPrompts;
@@ -122,13 +172,18 @@ export const getSlotCardPrompt = (locale: string): string => {
 export const getBookingOptionPrompt = (
   locale: string,
   step: 'service' | 'resource' | 'date' | 'name' | 'email',
+  template?: string,
 ): string => {
   const language = localeLanguage(locale);
+  const isGeneral =
+    template === 'general' || (template !== undefined && template !== 'salon');
   const prompts =
     language === 'vi'
       ? {
           service: 'Bạn muốn đặt dịch vụ nào?',
-          resource: 'Bạn muốn chọn nhân viên nào?',
+          resource: isGeneral
+            ? 'Bạn muốn chọn sân/tài nguyên nào?'
+            : 'Bạn muốn chọn nhân viên nào?',
           date: 'Bạn muốn đặt lịch vào ngày nào?',
           name: 'Bạn vui lòng cho biết tên để tiếp tục.',
           email: 'Bạn có muốn cung cấp email xác nhận không?',
@@ -136,14 +191,18 @@ export const getBookingOptionPrompt = (
       : language === 'ja'
         ? {
             service: 'どのサービスを予約しますか？',
-            resource: '担当スタッフを選択してください。',
+            resource: isGeneral
+              ? 'ご希望の施設・リソースを選択してください。'
+              : '担当スタッフを選択してください。',
             date: '予約日を選択してください。',
             name: '続行するにはお名前を入力してください。',
             email: '確認メール用のメールアドレスを入力しますか？',
           }
         : {
             service: 'Which service would you like to book?',
-            resource: 'Which staff member would you prefer?',
+            resource: isGeneral
+              ? 'Which court/resource would you prefer?'
+              : 'Which staff member would you prefer?',
             date: 'Which date would you like to book?',
             name: 'Please provide your name to continue.',
             email: 'Would you like to provide a confirmation email?',

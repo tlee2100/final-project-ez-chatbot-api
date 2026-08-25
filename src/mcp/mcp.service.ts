@@ -2,12 +2,13 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import { Document } from '../document/entities/document.entity';
 import { DocumentStatus } from '../document/enums/document-status.enum';
 import { KnowledgeRetrievalService } from '../document/retrieval/knowledge-retrieval.service';
@@ -19,6 +20,7 @@ import type {
   AvailableSlot,
   BookingResult,
   CreateBookingPayload,
+  McpUserDetailsResult,
   SiteConfigBookingHours,
   SiteConfigResourceItem,
   SiteConfigServiceItem,
@@ -129,39 +131,65 @@ export class McpService {
 
   /**
    * MCP / getUserDetails backend:
-   * Returns non-sensitive user profile details by email.
+   * Returns non-sensitive user profile details by email, scoped to the given siteId.
+   * Returns null if the user does not belong to the site.
+   *
+   * A user belongs to a site if they are:
+   * (A) the site owner  (site.ownerId = user.id)
+   * (B) an assigned agent (site_agents join table)
+   * (C) in the same organization (user.organizationId = site.organizationId)
    */
-  async getUserDetails(siteId: string, email: string) {
-    this.logger.log(`[MCP] getUserDetails: siteId=${siteId}, email=${email}`);
-
-    const user = await this.userRepository.findOne({
-      where: { email },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        avatarUrl: true,
-      },
+  async getUserDetails(
+    siteId: string,
+    email: string,
+  ): Promise<McpUserDetailsResult | null> {
+    this.logger.log({
+      event: 'mcp_get_user_details',
+      siteId,
+      emailDomain: email.split('@')[1] ?? 'unknown',
     });
 
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .innerJoin('sites', 'site', 'site.id = :siteId', { siteId })
+      .leftJoin(
+        'site_agents',
+        'sa',
+        'sa."agentId" = user.id AND sa."siteId" = :siteId',
+        { siteId },
+      )
+      .where('user.email = :email', { email })
+      .andWhere(
+        new Brackets((qb) =>
+          qb
+            .where('user.id = site."ownerId"')
+            .orWhere('sa."agentId" IS NOT NULL')
+            .orWhere(
+              'user."organizationId" IS NOT NULL AND user."organizationId" = site."organizationId"',
+            ),
+        ),
+      )
+      .select([
+        'user.id',
+        'user.name',
+        'user.email',
+        'user.phone',
+        'user.role',
+        'user.avatarUrl',
+      ])
+      .getOne();
+
     if (!user) {
-      return {
-        email,
-        name: 'Guest Visitor',
-        role: 'VISITOR',
-        phone: null,
-      };
+      return null;
     }
 
     return {
       id: user.id,
       name: user.name,
       email: user.email,
-      phone: user.phone,
+      phone: user.phone ?? null,
       role: user.role,
-      avatarUrl: user.avatarUrl,
+      avatarUrl: user.avatarUrl ?? null,
     };
   }
 
@@ -176,6 +204,10 @@ export class McpService {
       where: { id: siteId },
       relations: { industryTemplateInfo: true },
     });
+
+    if (!site) {
+      throw new NotFoundException(`Site with ID ${siteId} not found`);
+    }
 
     let bookingHours: SiteConfigBookingHours = {};
     let services: SiteConfigServiceItem[] = [];
@@ -207,24 +239,6 @@ export class McpService {
       this.logger.warn(`Failed to fetch booking config for site ${siteId}`);
     }
 
-    if (!site) {
-      return {
-        siteId,
-        name: 'Default Site',
-        url: 'http://localhost',
-        isAiActive: true,
-        knowledgeBaseStatus: 'READY',
-        allowedDomains: ['*'],
-        bookingEnabled: true,
-        industryTemplate: 'salon',
-        industryTemplateConfig: null,
-        timezone: 'Asia/Ho_Chi_Minh',
-        bookingHours,
-        services,
-        resources,
-      };
-    }
-
     return {
       siteId: site.id,
       name: site.name,
@@ -235,7 +249,7 @@ export class McpService {
       bookingEnabled: site.bookingEnabled ?? true,
       industryTemplate: site.industryTemplateId || 'salon',
       industryTemplateConfig: site.industryTemplateInfo?.config ?? null,
-      timezone: 'Asia/Ho_Chi_Minh',
+      timezone: bookingHours.timezone || 'Asia/Ho_Chi_Minh',
       bookingHours,
       services,
       resources,
@@ -439,10 +453,10 @@ export class McpService {
   async holdSlot(
     siteId: string,
     payload: {
-      resourceId: string;
+      resourceId?: string;
       serviceId?: string;
-      date: string;
-      timeSlot: string;
+      date?: string;
+      timeSlot?: string;
       slotCount?: number;
       sessionId?: string;
       conversationId?: string;
@@ -451,6 +465,7 @@ export class McpService {
         date: string;
         timeSlot: string;
         serviceId?: string;
+        notes?: string;
       }>;
     },
   ): Promise<{ sessionId: string }> {
@@ -464,69 +479,43 @@ export class McpService {
     const sessionId =
       payload.sessionId || payload.conversationId || randomUUID();
 
+    const slotsToHold: Array<{
+      resourceId: string;
+      startAt: string;
+      endAt: string;
+      serviceId?: string;
+    }> = [];
+
     // Direct multi-slot list
     if (payload.slots && payload.slots.length > 0) {
-      const newKeys: string[] = [];
       for (const slot of payload.slots) {
         const localStart = `${slot.date}T${slot.timeSlot}:00`;
         const utcStart = fromZonedTime(localStart, timezone);
         const utcEnd = addMinutes(utcStart, duration);
-        newKeys.push(
-          `booking_hold:site:${siteId}:resource:${slot.resourceId}:time:${utcStart.toISOString()}_${utcEnd.toISOString()}`,
-        );
-      }
-
-      // Release any other slots previously held by this session
-      await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
-
-      for (const slot of payload.slots) {
-        const localStart = `${slot.date}T${slot.timeSlot}:00`;
-        const utcStart = fromZonedTime(localStart, timezone);
-        const utcEnd = addMinutes(utcStart, duration);
-        await this.bookingService.holdSlot(siteId, {
+        slotsToHold.push({
           resourceId: slot.resourceId,
-          serviceId: slot.serviceId ?? payload.serviceId,
           startAt: utcStart.toISOString(),
           endAt: utcEnd.toISOString(),
-          sessionId,
+          serviceId: slot.serviceId ?? payload.serviceId,
         });
       }
-
-      return { sessionId };
+    } else if (payload.resourceId && payload.date && payload.timeSlot) {
+      const slotCount = Math.max(1, payload.slotCount ?? 1);
+      const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
+      let currStart = fromZonedTime(localDateTimeStr, timezone);
+      for (let i = 0; i < slotCount; i++) {
+        const currEnd = addMinutes(currStart, duration);
+        slotsToHold.push({
+          resourceId: payload.resourceId,
+          startAt: currStart.toISOString(),
+          endAt: currEnd.toISOString(),
+          serviceId: payload.serviceId,
+        });
+        currStart = currEnd;
+      }
     }
 
-    const slotCount = Math.max(1, payload.slotCount ?? 1);
-    const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
-    const initialUtcStart = fromZonedTime(localDateTimeStr, timezone);
-
-    const newKeys: string[] = [];
-    let calcStart = initialUtcStart;
-    for (let i = 0; i < slotCount; i++) {
-      const calcEnd = addMinutes(calcStart, duration);
-      newKeys.push(
-        `booking_hold:site:${siteId}:resource:${payload.resourceId}:time:${calcStart.toISOString()}_${calcEnd.toISOString()}`,
-      );
-      calcStart = calcEnd;
-    }
-
-    // Release any other slots previously held by this session (e.g. user changed time, staff, or date)
-    await this.bookingService.releaseSessionHolds(siteId, sessionId, newKeys);
-
-    // Hold each sub-slot in the span
-    let currStart = initialUtcStart;
-    for (let i = 0; i < slotCount; i++) {
-      const currEnd = addMinutes(currStart, duration);
-      await this.bookingService.holdSlot(siteId, {
-        resourceId: payload.resourceId,
-        serviceId: payload.serviceId,
-        startAt: currStart.toISOString(),
-        endAt: currEnd.toISOString(),
-        sessionId,
-      });
-      currStart = currEnd;
-    }
-
-    return { sessionId };
+    return this.bookingService.holdSlots(siteId, slotsToHold, sessionId);
   }
 
   /**
@@ -593,9 +582,11 @@ export class McpService {
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
 
-    const resolvedResourceId =
-      (await this.resolveResourceId(siteId, payload.resourceId)) ||
-      payload.resourceId;
+    const rawResourceId = payload.resourceId || payload.slots?.[0]?.resourceId;
+
+    const resolvedResourceId = rawResourceId
+      ? (await this.resolveResourceId(siteId, rawResourceId)) || rawResourceId
+      : undefined;
 
     if (!resolvedResourceId) {
       throw new BadRequestException(
@@ -612,27 +603,51 @@ export class McpService {
       resourceName = resource.name;
     }
 
-    const resolvedServiceId = await this.resolveServiceId(
-      siteId,
-      payload.serviceId,
-    );
+    const cleanServiceId =
+      payload.serviceId && payload.serviceId.trim()
+        ? payload.serviceId.trim()
+        : undefined;
+
+    const resolvedServiceId = cleanServiceId
+      ? await this.resolveServiceId(siteId, cleanServiceId)
+      : undefined;
 
     const serviceNames: string[] = [];
-    const allServiceIdsRaw =
-      payload.serviceIds ?? (resolvedServiceId ? [resolvedServiceId] : []);
+    const allServiceIdsRaw = (
+      Array.isArray(payload.serviceIds)
+        ? payload.serviceIds
+        : resolvedServiceId
+          ? [resolvedServiceId]
+          : []
+    ).filter((s) => typeof s === 'string' && s.trim().length > 0);
     const resolvedAllServiceIds: string[] = [];
 
     for (const sId of allServiceIdsRaw) {
       const actualId = (await this.resolveServiceId(siteId, sId)) || sId;
-      resolvedAllServiceIds.push(actualId);
-      const service = await this.bookingService.getServiceById(
-        siteId,
-        actualId,
-      );
-      if (service) {
-        serviceNames.push(service.name);
+      if (actualId && actualId.trim()) {
+        resolvedAllServiceIds.push(actualId);
+        const service = await this.bookingService.getServiceById(
+          siteId,
+          actualId,
+        );
+        if (service) {
+          serviceNames.push(service.name);
+        }
       }
     }
+
+    const sanitizedSlots = payload.slots
+      ? payload.slots.map((s) => {
+          const slotCopy = { ...s };
+          if (
+            typeof slotCopy.serviceId === 'string' &&
+            !slotCopy.serviceId.trim()
+          ) {
+            delete slotCopy.serviceId;
+          }
+          return slotCopy;
+        })
+      : undefined;
 
     const slotCount = Math.max(1, payload.slotCount ?? 1);
     const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
@@ -641,42 +656,43 @@ export class McpService {
 
     let sessionId = payload.sessionId;
 
-    if (!sessionId) {
-      const activeHold = await this.bookingService.getHold(
-        siteId,
-        resolvedResourceId,
-        utcStartAt.toISOString(),
-        addMinutes(utcStartAt, duration).toISOString(),
-      );
+    const activeHold = await this.bookingService.getHold(
+      siteId,
+      resolvedResourceId,
+      utcStartAt.toISOString(),
+      addMinutes(utcStartAt, duration).toISOString(),
+    );
 
-      if (activeHold?.sessionId) {
-        sessionId = activeHold.sessionId;
-      } else {
+    if (activeHold?.sessionId) {
+      sessionId = activeHold.sessionId;
+    } else {
+      if (!sessionId) {
         sessionId = randomUUID();
-        await this.holdSlot(siteId, {
-          resourceId: resolvedResourceId,
-          serviceId: resolvedServiceId,
-          date: payload.date,
-          timeSlot: payload.timeSlot,
-          slotCount,
-          slots: payload.slots,
-        });
       }
+      await this.holdSlot(siteId, {
+        resourceId: resolvedResourceId,
+        serviceId: resolvedServiceId,
+        date: payload.date,
+        timeSlot: payload.timeSlot,
+        slotCount,
+        slots: sanitizedSlots,
+        sessionId,
+      });
     }
 
     const booking = await this.bookingService.createBooking({
       siteId,
       resourceId: resolvedResourceId,
-      serviceId: resolvedServiceId,
+      serviceId: resolvedServiceId || undefined,
       serviceIds:
         resolvedAllServiceIds.length > 0 ? resolvedAllServiceIds : undefined,
-      slots: payload.slots,
+      slots: sanitizedSlots,
       startAt: utcStartAt.toISOString(),
       endAt: utcEndAt.toISOString(),
       timezone,
       customerName: payload.customerName,
       phone: normalizePhoneNumber(payload.phone),
-      customerEmail: payload.customerEmail,
+      customerEmail: payload.customerEmail?.trim() || undefined,
       templateFields: {},
       sessionId,
     });
@@ -691,8 +707,14 @@ export class McpService {
       customerName: booking.customerName,
       customerEmail: booking.customerEmail || payload.customerEmail,
       phone: booking.phone,
-      date: payload.date,
-      timeSlot: payload.timeSlot,
+      date:
+        payload.date ||
+        payload.slots?.[0]?.date ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'yyyy-MM-dd'),
+      timeSlot:
+        payload.timeSlot ||
+        payload.slots?.[0]?.timeSlot ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'HH:mm'),
       endTimeSlot: formatInTimeZone(new Date(booking.endAt), timezone, 'HH:mm'),
       resourceName,
       serviceId: payload.serviceId,

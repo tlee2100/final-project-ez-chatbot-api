@@ -14,27 +14,40 @@ export const latestActiveBookingCode = (
   );
   return Array.from(
     content.matchAll(
-      /<booking-code>(.*?)<\/booking-code>|(?:Booking code|Mã đặt lịch):\s*\*\*([A-Z0-9]{8})\*\*/gi,
+      /<booking-code>(.*?)<\/booking-code>|(?:Booking code|Mã đặt lịch):\s*\*\*([A-Z0-9]{8})\*\*|\[cancel:[^|]+\|([A-Z0-9]{8})\]|\b([A-Z0-9]{8})\b/gi,
     ),
-    (match) => match[1] ?? match[2],
+    (match) => match[1] ?? match[2] ?? match[3] ?? match[4],
   )
     .reverse()
     .find((code) => !cancelledCodes.has(code));
 };
 
-/**
- * Extracts and normalizes a Vietnamese phone number from text.
- * Supports formats starting with +84, 84, or 0 followed by 9 digits.
- */
 export const extractPhoneFromText = (text: string): string | null => {
-  const match = text.match(/(?:\+84|84|0)\s*([35789](?:[\s.-]*\d){8})\b/);
-  if (!match) return null;
-  const digitsOnly = match[1].replace(/\D/g, '');
-  return `0${digitsOnly}`;
+  const match = text.match(/(?:\+84|84|0)?\s*([0-9](?:[\s.-]*\d){6,14})\b/);
+  if (!match) {
+    const digits = text.replace(/\D/g, '');
+    if (digits.length >= 7 && digits.length <= 15) {
+      return digits;
+    }
+    return null;
+  }
+  const digitsOnly = match[0].replace(/[\s.-]/g, '');
+  if (digitsOnly.startsWith('+84')) {
+    return `0${digitsOnly.slice(3)}`;
+  }
+  if (digitsOnly.startsWith('84') && digitsOnly.length >= 10) {
+    return `0${digitsOnly.slice(2)}`;
+  }
+  return digitsOnly;
 };
 
 /**
- * Normalizes phone numbers to standard 0xxxxxxxxx format for comparison.
+ * Normalizes phone numbers for comparison (strips non-digits and maps country codes).
  */
-export const normalizePhone = (phone: string): string =>
-  phone.replace(/\D/g, '').replace(/^84/, '0');
+export const normalizePhone = (phone: string): string => {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('84') && digits.length >= 10) {
+    return `0${digits.slice(2)}`;
+  }
+  return digits;
+};

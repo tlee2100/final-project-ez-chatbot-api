@@ -7,6 +7,7 @@ jest.mock('@automapper/classes', () => ({
 
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ChatService } from './chat.service';
+import { UserRole } from '../user/enums/user-role.enum';
 import {
   ConversationStatus,
   ClosedReason,
@@ -24,7 +25,7 @@ describe('ChatService saveMessage', () => {
     const conversationRepository = createRepositoryMock();
     const chatMessageRepository = createRepositoryMock();
     const userRepository = createRepositoryMock();
-    const bookingRepository = createRepositoryMock();
+    const bookingService = { getBookingByCode: jest.fn() };
     const notificationService = { create: jest.fn() };
     const chatGateway = {
       notifyAgentsOfNewConversation: jest.fn(),
@@ -45,12 +46,16 @@ describe('ChatService saveMessage', () => {
     const aiService = { invoke: jest.fn() };
     // Mock moderation service — always safe so existing test behaviour is unchanged
     const moderationService = { isSafe: jest.fn().mockResolvedValue(true) };
+    const jwtService = {
+      signAsync: jest.fn().mockResolvedValue('mock-signed-visitor-token'),
+      verifyAsync: jest.fn(),
+    };
     const service = new ChatService(
       siteRepository as never,
       conversationRepository as never,
       chatMessageRepository as never,
       userRepository as never,
-      bookingRepository as never,
+      bookingService as never,
       notificationService as never,
       chatGateway as never,
       graphService as never,
@@ -58,13 +63,16 @@ describe('ChatService saveMessage', () => {
       emailQueueService as never,
       aiService as never,
       moderationService,
+      jwtService as never,
     );
 
     return {
       service,
+      siteRepository,
       conversationRepository,
       chatMessageRepository,
       userRepository,
+      jwtService,
     };
   }
 
@@ -230,6 +238,239 @@ describe('ChatService saveMessage', () => {
           rating: FeedbackRating.UNHELPFUL,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('Security & Role Scoping (INTERNSHIP-210 & INTERNSHIP-209)', () => {
+    it('allows SUPER_ADMIN to access conversation from any site/organization', async () => {
+      const { service, conversationRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+
+      const superAdminUser = {
+        id: 'sa-1',
+        email: 'super@admin.com',
+        role: UserRole.SUPER_ADMIN,
+        organizationId: 'org-other',
+      };
+
+      const result = await service.assertConversationSiteAccess(
+        'conv-1',
+        superAdminUser,
+      );
+      expect(result.id).toEqual('conv-1');
+    });
+
+    it('allows ADMIN to access conversation in the same organization', async () => {
+      const { service, conversationRepository, siteRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        organizationId: 'org-1',
+        agents: [],
+      });
+
+      const adminUser = {
+        id: 'admin-1',
+        email: 'admin@org1.com',
+        role: UserRole.ADMIN,
+        organizationId: 'org-1',
+      };
+
+      const result = await service.assertConversationSiteAccess(
+        'conv-1',
+        adminUser,
+      );
+      expect(result.id).toEqual('conv-1');
+    });
+
+    it('blocks ADMIN from accessing conversation of another organization (INTERNSHIP-210)', async () => {
+      const { service, conversationRepository, siteRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        organizationId: 'org-1',
+        agents: [],
+      });
+
+      const adminUserOrg2 = {
+        id: 'admin-2',
+        email: 'admin@org2.com',
+        role: UserRole.ADMIN,
+        organizationId: 'org-2',
+      };
+
+      await expect(
+        service.assertConversationSiteAccess('conv-1', adminUserOrg2),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('blocks AGENT not assigned to the site (INTERNSHIP-210)', async () => {
+      const { service, conversationRepository, siteRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        organizationId: 'org-1',
+        ownerId: 'owner-1',
+        agents: [{ id: 'agent-other' }],
+      });
+
+      const unassignedAgent = {
+        id: 'agent-1',
+        email: 'agent@org1.com',
+        role: UserRole.AGENT,
+        organizationId: 'org-1',
+      };
+
+      await expect(
+        service.assertConversationSiteAccess('conv-1', unassignedAgent),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('blocks deleteConversation if ADMIN does not own the organization (INTERNSHIP-210)', async () => {
+      const { service, conversationRepository, siteRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        organizationId: 'org-1',
+      });
+
+      const adminUserOrg2 = {
+        id: 'admin-2',
+        email: 'admin@org2.com',
+        role: UserRole.ADMIN,
+        organizationId: 'org-2',
+      };
+
+      await expect(
+        service.deleteConversation('conv-1', adminUserOrg2),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('emits subscribeError on handleSubscribeConversation if agent has no access (INTERNSHIP-209)', async () => {
+      const { service, conversationRepository, siteRepository } = makeService();
+      const conv = {
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      };
+      conversationRepository.findOne.mockResolvedValue(conv);
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        organizationId: 'org-1',
+        agents: [],
+      });
+
+      const client = {
+        id: 'client-1',
+        data: {
+          user: {
+            id: 'agent-1',
+            email: 'agent@org2.com',
+            role: UserRole.AGENT,
+            organizationId: 'org-2',
+          },
+        },
+        emit: jest.fn(),
+        join: jest.fn(),
+      } as unknown;
+
+      await service.handleSubscribeConversation(client as never, {
+        conversationId: 'conv-1',
+      });
+
+      expect((client as { emit: jest.Mock }).emit).toHaveBeenCalledWith(
+        'subscribeError',
+        expect.objectContaining({
+          code: 403,
+          message: 'You do not have access to this conversation',
+        }),
+      );
+      expect((client as { join: jest.Mock }).join).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createConversation visitorToken (INTERNSHIP-207)', () => {
+    it('issues signed visitorToken when creating a conversation', async () => {
+      const { service, siteRepository, conversationRepository, jwtService } =
+        makeService();
+
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        enabled: true,
+        isAiActive: true,
+        ownerId: 'owner-1',
+        agents: [],
+      });
+
+      const mockSavedConversation = {
+        id: 'conv-123',
+        siteId: 'site-1',
+        visitorName: 'John Doe',
+        visitorEmail: 'john@example.com',
+        status: ConversationStatus.OPEN,
+        handlingStatus: 'AI_HANDLING',
+      };
+
+      (
+        conversationRepository as unknown as {
+          manager: { transaction: jest.Mock };
+        }
+      ).manager = {
+        transaction: jest
+          .fn()
+          .mockImplementation(
+            (cb: (em: { create: jest.Mock; save: jest.Mock }) => unknown) => {
+              const transactionalEntityManager = {
+                create: jest.fn().mockReturnValue(mockSavedConversation),
+                save: jest.fn().mockResolvedValue(mockSavedConversation),
+              };
+              return Promise.resolve(cb(transactionalEntityManager));
+            },
+          ),
+      };
+
+      const result = await service.createConversation({
+        siteId: 'site-1',
+        visitorName: 'John Doe',
+        visitorEmail: 'john@example.com',
+      });
+
+      expect(jwtService.signAsync).toHaveBeenCalledWith(
+        {
+          sub: 'conv-123',
+          conversationId: 'conv-123',
+          siteId: 'site-1',
+          type: 'visitor',
+        },
+        { expiresIn: '7d' },
+      );
+      expect(result.visitorToken).toBe('mock-signed-visitor-token');
+      expect(result.conversationId).toBe('conv-123');
     });
   });
 });

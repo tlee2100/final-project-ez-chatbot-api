@@ -4,7 +4,10 @@ import {
   IsOptional,
   IsInt,
   IsUUID,
+  IsEmail,
+  ValidateIf,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 /** DTO for POST /api/internal/mcp/kb/search */
@@ -34,7 +37,16 @@ export class McpCreateBookingDto {
   customerName: string;
 
   @ApiProperty({ example: 'customer@example.com', required: false })
-  @IsString()
+  @Transform(({ value }) =>
+    value && typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined,
+  )
+  @ValidateIf(
+    (o: { customerEmail?: unknown }) =>
+      typeof o.customerEmail === 'string' && o.customerEmail.trim().length > 0,
+  )
+  @IsEmail()
   @IsOptional()
   customerEmail?: string;
 
@@ -67,22 +79,23 @@ export class McpCreateBookingDto {
     date: string;
     timeSlot: string;
     serviceId?: string;
+    notes?: string;
   }>;
 
-  @ApiProperty({ example: 'uuid-of-resource' })
+  @ApiProperty({ example: 'uuid-of-resource', required: false })
   @IsString()
-  @IsNotEmpty()
-  resourceId: string;
+  @IsOptional()
+  resourceId?: string;
 
-  @ApiProperty({ example: '2026-08-10' })
+  @ApiProperty({ example: '2026-08-10', required: false })
   @IsString()
-  @IsNotEmpty()
-  date: string;
+  @IsOptional()
+  date?: string;
 
-  @ApiProperty({ example: '09:00' })
+  @ApiProperty({ example: '09:00', required: false })
   @IsString()
-  @IsNotEmpty()
-  timeSlot: string;
+  @IsOptional()
+  timeSlot?: string;
 
   @ApiProperty({ example: 'uuid-session-id', required: false })
   @IsString()
@@ -120,22 +133,23 @@ export class McpHoldSlotDto {
     date: string;
     timeSlot: string;
     serviceId?: string;
+    notes?: string;
   }>;
 
-  @ApiProperty({ example: 'uuid-of-resource' })
+  @ApiProperty({ example: 'uuid-of-resource', required: false })
   @IsString()
-  @IsNotEmpty()
-  resourceId: string;
+  @IsOptional()
+  resourceId?: string;
 
-  @ApiProperty({ example: '2026-08-10' })
+  @ApiProperty({ example: '2026-08-10', required: false })
   @IsString()
-  @IsNotEmpty()
-  date: string;
+  @IsOptional()
+  date?: string;
 
-  @ApiProperty({ example: '09:00' })
+  @ApiProperty({ example: '09:00', required: false })
   @IsString()
-  @IsNotEmpty()
-  timeSlot: string;
+  @IsOptional()
+  timeSlot?: string;
 }
 
 /** DTO for POST /api/internal/mcp/booking/release */

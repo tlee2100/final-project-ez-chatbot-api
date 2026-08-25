@@ -5,6 +5,8 @@ export interface SelectedSlotInput {
   date: string; // 'YYYY-MM-DD'
   timeSlot: string; // 'HH:mm'
   serviceId?: string;
+  notes?: string;
+  note?: string;
 }
 
 export interface GroupedBookingSpan {
@@ -16,6 +18,8 @@ export interface GroupedBookingSpan {
   endAt: string; // ISO UTC
   slotCount: number;
   serviceIds: string[];
+  slotNotes: string[];
+  slots: SelectedSlotInput[];
 }
 
 /**
@@ -71,12 +75,15 @@ export function groupConsecutiveSlots(
       endTimeSlot: string;
       slotCount: number;
       serviceIds: string[];
+      slotNotes: string[];
+      slots: SelectedSlotInput[];
     } | null = null;
 
     for (const slot of sorted) {
       const slotStartMins = timeToMinutes(slot.timeSlot);
       const slotEndMins = slotStartMins + slotDuration;
       const expectedEndTime = minutesToTime(slotEndMins);
+      const note = (slot.notes || slot.note || '').trim();
 
       if (!currentSpan) {
         currentSpan = {
@@ -86,6 +93,8 @@ export function groupConsecutiveSlots(
           endTimeSlot: expectedEndTime,
           slotCount: 1,
           serviceIds: slot.serviceId ? [slot.serviceId] : [],
+          slotNotes: note ? [note] : [],
+          slots: [slot],
         };
       } else {
         const currentEndMins = timeToMinutes(currentSpan.endTimeSlot);
@@ -96,6 +105,10 @@ export function groupConsecutiveSlots(
           if (slot.serviceId) {
             currentSpan.serviceIds.push(slot.serviceId);
           }
+          if (note) {
+            currentSpan.slotNotes.push(note);
+          }
+          currentSpan.slots.push(slot);
         } else {
           // Disjoint! Push current and start a new one
           const localStartStr = `${currentSpan.date}T${currentSpan.startTimeSlot}:00`;
@@ -116,6 +129,8 @@ export function groupConsecutiveSlots(
             endTimeSlot: expectedEndTime,
             slotCount: 1,
             serviceIds: slot.serviceId ? [slot.serviceId] : [],
+            slotNotes: note ? [note] : [],
+            slots: [slot],
           };
         }
       }

@@ -1,13 +1,15 @@
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import {
   IsArray,
   IsDateString,
+  IsEmail,
   IsNotEmpty,
   IsObject,
   IsOptional,
   IsString,
   IsUUID,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 
 export class SelectedSlotDto {
@@ -26,6 +28,14 @@ export class SelectedSlotDto {
   @IsUUID()
   @IsOptional()
   serviceId?: string;
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @IsString()
+  @IsOptional()
+  note?: string;
 }
 
 export class CreateBookingDto {
@@ -71,7 +81,16 @@ export class CreateBookingDto {
   @IsNotEmpty()
   phone: string;
 
-  @IsString()
+  @Transform(({ value }) =>
+    value && typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined,
+  )
+  @ValidateIf(
+    (o: { customerEmail?: unknown }) =>
+      typeof o.customerEmail === 'string' && o.customerEmail.trim().length > 0,
+  )
+  @IsEmail()
   @IsOptional()
   customerEmail?: string;
 

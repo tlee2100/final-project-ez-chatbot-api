@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import {
   IsArray,
   IsDateString,
@@ -9,6 +9,7 @@ import {
   IsString,
   IsUUID,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 
 export class AdminBookingSlotItemDto {
@@ -31,6 +32,16 @@ export class AdminBookingSlotItemDto {
   @IsUUID()
   @IsOptional()
   serviceId?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @ApiPropertyOptional()
+  @IsString()
+  @IsOptional()
+  note?: string;
 }
 
 export class CreateAdminBookingDto {
@@ -88,6 +99,15 @@ export class CreateAdminBookingDto {
   customerPhone: string;
 
   @ApiPropertyOptional({ description: 'Customer email address' })
+  @Transform(({ value }) =>
+    value && typeof value === 'string' && value.trim().length > 0
+      ? value.trim()
+      : undefined,
+  )
+  @ValidateIf(
+    (o: { customerEmail?: unknown }) =>
+      typeof o.customerEmail === 'string' && o.customerEmail.trim().length > 0,
+  )
   @IsEmail()
   @IsOptional()
   customerEmail?: string;

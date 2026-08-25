@@ -16,4 +16,5 @@ export class CreateConversationResponseDto {
   visitorEmail: string;
   status: ConversationStatus;
   handlingStatus: HandlingStatus;
+  visitorToken?: string;
 }

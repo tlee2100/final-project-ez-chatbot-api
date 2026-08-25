@@ -43,6 +43,7 @@ import {
   MessageFeedbackResponseDto,
 } from './dto/submit-message-feedback.dto';
 import { DomainAllowlistGuard } from 'src/common/guards/domain-allowlist.guard';
+import { VisitorTokenGuard } from 'src/common/guards/visitor-token.guard';
 import { ApiThrottlerGuard } from 'src/common/guards/api-throttler.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { validateAndGetImageFile } from '../utils/file-signature.util';
@@ -153,7 +154,9 @@ export class ChatController {
 
   /**
    * Public — visitor gets their messages for a conversation.
+   * Scoped to the specific conversation via VisitorTokenGuard.
    */
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Get('public/conversations/:id/messages')
   getPublicConversationMessages(
     @Param('id') id: string,
@@ -274,8 +277,9 @@ export class ChatController {
   async updateConversationStatus(
     @Param('id') id: string,
     @Body() dto: UpdateConversationStatusDto,
+    @Req() req: AuthRequest,
   ) {
-    return this.chatService.updateConversationStatus(id, dto);
+    return this.chatService.updateConversationStatus(id, dto, req.user);
   }
 
   /**
@@ -283,19 +287,26 @@ export class ChatController {
    */
   @UseGuards(JwtAuthGuard)
   @Patch('conversations/:id/close')
-  closeConversation(@Param('id') id: string) {
-    return this.chatService.closeConversation(id, ClosedReason.AGENT);
+  closeConversation(@Param('id') id: string, @Req() req: AuthRequest) {
+    return this.chatService.closeConversation(
+      id,
+      ClosedReason.AGENT,
+      undefined,
+      req.user,
+    );
   }
 
   /**
    * Protected — hard-delete a conversation (admin only).
    */
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   @Delete('conversations/:id')
-  deleteConversation(@Param('id') id: string) {
-    return this.chatService.deleteConversation(id);
+  deleteConversation(@Param('id') id: string, @Req() req: AuthRequest) {
+    return this.chatService.deleteConversation(id, req.user);
   }
 
+  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
   @Patch('public/conversations/:id/status')
   async updatePublicConversationStatus(
     @Param('id') id: string,
