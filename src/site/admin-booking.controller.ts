@@ -24,6 +24,7 @@ import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
 import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
 import { CreateAdminBookingDto } from '../booking/dto/create-admin-booking.dto';
 import { UpdateBookingStatusDto } from '../booking/dto/update-booking-status.dto';
+import { BulkCancelBookingsDto } from '../booking/dto/bulk-cancel-bookings.dto';
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -115,6 +116,24 @@ export class AdminBookingController {
       siteId,
       bookingId,
       body.status,
+      req.user,
+    );
+  }
+
+  @Post('bulk-cancel')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.AGENT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Bulk cancel multiple bookings in a single request',
+  })
+  bulkCancelBookings(
+    @Param('siteId') siteId: string,
+    @Body() body: BulkCancelBookingsDto,
+    @Req() req: AuthRequest,
+  ) {
+    return this.adminBookingService.bulkCancelBookings(
+      siteId,
+      body.bookingIds,
       req.user,
     );
   }

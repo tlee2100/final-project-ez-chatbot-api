@@ -13,11 +13,14 @@ import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
 import {
+  CancelFlowAction,
   CancelPrompts,
   CancelState,
   CancelStep,
   getAbandonBookingPrompt,
+  getAbortChip,
   getBookingOptionPrompt,
+  getCancelFlowClassifierPrompt,
   getCancelPrompts,
   getIntentClassifierPrompt,
   getKnowledgeFallbackPrompt,
@@ -105,6 +108,7 @@ type IntentType =
   | 'confirm_booking'
   | 'check_booking'
   | 'cancel_booking'
+  | 'abort_cancel_flow'
   | 'abandon_booking'
   | null;
 
@@ -191,6 +195,14 @@ const AgentState = Annotation.Root({
   cancelState: Annotation<CancelState>({
     reducer: (_, y) => y,
     default: () => ({ step: null, bookingCode: null, phoneVerified: false }),
+  }),
+  pendingCancelFlowAction: Annotation<CancelFlowAction | null>({
+    reducer: (_, y) => y,
+    default: () => null,
+  }),
+  switchTopicAfterAbort: Annotation<boolean>({
+    reducer: (_, y) => y,
+    default: () => false,
   }),
 });
 
@@ -770,7 +782,7 @@ export class GraphService {
       const detected = normalizeLocale(detectedLocale);
       const resolvedIntent = intent;
 
-      if (intent === 'abandon_booking') {
+      if (intent === 'abandon_booking' || intent === 'abort_cancel_flow') {
         activeFlow = null;
         activeFlowLocale = null;
       }
@@ -1244,22 +1256,116 @@ export class GraphService {
        * classify_intent — uses a cold model call to label the latest user message.
        */
       const classifyIntent = async (state: typeof AgentState.State) => {
-        if (
-          state.cancelState?.step !== null &&
-          state.cancelState?.step !== undefined
-        ) {
-          this.logger.log(
-            `Cancel flow in progress (step: ${state.cancelState.step}), overriding intent to cancel_booking`,
-          );
-          return applyLocaleState('cancel_booking', state.locale);
-        }
-
         const lastMessage = state.messages[state.messages.length - 1];
         const contentStr =
           typeof lastMessage.content === 'string'
             ? lastMessage.content
             : JSON.stringify(lastMessage.content);
         const bookingEnabled = state.siteContext.bookingEnabled === true;
+
+        const isCancelAbortPhrase = (text: string): boolean =>
+          /^\/keep-booking\b/i.test(text) ||
+          /^\/(?:abandon-cancel|cancel-abort)\b/i.test(text) ||
+          /(?:thôi|không|đừng)\s*(?:hủy|huỷ)(?:\s*nữa)?/i.test(text) ||
+          /(?:đổi\s*ý|giữ\s*lịch|bỏ\s*qua|không\s*muốn\s*hủy)/i.test(text) ||
+          /\b(?:nevermind|keep\s*my\s*booking|don'?t\s*cancel|abort\s*cancel|stop\s*cancel(?:lation)?)\b/i.test(
+            text,
+          ) ||
+          /(?:キャンセルしない|やめる|維持する|そのまま)/i.test(text);
+
+        if (isCancelAbortPhrase(contentStr)) {
+          this.logger.log('[Fast-Path Intent] cancel flow abort');
+          return {
+            ...(await applyLocaleState('abort_cancel_flow', state.locale)),
+            pendingCancelFlowAction: 'ABORT_CANCELLATION' as CancelFlowAction,
+            switchTopicAfterAbort: false,
+          };
+        }
+
+        if (
+          state.cancelState?.step !== null &&
+          state.cancelState?.step !== undefined
+        ) {
+          const cancelStep = state.cancelState.step;
+          const extractedCode = extractBookingCode(contentStr);
+          const extractedPhone = extractPhoneFromText(contentStr);
+
+          if (
+            /^\/(?:(?:confirm-)?cancel-booking|keep-booking)\b/i.test(
+              contentStr,
+            )
+          ) {
+            return applyLocaleState('cancel_booking', state.locale);
+          }
+
+          if (cancelStep === 'ask_code' && extractedCode) {
+            return applyLocaleState('cancel_booking', state.locale);
+          }
+          if (cancelStep === 'verify_phone' && extractedPhone) {
+            return applyLocaleState('cancel_booking', state.locale);
+          }
+          if (
+            cancelStep === 'await_confirm' &&
+            /^\/confirm-cancel-booking\b/i.test(contentStr)
+          ) {
+            return applyLocaleState('cancel_booking', state.locale);
+          }
+
+          try {
+            const actionSchema = z.object({
+              action: z
+                .enum(['PROVIDE_INFO', 'ABORT_CANCELLATION', 'SWITCH_TOPIC'])
+                .catch('SWITCH_TOPIC'),
+            });
+            const model = this.aiService
+              .buildModelForSite(options.site ?? {}, 0, false)
+              .withStructuredOutput(actionSchema);
+            const actionResult = await model.invoke([
+              new SystemMessage(
+                getCancelFlowClassifierPrompt(cancelStep, state.locale),
+              ),
+              new HumanMessage(`<user_input>\n${contentStr}\n</user_input>`),
+            ]);
+
+            this.logger.log(
+              `Cancel flow classifier action: ${actionResult.action} (step: ${cancelStep})`,
+            );
+
+            if (actionResult.action === 'PROVIDE_INFO') {
+              return applyLocaleState('cancel_booking', state.locale);
+            }
+
+            if (actionResult.action === 'ABORT_CANCELLATION') {
+              return {
+                ...(await applyLocaleState('abort_cancel_flow', state.locale)),
+                pendingCancelFlowAction:
+                  'ABORT_CANCELLATION' as CancelFlowAction,
+                switchTopicAfterAbort: false,
+              };
+            }
+
+            if (actionResult.action === 'SWITCH_TOPIC') {
+              return {
+                ...(await applyLocaleState('abort_cancel_flow', state.locale)),
+                pendingCancelFlowAction: 'SWITCH_TOPIC' as CancelFlowAction,
+                switchTopicAfterAbort: true,
+              };
+            }
+          } catch (err) {
+            this.logger.warn(
+              'Cancel flow classifier failed, falling back',
+              err,
+            );
+            if (!extractedCode && !extractedPhone) {
+              return {
+                ...(await applyLocaleState('abort_cancel_flow', state.locale)),
+                pendingCancelFlowAction: 'SWITCH_TOPIC' as CancelFlowAction,
+                switchTopicAfterAbort: true,
+              };
+            }
+            return applyLocaleState('cancel_booking', state.locale);
+          }
+        }
 
         // ── 1. Fast-Path Check (Deterministic routing without LLM call) ──
         if (/^\/(?:update-draft-booking|confirm-booking)\b/i.test(contentStr)) {
@@ -1522,14 +1628,12 @@ export class GraphService {
         timeSlot: formatInTimeZone(booking.startAt, booking.timezone, 'HH:mm'),
       });
 
-      const ABORT_CHIP_VI = '\n\n<chips>/keep-booking:Không hủy nữa</chips>';
-      const ABORT_CHIP_EN = '\n\n<chips>/keep-booking:Keep my booking</chips>';
-
       const handleAskCode = async (
         state: typeof AgentState.State,
         userText: string,
         prompts: CancelPrompts,
       ) => {
+        const abortChip = getAbortChip(state.locale);
         const bookingCode =
           extractBookingCode(userText) ??
           (await activeConversationBookingCode(state));
@@ -1541,7 +1645,11 @@ export class GraphService {
               bookingCode: null,
               phoneVerified: false,
             },
-            messages: [new AIMessage(`${prompts.askCode} [cancel:ask_code|]`)],
+            messages: [
+              new AIMessage(
+                `${prompts.askCode} [cancel:ask_code|]${abortChip}`,
+              ),
+            ],
           };
         }
 
@@ -1573,7 +1681,6 @@ export class GraphService {
           };
         }
 
-        const isVietnamese = localeLanguage(state.locale) === 'vi';
         return {
           cancelState: {
             step: 'verify_phone' as CancelStep,
@@ -1582,7 +1689,7 @@ export class GraphService {
           },
           messages: [
             new AIMessage(
-              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
+              `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${abortChip}`,
             ),
           ],
         };
@@ -1594,6 +1701,7 @@ export class GraphService {
         prompts: CancelPrompts,
       ) => {
         const { bookingCode } = state.cancelState;
+        const abortChip = getAbortChip(state.locale);
         const isVietnamese = localeLanguage(state.locale) === 'vi';
         const isVi = isVietnamese;
 
@@ -1604,7 +1712,11 @@ export class GraphService {
               bookingCode: null,
               phoneVerified: false,
             },
-            messages: [new AIMessage(`${prompts.askCode} [cancel:ask_code|]`)],
+            messages: [
+              new AIMessage(
+                `${prompts.askCode} [cancel:ask_code|]${abortChip}`,
+              ),
+            ],
           };
         }
 
@@ -1676,7 +1788,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
+                `${prompts.verifyPhone} [cancel:verify_phone|${bookingCode}]${abortChip}`,
               ),
             ],
           };
@@ -1690,7 +1802,7 @@ export class GraphService {
             cancelState: state.cancelState,
             messages: [
               new AIMessage(
-                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]${isVietnamese ? ABORT_CHIP_VI : ABORT_CHIP_EN}`,
+                `${prompts.phoneWrong} [cancel:verify_phone|${bookingCode}]${abortChip}`,
               ),
             ],
           };
@@ -1828,6 +1940,42 @@ export class GraphService {
           default:
             return handleAskCode(state, userText, prompts);
         }
+      };
+
+      const abortCancelFlowNode = (state: typeof AgentState.State) => {
+        const prompts = getCancelPrompts(state.locale);
+        const action = state.pendingCancelFlowAction;
+        const resetState: CancelState = {
+          step: null,
+          bookingCode: null,
+          phoneVerified: false,
+        };
+
+        if (action === 'SWITCH_TOPIC' || state.switchTopicAfterAbort) {
+          this.logger.log(
+            '[abortCancelFlowNode] Topic switch requested — resetting cancelState and re-classifying intent',
+          );
+          return {
+            cancelState: resetState,
+            pendingCancelFlowAction: null as CancelFlowAction | null,
+            switchTopicAfterAbort: true,
+          };
+        }
+
+        const keepMsg = prompts.keepConfirmed;
+        if (res) {
+          res.write(keepMsg);
+        }
+        server
+          ?.to(`conversation-${conversationId}`)
+          ?.emit('aiChunk', { token: keepMsg, conversationId });
+
+        return {
+          cancelState: resetState,
+          pendingCancelFlowAction: null as CancelFlowAction | null,
+          switchTopicAfterAbort: false,
+          messages: [new AIMessage(keepMsg)],
+        };
       };
 
       const systemQuestionNode = (state: typeof AgentState.State) => ({
@@ -2799,6 +2947,7 @@ export class GraphService {
         .addNode('search_knowledge', searchKnowledgeNode)
         .addNode('knowledge_fallback', knowledgeFallbackNode)
         .addNode('cancel_booking', cancelBookingNode)
+        .addNode('abort_cancel_flow', abortCancelFlowNode)
         .addNode('request_handoff', requestHandoff)
         .addNode('summarize_memory', summarizeMemory);
 
@@ -2820,11 +2969,23 @@ export class GraphService {
           confirm_booking: 'model_node',
           check_booking: 'model_node',
           cancel_booking: 'cancel_booking',
+          abort_cancel_flow: 'abort_cancel_flow',
           abandon_booking: 'abandon_booking',
           request_human: 'request_handoff',
         },
       );
 
+      workflow.addConditionalEdges(
+        'abort_cancel_flow',
+        (state) =>
+          state.switchTopicAfterAbort ? 'classify_intent' : 'summarize_memory',
+        {
+          classify_intent: 'classify_intent',
+          summarize_memory: 'summarize_memory',
+        },
+      );
+
+      workflow.addEdge('cancel_booking', 'summarize_memory');
       workflow.addEdge('structured_booking_step', 'summarize_memory');
 
       const customToolsCondition = (
