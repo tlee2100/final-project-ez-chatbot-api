@@ -5,8 +5,11 @@ import { Booking } from './entities/booking.entity';
 import { BookingBlockout } from './entities/booking-blockout.entity';
 import { BookingService } from './booking.service';
 import { BookingGateway } from './booking.gateway';
+import { AdminBookingController } from './admin-booking.controller';
+import { AdminBookingService } from './admin-booking.service';
 import { SiteModule } from '../site/site.module';
 import { NotificationModule } from '../notification/notification.module';
+import { Site } from '../site/entities/site.entity';
 import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
 import { BookingResource } from '../site/entities/booking-resources.entity';
 import { BookingServiceItem } from '../site/entities/booking-service.entity';
@@ -20,6 +23,7 @@ import { SharedModule } from '../shared/shared.module';
       SiteBookingConfig,
       BookingResource,
       BookingServiceItem,
+      Site,
     ]),
     forwardRef(() => SiteModule),
     NotificationModule,
@@ -36,7 +40,8 @@ import { SharedModule } from '../shared/shared.module';
       },
     }),
   ],
-  providers: [BookingService, BookingGateway],
-  exports: [BookingService, BookingGateway],
+  controllers: [AdminBookingController],
+  providers: [BookingService, BookingGateway, AdminBookingService],
+  exports: [BookingService, BookingGateway, AdminBookingService],
 })
 export class BookingModule {}

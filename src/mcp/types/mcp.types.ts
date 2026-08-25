@@ -64,15 +64,16 @@ export interface CreateBookingPayload {
   phone: string;
   serviceId?: string;
   serviceIds?: string[];
-  resourceId: string;
-  date: string;
-  timeSlot: string;
+  resourceId?: string;
+  date?: string;
+  timeSlot?: string;
   slotCount?: number;
   slots?: Array<{
     resourceId: string;
     date: string;
     timeSlot: string;
     serviceId?: string;
+    notes?: string;
   }>;
   sessionId?: string;
 }
@@ -93,4 +94,13 @@ export interface SiteConfigBookingHours {
   startTime?: string;
   endTime?: string;
   slotDuration?: number;
+}
+
+export interface McpUserDetailsResult {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  role: string;
+  avatarUrl: string | null;
 }

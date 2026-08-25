@@ -2,25 +2,24 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  Inject,
-  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
-import { Site } from './entities/site.entity';
-import { SiteBookingConfig } from './entities/site-booking-config.entity';
-import { BookingServiceItem } from './entities/booking-service.entity';
-import { BookingResource } from './entities/booking-resources.entity';
+import { DataSource, In, Repository } from 'typeorm';
+import { Site } from '../site/entities/site.entity';
+import { SiteBookingConfig } from '../site/entities/site-booking-config.entity';
+import { BookingServiceItem } from '../site/entities/booking-service.entity';
+import { BookingResource } from '../site/entities/booking-resources.entity';
+import { Booking } from './entities/booking.entity';
 
-import { SiteService } from './site.service';
+import { SiteService } from '../site/site.service';
 import type { JwtUser } from '../auth/types/jwt-user.type';
 import type { PaginateQuery } from 'nestjs-paginate';
-import { BookingService as CoreBookingService } from '../booking/booking.service';
-import { BookingStatus } from '../booking/enums/booking-status.enum';
-import { CreateBookingDto } from '../booking/dto/create-booking.dto';
-import { CreateAdminBookingDto } from '../booking/dto/create-admin-booking.dto';
-import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
-import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
+import { BookingService as CoreBookingService } from './booking.service';
+import { BookingStatus } from './enums/booking-status.enum';
+import { CreateBookingDto } from './dto/create-booking.dto';
+import { CreateAdminBookingDto } from './dto/create-admin-booking.dto';
+import { CreateBlockoutDto } from './dto/create-blockout.dto';
+import { HoldSlotDto } from './dto/hold-slot.dto';
 
 import { IsArray, IsBoolean, IsNumber, IsString } from 'class-validator';
 
@@ -67,11 +66,40 @@ export class AdminBookingService {
     private serviceRepository: Repository<BookingServiceItem>,
     @InjectRepository(BookingResource)
     private resourceRepository: Repository<BookingResource>,
+    @InjectRepository(Booking)
+    private bookingRepository: Repository<Booking>,
     private siteService: SiteService,
     private dataSource: DataSource,
-    @Inject(forwardRef(() => CoreBookingService))
     private coreBookingService: CoreBookingService,
   ) {}
+
+  async hasActiveBookingsForService(
+    siteId: string,
+    serviceId: string,
+  ): Promise<boolean> {
+    const count = await this.bookingRepository.count({
+      where: {
+        siteId,
+        serviceId,
+        status: In([BookingStatus.CONFIRMED]),
+      },
+    });
+    return count > 0;
+  }
+
+  async hasActiveBookingsForResource(
+    siteId: string,
+    resourceId: string,
+  ): Promise<boolean> {
+    const count = await this.bookingRepository.count({
+      where: {
+        siteId,
+        resourceId,
+        status: In([BookingStatus.CONFIRMED]),
+      },
+    });
+    return count > 0;
+  }
 
   async getBookingConfig(siteId: string, user: JwtUser) {
     // 1. Authorize access
@@ -164,7 +192,7 @@ export class AdminBookingService {
 
       if (servicesToRemove.length > 0) {
         for (const service of servicesToRemove) {
-          const hasActive = await this.siteService.hasActiveBookingsForService(
+          const hasActive = await this.hasActiveBookingsForService(
             siteId,
             service.id,
           );
@@ -194,7 +222,7 @@ export class AdminBookingService {
 
       if (resourcesToRemove.length > 0) {
         for (const resource of resourcesToRemove) {
-          const hasActive = await this.siteService.hasActiveBookingsForResource(
+          const hasActive = await this.hasActiveBookingsForResource(
             siteId,
             resource.id,
           );
