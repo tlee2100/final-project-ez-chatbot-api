@@ -20,11 +20,11 @@ import {
   AdminBookingService,
   UpdateBookingConfigDto,
 } from './admin-booking.service';
-import { HoldSlotDto } from '../booking/dto/hold-slot.dto';
-import { CreateBlockoutDto } from '../booking/dto/create-blockout.dto';
-import { CreateAdminBookingDto } from '../booking/dto/create-admin-booking.dto';
-import { UpdateBookingStatusDto } from '../booking/dto/update-booking-status.dto';
-import { BulkCancelBookingsDto } from '../booking/dto/bulk-cancel-bookings.dto';
+import { HoldSlotDto } from './dto/hold-slot.dto';
+import { CreateBlockoutDto } from './dto/create-blockout.dto';
+import { CreateAdminBookingDto } from './dto/create-admin-booking.dto';
+import { UpdateBookingStatusDto } from './dto/update-booking-status.dto';
+import { BulkCancelBookingsDto } from './dto/bulk-cancel-bookings.dto';
 import type { AuthRequest } from '../auth/types/auth-request.type';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -34,7 +34,7 @@ import { UserRole } from '../user/enums/user-role.enum';
 @ApiBearerAuth()
 @UseGuards(AuthGuard('jwt'), RolesGuard)
 @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-@Controller('admin/sites/:siteId/bookings')
+@Controller('admin/bookings/:siteId')
 export class AdminBookingController {
   constructor(private readonly adminBookingService: AdminBookingService) {}
 
