@@ -86,8 +86,8 @@ export class AiService {
 
   /**
    * Build a configured ChatOpenAI instance for a specific site.
-   * If the site has a custom encrypted API key (BYOK), it will be decrypted and used.
-   * Falls back to the master key if no custom key is configured.
+   * If the site has a custom encrypted API key (BYOK) enabled, it will be decrypted and used.
+   * Uses the master key only when custom key is disabled (useCustomOpenAiKey is false/undefined).
    *
    * @param site         The site entity (needs useCustomOpenAiKey + encryptedOpenAiKey)
    * @param temperature  Sampling temperature
@@ -109,7 +109,12 @@ export class AiService {
     let resolvedBaseURL: string | undefined = this.baseURL;
     let resolvedModelName: string = site.llmModel?.trim() || this.modelName;
 
-    if (site.useCustomOpenAiKey && site.encryptedOpenAiKey) {
+    if (site.useCustomOpenAiKey) {
+      if (!site.encryptedOpenAiKey) {
+        throw new Error(
+          'Site has custom API key enabled (BYOK) but no encrypted key is configured.',
+        );
+      }
       try {
         resolvedApiKey = decryptApiKey(site.encryptedOpenAiKey);
         this.logger.debug('Using site-specific OpenAI API key (BYOK)');
@@ -118,15 +123,19 @@ export class AiService {
           process.env.DEEPSEEK_BASE_URL ||
           process.env.OPENAI_BASE_URL ||
           this.baseURL ||
-          'https://api.openai.com/v1';
+          'https://api.ai-box.vn/v1';
         resolvedModelName =
           site.llmModel?.trim() ||
+          process.env.DEEPSEEK_MODEL ||
           process.env.OPENAI_CHAT_MODEL ||
           process.env.OPENAI_MODEL ||
-          'gpt-4o-mini';
+          this.modelName;
       } catch (err) {
         this.logger.error(
-          `Failed to decrypt site API key, falling back to master key: ${err instanceof Error ? err.message : String(err)}`,
+          `Failed to decrypt site API key: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw new Error(
+          `Failed to decrypt site custom API key: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

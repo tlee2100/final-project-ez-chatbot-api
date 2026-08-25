@@ -1465,11 +1465,11 @@ export class GraphService {
           locale: z.string().catch(UNDETERMINED_LOCALE),
         });
 
-        const model = this.aiService
-          .buildModelForSite(options.site ?? {}, 0, false)
-          .withStructuredOutput(intentSchema);
-
         try {
+          const model = this.aiService
+            .buildModelForSite(options.site ?? {}, 0, false)
+            .withStructuredOutput(intentSchema);
+
           const response = await model.invoke([
             new SystemMessage(
               getIntentClassifierPrompt(
@@ -1533,7 +1533,11 @@ export class GraphService {
             errMsg.includes('invalid_api_key') ||
             errMsg.includes('429') ||
             errMsg.includes('insufficient_quota') ||
-            errMsg.includes('MODEL_AUTHENTICATION');
+            errMsg.includes('MODEL_AUTHENTICATION') ||
+            errMsg.includes('Failed to decrypt site custom API key') ||
+            errMsg.includes(
+              'Site has custom API key enabled (BYOK) but no encrypted key',
+            );
 
           if (
             isAuthOrQuota &&
@@ -2652,17 +2656,17 @@ export class GraphService {
         );
         const shouldStream = state.intent !== 'book_appointment';
         const temperature = state.intent === 'book_appointment' ? 0.0 : 0.2;
-        const boundModel = this.aiService
-          .buildModelForSite(
-            options.site ?? {},
-            temperature,
-            shouldStream,
-            options.maxTokensPerResponse,
-          )
-          .bindTools(visibleTools);
-
         let response;
         try {
+          const boundModel = this.aiService
+            .buildModelForSite(
+              options.site ?? {},
+              temperature,
+              shouldStream,
+              options.maxTokensPerResponse,
+            )
+            .bindTools(visibleTools);
+
           response = await boundModel.invoke(messagesWithSystem, {
             callbacks: [
               {
@@ -2688,20 +2692,13 @@ export class GraphService {
             modelError instanceof Error
               ? modelError.message
               : String(modelError);
-          const isAuthOrQuota =
-            errMsg.includes('401') ||
-            errMsg.includes('Incorrect API key') ||
-            errMsg.includes('invalid_api_key') ||
-            errMsg.includes('429') ||
-            errMsg.includes('insufficient_quota') ||
-            errMsg.includes('MODEL_AUTHENTICATION');
 
-          if (isAuthOrQuota && options.site?.useCustomOpenAiKey) {
-            this.logger.warn(
-              `Custom OpenAI key on site ${options.site?.id ?? 'unknown'} failed (${errMsg.slice(0, 100)}). Gracefully falling back to system master key...`,
+          if (options.site?.useCustomOpenAiKey) {
+            this.logger.error(
+              `Custom OpenAI key on site ${options.site?.id ?? 'unknown'} failed (${errMsg.slice(0, 150)}). Strict BYOK mode active: Master key fallback is disabled.`,
             );
 
-            // Update database so Dashboard & UI reflect that custom key is invalid and master key is in use
+            // Update database so Dashboard & UI reflect that custom key is invalid
             if (options.site?.id) {
               void this.siteRepo
                 .update(options.site.id, { customKeyStatus: 'invalid' })
@@ -2713,32 +2710,17 @@ export class GraphService {
                 );
             }
 
-            const fallbackModel = this.aiService
-              .buildModel(
-                temperature,
-                shouldStream,
-                options.maxTokensPerResponse,
-              )
-              .bindTools(visibleTools);
+            const errorReply =
+              'The AI service for this site is currently unavailable due to an invalid or quota-exceeded custom API key (BYOK). Please contact the site administrator.';
 
-            response = await fallbackModel.invoke(messagesWithSystem, {
-              callbacks: [
-                {
-                  handleLLMNewToken(token: string) {
-                    if (!shouldStream) return;
-                    if (token) {
-                      streamedTokensCount++;
-                      if (res) {
-                        res.write(token);
-                      }
-                      server
-                        .to(`conversation-${conversationId}`)
-                        .emit('aiChunk', { token, conversationId });
-                    }
-                  },
-                },
-              ],
-            });
+            if (res && !res.writableEnded) {
+              res.write(errorReply);
+            }
+            server
+              ?.to(`conversation-${conversationId}`)
+              ?.emit('aiChunk', { token: errorReply, conversationId });
+
+            response = new AIMessage(errorReply);
           } else {
             throw modelError;
           }
