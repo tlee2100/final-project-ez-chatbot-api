@@ -8,7 +8,7 @@ import {
 import { randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import { Document } from '../document/entities/document.entity';
 import { DocumentStatus } from '../document/enums/document-status.enum';
 import { KnowledgeRetrievalService } from '../document/retrieval/knowledge-retrieval.service';
@@ -20,6 +20,7 @@ import type {
   AvailableSlot,
   BookingResult,
   CreateBookingPayload,
+  McpUserDetailsResult,
   SiteConfigBookingHours,
   SiteConfigResourceItem,
   SiteConfigServiceItem,
@@ -130,39 +131,65 @@ export class McpService {
 
   /**
    * MCP / getUserDetails backend:
-   * Returns non-sensitive user profile details by email.
+   * Returns non-sensitive user profile details by email, scoped to the given siteId.
+   * Returns null if the user does not belong to the site.
+   *
+   * A user belongs to a site if they are:
+   * (A) the site owner  (site.ownerId = user.id)
+   * (B) an assigned agent (site_agents join table)
+   * (C) in the same organization (user.organizationId = site.organizationId)
    */
-  async getUserDetails(siteId: string, email: string) {
-    this.logger.log(`[MCP] getUserDetails: siteId=${siteId}, email=${email}`);
-
-    const user = await this.userRepository.findOne({
-      where: { email },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        avatarUrl: true,
-      },
+  async getUserDetails(
+    siteId: string,
+    email: string,
+  ): Promise<McpUserDetailsResult | null> {
+    this.logger.log({
+      event: 'mcp_get_user_details',
+      siteId,
+      emailDomain: email.split('@')[1] ?? 'unknown',
     });
 
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .innerJoin('sites', 'site', 'site.id = :siteId', { siteId })
+      .leftJoin(
+        'site_agents',
+        'sa',
+        'sa."agentId" = user.id AND sa."siteId" = :siteId',
+        { siteId },
+      )
+      .where('user.email = :email', { email })
+      .andWhere(
+        new Brackets((qb) =>
+          qb
+            .where('user.id = site."ownerId"')
+            .orWhere('sa."agentId" IS NOT NULL')
+            .orWhere(
+              'user."organizationId" IS NOT NULL AND user."organizationId" = site."organizationId"',
+            ),
+        ),
+      )
+      .select([
+        'user.id',
+        'user.name',
+        'user.email',
+        'user.phone',
+        'user.role',
+        'user.avatarUrl',
+      ])
+      .getOne();
+
     if (!user) {
-      return {
-        email,
-        name: 'Guest Visitor',
-        role: 'VISITOR',
-        phone: null,
-      };
+      return null;
     }
 
     return {
       id: user.id,
       name: user.name,
       email: user.email,
-      phone: user.phone,
+      phone: user.phone ?? null,
       role: user.role,
-      avatarUrl: user.avatarUrl,
+      avatarUrl: user.avatarUrl ?? null,
     };
   }
 
@@ -426,10 +453,10 @@ export class McpService {
   async holdSlot(
     siteId: string,
     payload: {
-      resourceId: string;
+      resourceId?: string;
       serviceId?: string;
-      date: string;
-      timeSlot: string;
+      date?: string;
+      timeSlot?: string;
       slotCount?: number;
       sessionId?: string;
       conversationId?: string;
@@ -438,6 +465,7 @@ export class McpService {
         date: string;
         timeSlot: string;
         serviceId?: string;
+        notes?: string;
       }>;
     },
   ): Promise<{ sessionId: string }> {
@@ -471,7 +499,7 @@ export class McpService {
           serviceId: slot.serviceId ?? payload.serviceId,
         });
       }
-    } else {
+    } else if (payload.resourceId && payload.date && payload.timeSlot) {
       const slotCount = Math.max(1, payload.slotCount ?? 1);
       const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
       let currStart = fromZonedTime(localDateTimeStr, timezone);
@@ -554,9 +582,11 @@ export class McpService {
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
 
-    const resolvedResourceId =
-      (await this.resolveResourceId(siteId, payload.resourceId)) ||
-      payload.resourceId;
+    const rawResourceId = payload.resourceId || payload.slots?.[0]?.resourceId;
+
+    const resolvedResourceId = rawResourceId
+      ? (await this.resolveResourceId(siteId, rawResourceId)) || rawResourceId
+      : undefined;
 
     if (!resolvedResourceId) {
       throw new BadRequestException(
@@ -677,8 +707,14 @@ export class McpService {
       customerName: booking.customerName,
       customerEmail: booking.customerEmail || payload.customerEmail,
       phone: booking.phone,
-      date: payload.date,
-      timeSlot: payload.timeSlot,
+      date:
+        payload.date ||
+        payload.slots?.[0]?.date ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'yyyy-MM-dd'),
+      timeSlot:
+        payload.timeSlot ||
+        payload.slots?.[0]?.timeSlot ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'HH:mm'),
       endTimeSlot: formatInTimeZone(new Date(booking.endAt), timezone, 'HH:mm'),
       resourceName,
       serviceId: payload.serviceId,

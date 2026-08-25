@@ -1632,7 +1632,13 @@ export class ChatService {
       components: components ?? null,
     });
 
-    console.log(`Message::: ${JSON.stringify(message)}`);
+    this.logger.log({
+      event: 'chat_message_saved',
+      conversationId,
+      senderType,
+      hasComponents: Boolean(components?.length),
+      hasLocale: Boolean(locale),
+    });
     const savedMessage = await this.chatMessageRepository.save(message);
 
     if (agentId) {

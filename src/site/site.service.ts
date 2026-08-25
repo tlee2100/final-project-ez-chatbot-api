@@ -12,8 +12,6 @@ import { encryptApiKey, decryptApiKey } from '../shared/utils/encryption.util';
 import OpenAI from 'openai';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { Booking } from '../booking/entities/booking.entity';
-import { BookingStatus } from '../booking/enums/booking-status.enum';
 import { type PaginateQuery, type Paginated, paginate } from 'nestjs-paginate';
 import type { Mapper } from '@automapper/core';
 import { InjectMapper } from '@automapper/nestjs';
@@ -64,8 +62,6 @@ export class SiteService {
     private readonly chatTimeoutService: ChatTimeoutService,
     @Inject(forwardRef(() => CrawlerService))
     private readonly crawlerService: CrawlerService,
-    @InjectRepository(Booking)
-    private readonly bookingRepository: Repository<Booking>,
     @Inject('REDIS_CLIENT')
     private readonly redis: Redis,
   ) {
@@ -590,34 +586,6 @@ export class SiteService {
     return Array.from(new Set(cleaned));
   }
 
-  async hasActiveBookingsForService(
-    siteId: string,
-    serviceId: string,
-  ): Promise<boolean> {
-    const count = await this.bookingRepository.count({
-      where: {
-        siteId,
-        serviceId,
-        status: In([BookingStatus.CONFIRMED]),
-      },
-    });
-    return count > 0;
-  }
-
-  async hasActiveBookingsForResource(
-    siteId: string,
-    resourceId: string,
-  ): Promise<boolean> {
-    const count = await this.bookingRepository.count({
-      where: {
-        siteId,
-        resourceId,
-        status: In([BookingStatus.CONFIRMED]),
-      },
-    });
-    return count > 0;
-  }
-
   // ── Upload Image ──
   async uploadImage(
     siteId: string,
@@ -756,7 +724,7 @@ export class SiteService {
       site.customBaseUrl,
       process.env.DEEPSEEK_BASE_URL,
       process.env.OPENAI_BASE_URL,
-      'https://api.openai.com/v1',
+      'https://api.ai-box.vn/v1',
     ].filter((url): url is string => Boolean(url && url.trim()));
 
     const uniqueBaseUrls = Array.from(new Set(candidateBaseUrls));
@@ -923,7 +891,7 @@ export class SiteService {
       site.customBaseUrl ||
       process.env.DEEPSEEK_BASE_URL ||
       process.env.OPENAI_BASE_URL ||
-      'https://api.openai.com/v1';
+      'https://api.ai-box.vn/v1';
 
     const targetModel =
       candidateData?.llmModel?.trim() || site.llmModel || 'qwen3.7-flash';

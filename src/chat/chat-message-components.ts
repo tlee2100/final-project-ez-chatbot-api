@@ -13,7 +13,8 @@ export type BookingChipAction =
   | 'no_preference'
   | 'skip_email'
   | 'submit_text'
-  | 'cancel_booking';
+  | 'cancel_booking'
+  | 'keep_booking';
 
 export type BookingChipItem = {
   action: BookingChipAction;
@@ -44,6 +45,7 @@ const bookingChipActions = new Set<BookingChipAction>([
   'skip_email',
   'submit_text',
   'cancel_booking',
+  'keep_booking',
 ]);
 
 export const parseBookingOptionSelection = (
@@ -130,7 +132,8 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
 export const stripModelBookingDirectives = (text: string): string =>
   text
     .replace(/\s*<chips>.*?<\/chips>/gis, '')
-    .replace(/\s*<booking-step>.*?<\/booking-step>/gis, '');
+    .replace(/\s*<booking-step>.*?<\/booking-step>/gis, '')
+    .replace(/\s*<booking-input>.*?<\/booking-input>/gis, '');
 
 const dateInTimezone = (date: Date, timezone: string): Date => {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -217,6 +220,25 @@ export const buildChatMessageComponents = (
   latestUserText = '',
   fallbackStep: BookingOptionStep | null = null,
 ): ChatMessageComponent[] => {
+  const explicitChipsMatch = text.match(/<chips>(.*?)<\/chips>/is);
+  if (explicitChipsMatch?.[1]) {
+    const rawChips = explicitChipsMatch[1]
+      .split('|')
+      .map((c) => c.trim())
+      .filter(Boolean);
+    const keepBookingChips = rawChips.filter((chip) =>
+      chip.startsWith('/keep-booking:'),
+    );
+    if (keepBookingChips.length > 0) {
+      const explicitItems: BookingChipItem[] = keepBookingChips.map((chip) => ({
+        action: 'keep_booking',
+        value: '/keep-booking',
+        label: chip.replace('/keep-booking:', '').trim(),
+      }));
+      return [{ type: 'chips', items: explicitItems }];
+    }
+  }
+
   const selectedOption = parseBookingOptionSelection(latestUserText);
   let step = selectedOption
     ? selectedOption.action === 'select_service'

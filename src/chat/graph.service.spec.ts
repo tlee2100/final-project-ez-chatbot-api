@@ -13,6 +13,7 @@ import {
   extractRequestedTimeSlot,
   isBookingAbandonment,
   isBookingFlowIntent,
+  isCancelFlowIntent,
   isBookingSlotSelection,
   isNaturalBookingTrigger,
   isSmallTalkTrigger,
@@ -26,6 +27,8 @@ import {
 import { buildToolSchema } from './tool-schema.utils';
 import {
   getCancelPrompts,
+  getAbortChip,
+  getCancelFlowClassifierPrompt,
   getAbandonBookingPrompt,
   getBookingOptionPrompt,
   getIntentClassifierPrompt,
@@ -88,6 +91,24 @@ describe('booking cancellation prompts', () => {
     expect(getCancelPrompts('en').askCode).toContain('booking code');
     expect(getCancelPrompts('ja-JP').askCode).toContain('予約コード');
     expect(getCancelPrompts('fr').askCode).toBe(getCancelPrompts('en').askCode);
+  });
+
+  it('provides localized abort chips', () => {
+    expect(getAbortChip('vi')).toContain('/keep-booking:Không hủy nữa');
+    expect(getAbortChip('en')).toContain('/keep-booking:Keep my booking');
+    expect(getAbortChip('ja')).toContain('/keep-booking:キャンセルしない');
+  });
+
+  it('builds cancel flow classifier prompts for each step', () => {
+    expect(getCancelFlowClassifierPrompt('ask_code', 'vi')).toContain(
+      'PROVIDE_INFO',
+    );
+    expect(getCancelFlowClassifierPrompt('verify_phone', 'en')).toContain(
+      'ABORT_CANCELLATION',
+    );
+    expect(getCancelFlowClassifierPrompt('await_confirm', 'en')).toContain(
+      'SWITCH_TOPIC',
+    );
   });
 });
 
@@ -276,6 +297,9 @@ describe('booking chat flow guards', () => {
     expect(isBookingFlowIntent('booking_slot_selected')).toBe(true);
     expect(isBookingFlowIntent('question')).toBe(false);
     expect(isBookingFlowIntent('cancel_booking')).toBe(false);
+    expect(isBookingFlowIntent('abort_cancel_flow')).toBe(false);
+    expect(isCancelFlowIntent('cancel_booking')).toBe(true);
+    expect(isCancelFlowIntent('abort_cancel_flow')).toBe(true);
     expect(isBookingFlowIntent('out_of_scope')).toBe(false);
     expect(
       enforceBookingChipScope('Choose one <chips>Yes|No</chips>', 'question'),
