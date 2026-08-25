@@ -23,7 +23,7 @@ Intents:
 - cancel_booking: explicitly asks to cancel a confirmed appointment or booking (e.g., "hủy lịch hẹn", "tôi muốn hủy đặt lịch", "cancel appointment", "drop booking"). Do NOT classify unrelated messages as cancel_booking just because they contain the word "hủy" (e.g. "kẻ hủy diệt", "tiêu hủy", "hủy hoại", "destroy") — classify those as "out_of_scope" or "small_talk".${
         bookingInProgress
           ? `
-- The booking flow is active. Treat names, contact details, service/staff choices, dates, times, skip answers, and field corrections as book_appointment even when the value alone is ambiguous.
+- The booking flow is active. Treat customer names (including celebrity or foreign names like "David Beckham", "John Doe", "Alex"), contact details, service/staff choices, dates, times, skip answers, and field responses as book_appointment even when the value alone is ambiguous. Do NOT classify names or short answers as out_of_scope.
 - abandon_booking: only an explicit request to stop the unfinished booking. Do not use it for changing a field or cancelling a confirmed booking.`
           : ''
       }`

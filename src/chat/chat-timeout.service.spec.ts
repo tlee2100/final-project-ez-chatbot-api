@@ -8,7 +8,6 @@ jest.mock('@automapper/classes', () => ({
 import { ChatTimeoutService } from './chat-timeout.service';
 import {
   ConversationStatus,
-  HandlingStatus,
   ClosedReason,
 } from './entities/conversation.entity';
 import { createRepositoryMock } from '../test/service-test-helpers';
@@ -165,25 +164,75 @@ describe('ChatTimeoutService', () => {
     expect(jest.getTimerCount()).toBe(0);
   });
 
-  it('recovers active timers on module init', async () => {
+  it('auto-closes lingering conversations with TIMEOUT reason when inactivity duration has elapsed', async () => {
     const { service, conversationRepository } = makeService();
-    const site = {
-      enableConversationTimeout: true,
-      inactivityTimeoutMinutes: 15,
-      warningTimeMinutes: 5,
-    } as Site;
 
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+    const convTimeout = {
+      id: 'conv-timeout',
+      status: ConversationStatus.OPEN,
+      lastActivityAt: fifteenMinutesAgo,
+      site: {
+        enableConversationTimeout: true,
+        inactivityTimeoutMinutes: 10,
+      },
+    };
+    conversationRepository.find.mockResolvedValue([convTimeout]);
+
+    await service.onModuleInit();
+    expect(conversationRepository.update).toHaveBeenCalledWith(
+      { id: 'conv-timeout' },
+      {
+        status: ConversationStatus.CLOSED,
+        closedReason: ClosedReason.TIMEOUT,
+      },
+    );
+  });
+
+  it('auto-closes lingering conversations with ERROR reason when server was down for > 60s without exceeding timeout', async () => {
+    const { service, conversationRepository } = makeService();
+
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    const convError = {
+      id: 'conv-error',
+      status: ConversationStatus.OPEN,
+      lastActivityAt: twoMinutesAgo,
+      site: {
+        enableConversationTimeout: true,
+        inactivityTimeoutMinutes: 10,
+      },
+    };
+    conversationRepository.find.mockResolvedValue([convError]);
+
+    await service.onModuleInit();
+    expect(conversationRepository.update).toHaveBeenCalledWith(
+      { id: 'conv-error' },
+      {
+        status: ConversationStatus.CLOSED,
+        closedReason: ClosedReason.ERROR,
+      },
+    );
+  });
+
+  it('resumes timers for active conversations that restarted quickly (< 60s)', async () => {
+    const { service, conversationRepository, chatService } = makeService();
+
+    const tenSecondsAgo = new Date(Date.now() - 10 * 1000);
     conversationRepository.find.mockResolvedValue([
       {
-        id: 'conv-1',
+        id: 'conv-active',
         status: ConversationStatus.OPEN,
-        handlingStatus: HandlingStatus.AI_HANDLING,
-        lastActivityAt: new Date(),
-        site,
+        lastActivityAt: tenSecondsAgo,
+        site: {
+          enableConversationTimeout: true,
+          inactivityTimeoutMinutes: 10,
+          warningTimeMinutes: 5,
+        },
       },
     ]);
 
     await service.onModuleInit();
+    expect(chatService.closeConversation).not.toHaveBeenCalled();
     expect(jest.getTimerCount()).toBe(2);
   });
 });

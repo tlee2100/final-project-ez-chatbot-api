@@ -7,7 +7,7 @@ import {
   Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import {
   Conversation,
   ConversationStatus,
@@ -43,32 +43,82 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     this.logger.log(
-      'Initializing ChatTimeoutService: Recovering active conversation timers...',
+      'Initializing ChatTimeoutService: Checking for lingering active conversations from previous run...',
     );
     try {
-      const activeConversations = await this.conversationRepository.find({
+      const lingeringConversations = await this.conversationRepository.find({
         where: {
-          status: ConversationStatus.OPEN,
+          status: In([ConversationStatus.OPEN, ConversationStatus.PAUSED]),
         },
         relations: {
           site: true,
         },
       });
 
-      this.logger.log(
-        `Found ${activeConversations.length} OPEN conversation(s) to schedule timers for.`,
-      );
+      if (lingeringConversations.length === 0) {
+        return;
+      }
 
-      for (const conversation of activeConversations) {
-        this.scheduleTimers(
-          conversation.id,
-          conversation.site,
-          conversation.lastActivityAt,
-          conversation.handlingStatus,
+      const now = Date.now();
+      const FAST_RESTART_GRACE_PERIOD_MS = 60 * 1000; // 60s grace period for fast server restarts
+      const timeoutIds: string[] = [];
+      const errorIds: string[] = [];
+
+      for (const conv of lingeringConversations) {
+        const site = conv.site;
+        const lastActivity = conv.lastActivityAt
+          ? new Date(conv.lastActivityAt).getTime()
+          : conv.createdAt
+            ? new Date(conv.createdAt).getTime()
+            : 0;
+        const timeoutMinutes = site?.inactivityTimeoutMinutes ?? 15;
+        const isTimeoutEnabled = site?.enableConversationTimeout === true;
+        const elapsedMs = now - lastActivity;
+
+        if (isTimeoutEnabled && elapsedMs >= timeoutMinutes * 60 * 1000) {
+          timeoutIds.push(conv.id);
+        } else if (elapsedMs >= FAST_RESTART_GRACE_PERIOD_MS) {
+          errorIds.push(conv.id);
+        } else {
+          await this.scheduleTimers(
+            conv.id,
+            conv.site ?? undefined,
+            conv.lastActivityAt ?? conv.createdAt ?? undefined,
+            conv.handlingStatus,
+          );
+        }
+      }
+
+      if (timeoutIds.length > 0) {
+        await this.conversationRepository.update(
+          { id: In(timeoutIds) },
+          {
+            status: ConversationStatus.CLOSED,
+            closedReason: ClosedReason.TIMEOUT,
+          },
+        );
+        this.logger.log(
+          `Startup cleanup: Auto-closed ${timeoutIds.length} conversation(s) with TIMEOUT reason.`,
+        );
+      }
+
+      if (errorIds.length > 0) {
+        await this.conversationRepository.update(
+          { id: In(errorIds) },
+          {
+            status: ConversationStatus.CLOSED,
+            closedReason: ClosedReason.ERROR,
+          },
+        );
+        this.logger.warn(
+          `Startup cleanup: Auto-closed ${errorIds.length} conversation(s) with ERROR reason due to server downtime (> 60s).`,
         );
       }
     } catch (error) {
-      this.logger.error('Failed to recover active conversation timers:', error);
+      this.logger.error(
+        'Failed to resume lingering conversations on startup:',
+        error,
+      );
     }
   }
 
@@ -84,12 +134,12 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
   /**
    * Schedule countdown timers (warning and timeout) for a conversation.
    */
-  scheduleTimers(
+  async scheduleTimers(
     conversationId: string,
     site?: Site,
     lastActivityAt?: Date,
     handlingStatus?: HandlingStatus,
-  ) {
+  ): Promise<void> {
     this.clearTimerHandles(conversationId);
 
     if (!site || !site.enableConversationTimeout) {
@@ -139,7 +189,7 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(
         `Conversation ${conversationId} has already timed out. Triggering close immediately.`,
       );
-      void this.triggerTimeout(conversationId, site);
+      await this.triggerTimeout(conversationId, site);
       return;
     }
 

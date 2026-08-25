@@ -41,6 +41,7 @@ describe('ChatService saveMessage', () => {
       resetTimer: jest.fn(),
       cancelTimer: jest.fn(),
       pauseTimer: jest.fn(),
+      onModuleDestroy: jest.fn(),
     };
     const emailQueueService = { enqueueConversationSummaryEmail: jest.fn() };
     const aiService = { invoke: jest.fn() };
@@ -73,6 +74,7 @@ describe('ChatService saveMessage', () => {
       chatMessageRepository,
       userRepository,
       jwtService,
+      chatTimeoutService,
     };
   }
 
@@ -229,12 +231,12 @@ describe('ChatService saveMessage', () => {
     it('throws NotFoundException if message is not from AI', async () => {
       const { service, chatMessageRepository } = makeService();
       chatMessageRepository.findOne.mockResolvedValue({
-        id: 'msg-user-1',
-        senderType: SenderType.VISITOR,
+        id: 'msg-agent-1',
+        senderType: SenderType.AGENT,
       });
 
       await expect(
-        service.submitMessageFeedback('msg-user-1', {
+        service.submitMessageFeedback('msg-agent-1', {
           rating: FeedbackRating.UNHELPFUL,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
@@ -471,6 +473,13 @@ describe('ChatService saveMessage', () => {
       );
       expect(result.visitorToken).toBe('mock-signed-visitor-token');
       expect(result.conversationId).toBe('conv-123');
+    });
+  });
+  describe('Server Shutdown Timer Cleanup', () => {
+    it('cleans up all conversation timers on application shutdown', () => {
+      const { service, chatTimeoutService } = makeService();
+      service.beforeApplicationShutdown('SIGTERM');
+      expect(chatTimeoutService.onModuleDestroy).toHaveBeenCalled();
     });
   });
 });

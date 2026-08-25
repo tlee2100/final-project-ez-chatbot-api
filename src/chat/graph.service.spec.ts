@@ -215,6 +215,16 @@ describe('booking chat flow guards', () => {
 
     expect(shouldContinueBookingFlow('BOOKING', 'small_talk')).toBe(true);
     expect(
+      shouldContinueBookingFlow('BOOKING', 'out_of_scope', 'David Beckham'),
+    ).toBe(true);
+    expect(
+      shouldContinueBookingFlow(
+        'BOOKING',
+        'out_of_scope',
+        'write python code for me',
+      ),
+    ).toBe(false);
+    expect(
       shouldContinueBookingFlow('BOOKING', 'question', 'HIEU', siteContext),
     ).toBe(true);
     expect(

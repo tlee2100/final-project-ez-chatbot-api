@@ -244,6 +244,14 @@ export const shouldContinueBookingFlow = (
 ) => {
   if (activeFlow !== 'BOOKING') return false;
   if (classifiedIntent === 'small_talk') return true;
+  if (classifiedIntent === 'out_of_scope') {
+    const trimmed = userText.trim().toLowerCase();
+    const isExplicitOutOfScopeRequest =
+      /(?:write\s+(?:a\s+)?(?:code|program|python|essay|poem|script)|viết\s+(?:code|thơ|văn|bài\s+văn)|dịch\s+(?:hộ|giúp)|translate\s+this|hướng\s+dẫn\s+lập\s+trình|who\s+is\s+|ai\s+là\s+)/i.test(
+        trimmed,
+      );
+    return !isExplicitOutOfScopeRequest;
+  }
   if (classifiedIntent !== 'question') return false;
 
   const value = userText.trim().toLocaleLowerCase();
