@@ -223,6 +223,9 @@ export class GraphService {
         components?: ChatMessageComponent[],
       ): Promise<void> => {
         history.push({ role: 'assistant', content: text });
+        this.logger.log(
+          `🤖 [AI Response (Test Session)] [Conv: ${conversationId}] [Locale: ${locale ?? 'auto'}]\n${text}`,
+        );
         this.chatGateway.server
           .to(`conversation-${conversationId}`)
           .emit('newMessage', {
@@ -346,6 +349,18 @@ export class GraphService {
       locale?: string,
       components?: ChatMessageComponent[],
     ) => {
+      const cleanDisplayContent = text
+        .replace(/\s*\[cancel:[^\]]+\]/g, '')
+        .replace(/<booking-code>.*?<\/booking-code>/g, '')
+        .replace(/<booking-cancelled>.*?<\/booking-cancelled>/g, '')
+        .trim();
+
+      const finalContent = cleanDisplayContent || text;
+
+      this.logger.log(
+        `🤖 [AI Response] [Conv: ${conversationId}] [Site: ${siteId}] [Locale: ${locale ?? 'auto'}] [Components: ${components?.length ?? 0}]\n${finalContent}`,
+      );
+
       const savedMessage = await this.chatService.saveMessage(
         conversationId,
         text,
@@ -355,18 +370,12 @@ export class GraphService {
         components,
       );
 
-      const cleanDisplayContent = text
-        .replace(/\s*\[cancel:[^\]]+\]/g, '')
-        .replace(/<booking-code>.*?<\/booking-code>/g, '')
-        .replace(/<booking-cancelled>.*?<\/booking-cancelled>/g, '')
-        .trim();
-
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
         .emit('newMessage', {
           id: savedMessage.id,
           conversationId,
-          content: cleanDisplayContent || text,
+          content: finalContent,
           senderType: 'AI',
           createdAt: savedMessage.createdAt,
           locale: savedMessage.locale ?? locale,
@@ -499,8 +508,13 @@ export class GraphService {
         },
         res,
         server: this.chatGateway.server,
-        onFinish: async () => {},
-        onRequestHandoff: async () => {},
+        onFinish: (text: string) => {
+          this.logger.log(
+            `🤖 [AI Response (Admin Test Stream)] [Site: ${site.id}] [Conv: ${dummyConversationId}]\n${text}`,
+          );
+          return Promise.resolve();
+        },
+        onRequestHandoff: () => Promise.resolve(),
         sentimentDetection: false,
       });
     } catch (err) {
@@ -1175,8 +1189,9 @@ export class GraphService {
       const summarizeMemory = (state: typeof AgentState.State) => {
         if (state.messages.length <= SUMMARIZE_THRESHOLD) return {};
 
+        const startIndex = Math.max(0, state.messages.length - 22);
         const messagesToSummarize = state.messages.slice(
-          0,
+          startIndex,
           state.messages.length - 2,
         );
 
@@ -1460,6 +1475,10 @@ export class GraphService {
             conversationId,
           });
         }
+
+        this.logger.log(
+          `🤖 [Graph AI Final Response] [Conv: ${conversationId}] [Intent: ${finalState.intent}] [Locale: ${detectedLang}]\n${decoratedText}`,
+        );
 
         await onFinish(
           decoratedText,

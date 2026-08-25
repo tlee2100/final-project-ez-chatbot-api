@@ -131,8 +131,8 @@ export class BookingService {
     siteId: string,
     resourceId: string | null,
     serviceId: string | null,
-    startDate: string,
-    endDate: string,
+    startDate?: string,
+    endDate?: string,
   ) {
     const site = await this.siteService.findOneEntity(siteId);
     if (!site.bookingEnabled) {
@@ -144,44 +144,62 @@ export class BookingService {
       throw new NotFoundException('Site booking configuration not found');
     }
 
-    const { startBoundary, endBoundary } = this.resolveTimeBoundaries(
-      startDate,
-      endDate,
-      config.bookingTimezone || 'UTC',
-    );
+    const { startBoundary, endBoundary, requestedDates } =
+      this.resolveTimeBoundaries(
+        startDate || format(new Date(), 'yyyy-MM-dd'),
+        endDate || startDate || format(new Date(), 'yyyy-MM-dd'),
+        config.bookingTimezone || 'UTC',
+      );
+
+    const rawResourceIds = resourceId
+      ? resourceId
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean)
+      : [];
+
+    const isSingleResource = rawResourceIds.length === 1;
+    const isMultiResource = rawResourceIds.length > 1;
+    const singleResourceId = isSingleResource ? rawResourceIds[0] : null;
 
     let allResources: BookingResource[] = [];
-    if (!resourceId) {
-      allResources = await this.resourceRepository.find({ where: { siteId } });
+    if (!isSingleResource) {
+      const siteResources = await this.resourceRepository.find({
+        where: { siteId },
+      });
+      allResources = isMultiResource
+        ? siteResources.filter((r) => rawResourceIds.includes(r.id))
+        : siteResources;
     }
 
     const bookings = await this.fetchConfirmedBookings(
       siteId,
       startBoundary,
       endBoundary,
-      resourceId,
+      rawResourceIds,
     );
     const blockouts = await this.fetchBlockouts(
       siteId,
       startBoundary,
       endBoundary,
-      resourceId,
+      rawResourceIds,
     );
     const slotTimes = this.generateSlotTimeBlocks(
       config,
       startBoundary,
       endBoundary,
+      requestedDates,
     );
     const redisMap = await this.getHoldStatusFromRedis(
       siteId,
-      resourceId,
+      singleResourceId,
       allResources,
       slotTimes,
     );
 
     return this.evaluateSlotAvailability(
       siteId,
-      resourceId,
+      singleResourceId,
       allResources,
       bookings,
       blockouts,
@@ -194,7 +212,7 @@ export class BookingService {
     siteId: string,
     startBoundary: Date,
     endBoundary: Date,
-    resourceId?: string | null,
+    resourceIds: string[] = [],
   ) {
     const query = this.blockoutRepository
       .createQueryBuilder('b')
@@ -202,10 +220,17 @@ export class BookingService {
       .andWhere('b.endAt >= :startBoundary', { startBoundary })
       .andWhere('b.startAt <= :endBoundary', { endBoundary });
 
-    if (resourceId) {
+    if (resourceIds.length === 1) {
       query.andWhere('(b.resourceId IS NULL OR b.resourceId = :resourceId)', {
-        resourceId,
+        resourceId: resourceIds[0],
       });
+    } else if (resourceIds.length > 1) {
+      query.andWhere(
+        '(b.resourceId IS NULL OR b.resourceId IN (:...resourceIds))',
+        {
+          resourceIds,
+        },
+      );
     }
 
     return query.getMany();
@@ -216,23 +241,38 @@ export class BookingService {
     endDate: string,
     timezone: string,
   ) {
-    const requestedStart = parseISO(startDate);
+    const startDates = startDate
+      .split(',')
+      .map((d) => d.trim())
+      .filter(Boolean);
+    const endDates = endDate
+      .split(',')
+      .map((d) => d.trim())
+      .filter(Boolean);
+
+    const allDateStrs = Array.from(
+      new Set([...startDates, ...endDates]),
+    ).sort();
+    const minDateStr = allDateStrs[0] || format(new Date(), 'yyyy-MM-dd');
+    const maxDateStr = allDateStrs[allDateStrs.length - 1] || minDateStr;
+
+    const requestedStart = parseISO(minDateStr);
     const todayInSiteTimezone = formatInTimeZone(
       new Date(),
       timezone,
       'yyyy-MM-dd',
     );
     const startBoundary =
-      startDate === todayInSiteTimezone ? new Date() : requestedStart;
-    const endBoundary = endOfDay(parseISO(endDate));
-    return { startBoundary, endBoundary };
+      minDateStr === todayInSiteTimezone ? new Date() : requestedStart;
+    const endBoundary = endOfDay(parseISO(maxDateStr));
+    return { startBoundary, endBoundary, requestedDates: allDateStrs };
   }
 
   private async fetchConfirmedBookings(
     siteId: string,
     startBoundary: Date,
     endBoundary: Date,
-    resourceId?: string | null,
+    resourceIds: string[] = [],
   ) {
     const bookingsQuery = this.bookingRepository
       .createQueryBuilder('booking')
@@ -243,11 +283,15 @@ export class BookingService {
       .andWhere('booking.endAt >= :startBoundary', { startBoundary })
       .andWhere('booking.startAt <= :endBoundary', { endBoundary });
 
-    if (resourceId) {
+    if (resourceIds.length === 1) {
       bookingsQuery.andWhere(
         'COALESCE("booking"."resourceId"::text, \'___NULL___\') = COALESCE(:resourceId::text, \'___NULL___\')',
-        { resourceId },
+        { resourceId: resourceIds[0] },
       );
+    } else if (resourceIds.length > 1) {
+      bookingsQuery.andWhere('booking.resourceId IN (:...resourceIds)', {
+        resourceIds,
+      });
     }
 
     return bookingsQuery.getMany();
@@ -257,6 +301,7 @@ export class BookingService {
     config: SiteBookingConfig,
     startBoundary: Date,
     endBoundary: Date,
+    requestedDates?: string[],
   ) {
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
@@ -271,8 +316,14 @@ export class BookingService {
 
     while (!isAfter(currentDay, endBoundary)) {
       const dayOfWeek = getDay(currentDay) === 0 ? 7 : getDay(currentDay);
-      if (config.bookingAvailableDays.includes(dayOfWeek)) {
-        const dateStr = format(currentDay, 'yyyy-MM-dd');
+      const dateStr = format(currentDay, 'yyyy-MM-dd');
+
+      if (
+        config.bookingAvailableDays.includes(dayOfWeek) &&
+        (!requestedDates ||
+          requestedDates.length === 0 ||
+          requestedDates.includes(dateStr))
+      ) {
         const dayStartTimeStr = `${dateStr}T${config.bookingStartTime}:00`;
         const dayEndTimeStr = `${dateStr}T${config.bookingEndTime}:00`;
 
