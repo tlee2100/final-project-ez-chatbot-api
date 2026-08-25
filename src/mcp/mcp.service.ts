@@ -8,7 +8,7 @@ import {
 import { randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import { Document } from '../document/entities/document.entity';
 import { DocumentStatus } from '../document/enums/document-status.enum';
 import { KnowledgeRetrievalService } from '../document/retrieval/knowledge-retrieval.service';
@@ -20,6 +20,7 @@ import type {
   AvailableSlot,
   BookingResult,
   CreateBookingPayload,
+  McpUserDetailsResult,
   SiteConfigBookingHours,
   SiteConfigResourceItem,
   SiteConfigServiceItem,
@@ -130,39 +131,65 @@ export class McpService {
 
   /**
    * MCP / getUserDetails backend:
-   * Returns non-sensitive user profile details by email.
+   * Returns non-sensitive user profile details by email, scoped to the given siteId.
+   * Returns null if the user does not belong to the site.
+   *
+   * A user belongs to a site if they are:
+   * (A) the site owner  (site.ownerId = user.id)
+   * (B) an assigned agent (site_agents join table)
+   * (C) in the same organization (user.organizationId = site.organizationId)
    */
-  async getUserDetails(siteId: string, email: string) {
-    this.logger.log(`[MCP] getUserDetails: siteId=${siteId}, email=${email}`);
-
-    const user = await this.userRepository.findOne({
-      where: { email },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        avatarUrl: true,
-      },
+  async getUserDetails(
+    siteId: string,
+    email: string,
+  ): Promise<McpUserDetailsResult | null> {
+    this.logger.log({
+      event: 'mcp_get_user_details',
+      siteId,
+      emailDomain: email.split('@')[1] ?? 'unknown',
     });
 
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .innerJoin('sites', 'site', 'site.id = :siteId', { siteId })
+      .leftJoin(
+        'site_agents',
+        'sa',
+        'sa."agentId" = user.id AND sa."siteId" = :siteId',
+        { siteId },
+      )
+      .where('user.email = :email', { email })
+      .andWhere(
+        new Brackets((qb) =>
+          qb
+            .where('user.id = site."ownerId"')
+            .orWhere('sa."agentId" IS NOT NULL')
+            .orWhere(
+              'user."organizationId" IS NOT NULL AND user."organizationId" = site."organizationId"',
+            ),
+        ),
+      )
+      .select([
+        'user.id',
+        'user.name',
+        'user.email',
+        'user.phone',
+        'user.role',
+        'user.avatarUrl',
+      ])
+      .getOne();
+
     if (!user) {
-      return {
-        email,
-        name: 'Guest Visitor',
-        role: 'VISITOR',
-        phone: null,
-      };
+      return null;
     }
 
     return {
       id: user.id,
       name: user.name,
       email: user.email,
-      phone: user.phone,
+      phone: user.phone ?? null,
       role: user.role,
-      avatarUrl: user.avatarUrl,
+      avatarUrl: user.avatarUrl ?? null,
     };
   }
 

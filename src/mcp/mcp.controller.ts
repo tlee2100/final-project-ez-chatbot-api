@@ -91,7 +91,16 @@ export class McpController {
     @Query('email') email: string,
     @McpContext() context: McpValidatedContext,
   ) {
-    return this.mcpService.getUserDetails(context.siteId, email);
+    const result = await this.mcpService.getUserDetails(context.siteId, email);
+    // Không reveal thông tin tenant khác — trả về guest profile an toàn
+    return (
+      result ?? {
+        email,
+        name: 'Guest Visitor',
+        role: 'VISITOR',
+        phone: null,
+      }
+    );
   }
 
   /**
