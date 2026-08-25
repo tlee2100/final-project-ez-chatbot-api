@@ -756,7 +756,7 @@ export class SiteService {
       site.customBaseUrl,
       process.env.DEEPSEEK_BASE_URL,
       process.env.OPENAI_BASE_URL,
-      'https://api.openai.com/v1',
+      'https://api.ai-box.vn/v1',
     ].filter((url): url is string => Boolean(url && url.trim()));
 
     const uniqueBaseUrls = Array.from(new Set(candidateBaseUrls));
@@ -923,7 +923,7 @@ export class SiteService {
       site.customBaseUrl ||
       process.env.DEEPSEEK_BASE_URL ||
       process.env.OPENAI_BASE_URL ||
-      'https://api.openai.com/v1';
+      'https://api.ai-box.vn/v1';
 
     const targetModel =
       candidateData?.llmModel?.trim() || site.llmModel || 'qwen3.7-flash';
