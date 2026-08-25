@@ -22,7 +22,7 @@ export class SiteProfile extends AutomapperProfile {
         ),
         forMember(
           (d) => d.hasCustomApiKey,
-          mapFrom((s) => Boolean(s.encryptedOpenAiKey)),
+          mapFrom((s) => Boolean(s.keyMask || s.encryptedOpenAiKey)),
         ),
         forMember(
           (d) => d.customKeyStatus,

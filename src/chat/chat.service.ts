@@ -37,6 +37,7 @@ import {
 } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import { CloseConversationResponseDto } from './dto/close-conversation-response.dto';
 import {
   SubmitMessageFeedbackDto,
   MessageFeedbackResponseDto,
@@ -1454,7 +1455,7 @@ export class ChatService {
   async updatePublicConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
-  ): Promise<Conversation> {
+  ): Promise<CloseConversationResponseDto> {
     if (!id.startsWith('admin-test-')) {
       const conversation = await this.conversationRepository.findOne({
         where: { id },
@@ -1467,12 +1468,20 @@ export class ChatService {
         throw new ForbiddenException('siteId does not match conversation');
       }
     }
-    return this.updateStatusAndNotify(
+    const updated = await this.updateStatusAndNotify(
       id,
       dto.status,
       dto.reason || ClosedReason.VISITOR,
       dto.transcriptEmail,
     );
+
+    return {
+      conversationId: updated.id,
+      status: updated.status,
+      handlingStatus: updated.handlingStatus,
+      closedReason: updated.closedReason,
+      updatedAt: updated.updatedAt,
+    };
   }
 
   async getPublicConversationStatus(id: string) {
@@ -1584,7 +1593,19 @@ export class ChatService {
     agentId?: string,
     locale?: string,
     components?: Record<string, unknown>[],
+    tokenCount?: number,
   ): Promise<ChatMessage> {
+    // Only AI messages consume LLM tokens. Visitor and Agent messages have 0 tokens.
+    let calculatedTokens = 0;
+    if (senderType === SenderType.AI) {
+      calculatedTokens =
+        tokenCount !== undefined && tokenCount !== null
+          ? tokenCount
+          : content
+            ? Math.max(1, Math.ceil(content.length / 4))
+            : 0;
+    }
+
     if (conversationId.startsWith('admin-test-')) {
       return {
         id: `test-msg-${Date.now()}`,
@@ -1594,6 +1615,7 @@ export class ChatService {
         agentId: agentId ?? null,
         status: MessageStatus.SENT,
         createdAt: new Date(),
+        tokenCount: calculatedTokens,
       } as ChatMessage;
     }
     const conversation = await this.getConversationById(conversationId);
@@ -1608,6 +1630,7 @@ export class ChatService {
       agentId: agentId ?? null,
       locale: locale ?? null,
       components: components ?? null,
+      tokenCount: calculatedTokens,
     });
 
     console.log(`Message::: ${JSON.stringify(message)}`);
@@ -1753,7 +1776,10 @@ export class ChatService {
       void this.sendCloseEmails(conversation, transcriptEmail);
     }
 
-    return this.getConversationById(id);
+    const updated = await this.conversationRepository.findOne({
+      where: { id },
+    });
+    return updated ?? conversation;
   }
 
   /** Background job: generate AI summary then enqueue summary + transcript emails. */

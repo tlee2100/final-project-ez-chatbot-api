@@ -77,6 +77,9 @@ export class ChatMessage {
   @Column({ type: 'timestamptz', nullable: true, default: null })
   feedbackAt: Date | null;
 
+  @Column({ type: 'integer', nullable: true, default: 0 })
+  tokenCount: number | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

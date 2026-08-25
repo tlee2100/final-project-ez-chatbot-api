@@ -208,18 +208,18 @@ export class SiteService {
 
   // ── Find One Site Entity (Internal) ──
   async findOneEntity(id: string): Promise<Site> {
-    const site = await this.siteRepository.findOne({
-      where: { id },
-      relations: {
-        owner: true,
-        agents: true,
-        documents: true,
-        bookingConfig: true,
-        bookingServices: true,
-        bookingResources: true,
-        industryTemplateInfo: true,
-      },
-    });
+    const site = await this.siteRepository
+      .createQueryBuilder('site')
+      .addSelect(['site.encryptedOpenAiKey', 'site.systemPromptOverride'])
+      .leftJoinAndSelect('site.owner', 'owner')
+      .leftJoinAndSelect('site.agents', 'agents')
+      .leftJoinAndSelect('site.documents', 'documents')
+      .leftJoinAndSelect('site.bookingConfig', 'bookingConfig')
+      .leftJoinAndSelect('site.bookingServices', 'bookingServices')
+      .leftJoinAndSelect('site.bookingResources', 'bookingResources')
+      .leftJoinAndSelect('site.industryTemplateInfo', 'industryTemplateInfo')
+      .where('site.id = :id', { id })
+      .getOne();
     if (!site) {
       throw new NotFoundException(`Site with id ${id} not found`);
     }

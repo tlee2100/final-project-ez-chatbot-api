@@ -8,13 +8,25 @@ import {
 import {
   ChatMessage,
   FeedbackRating,
+  SenderType,
 } from '../chat/entities/chat-message.entity';
 import { Site } from '../site/entities/site.entity';
 import { User } from '../user/entities/user.entity';
 import { Organization } from '../organization/entities/organization.entity';
+import { Document } from '../document/entities/document.entity';
+import { DocumentChunk } from '../document/entities/document-chunk.entity';
 import { UserRole } from '../user/enums/user-role.enum';
 import type { JwtUser } from '../auth/types/jwt-user.type';
-import { DashboardAnalyticsDto } from './dto/analytics-dashboard.dto';
+import {
+  DashboardAnalyticsDto,
+  ChatActivityPointDto,
+} from './dto/analytics-dashboard.dto';
+
+function formatTokens(t: number): string {
+  if (t >= 1_000_000) return `${(t / 1_000_000).toFixed(1)}M`;
+  if (t >= 1_000) return `${(t / 1_000).toFixed(1)}K`;
+  return t.toString();
+}
 
 @Injectable()
 export class AnalyticsService {
@@ -29,20 +41,38 @@ export class AnalyticsService {
     private readonly userRepo: Repository<User>,
     @InjectRepository(Organization)
     private readonly orgRepo: Repository<Organization>,
+    @InjectRepository(Document)
+    private readonly documentRepo: Repository<Document>,
+    @InjectRepository(DocumentChunk)
+    private readonly documentChunkRepo: Repository<DocumentChunk>,
   ) {}
 
-  async getDashboardAnalytics(user: JwtUser): Promise<DashboardAnalyticsDto> {
+  async getDashboardAnalytics(
+    user: JwtUser,
+    startDateStr?: string,
+    endDateStr?: string,
+  ): Promise<DashboardAnalyticsDto> {
     const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
+    const isAgent = user.role === UserRole.AGENT;
     const orgId = user.organizationId;
 
-    // 1. Get site IDs within scope
+    // 1. Get site IDs within scope based on User Role
     let siteIds: string[] = [];
     if (isSuperAdmin) {
       const sites = await this.siteRepo.find({ select: { id: true } });
       siteIds = sites.map((s) => s.id);
+    } else if (isAgent) {
+      const assignedSites = await this.siteRepo
+        .createQueryBuilder('site')
+        .innerJoin('site.agents', 'agent', 'agent.id = :userId', {
+          userId: user.id,
+        })
+        .select('site.id')
+        .getMany();
+      siteIds = assignedSites.map((s) => s.id);
     } else if (orgId) {
       const sites = await this.siteRepo.find({
-        where: { organizationId: orgId },
+        where: [{ organizationId: orgId }, { ownerId: user.id }],
         select: { id: true },
       });
       siteIds = sites.map((s) => s.id);
@@ -55,12 +85,22 @@ export class AnalyticsService {
     if (isSuperAdmin) {
       totalSites = await this.siteRepo.count();
       activeSites = await this.siteRepo.count({ where: { isAiActive: true } });
+    } else if (isAgent) {
+      totalSites = siteIds.length;
+      if (siteIds.length > 0) {
+        activeSites = await this.siteRepo.count({
+          where: { id: In(siteIds), isAiActive: true },
+        });
+      }
     } else if (orgId) {
       totalSites = await this.siteRepo.count({
-        where: { organizationId: orgId },
+        where: [{ organizationId: orgId }, { ownerId: user.id }],
       });
       activeSites = await this.siteRepo.count({
-        where: { organizationId: orgId, isAiActive: true },
+        where: [
+          { organizationId: orgId, isAiActive: true },
+          { ownerId: user.id, isAiActive: true },
+        ],
       });
     }
 
@@ -85,6 +125,8 @@ export class AnalyticsService {
       totalAgents = await this.userRepo.count({
         where: { role: UserRole.AGENT },
       });
+    } else if (isAgent) {
+      totalAgents = 1;
     } else if (orgId) {
       totalAgents = await this.userRepo.count({
         where: { organizationId: orgId, role: UserRole.AGENT },
@@ -161,27 +203,359 @@ export class AnalyticsService {
       agentHandoff = 100 - aiResolved;
     }
 
-    // 6. Build Daily Activity from real data or fallback trend
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const dailyActivity = days.map((label, idx) => ({
-      label,
-      value: Math.max(Math.floor(totalChats / 7) + (idx % 3) * 5, 0),
-    }));
+    // 6. Real Avg Agent Response Time calculation (Only human Agent responses, paired with latest visitor message)
+    let avgResponseTime = 'N/A';
+    if (siteIds.length > 0) {
+      try {
+        const resTimeRaw = await this.chatMessageRepo.manager.query<
+          { avgDiff: string | null }[]
+        >(
+          `SELECT AVG(EXTRACT(EPOCH FROM (agent."createdAt" - (
+             SELECT MAX(v."createdAt")
+             FROM chat_messages v
+             WHERE v."conversationId" = agent."conversationId"
+               AND v."senderType" = $1
+               AND v."createdAt" < agent."createdAt"
+               AND v."createdAt" >= agent."createdAt" - INTERVAL '1 hour'
+           )))) AS "avgDiff"
+           FROM chat_messages agent
+           INNER JOIN conversations c ON c.id = agent."conversationId"
+           WHERE c."siteId" = ANY($2)
+             AND agent."senderType" = $3`,
+          [SenderType.VISITOR, siteIds, SenderType.AGENT],
+        );
 
-    const weeklyActivity = [
-      { label: 'Week 1', value: Math.floor(totalChats * 0.2) },
-      { label: 'Week 2', value: Math.floor(totalChats * 0.25) },
-      { label: 'Week 3', value: Math.floor(totalChats * 0.23) },
-      { label: 'Week 4', value: Math.floor(totalChats * 0.32) },
+        const diffStr = resTimeRaw?.[0]?.avgDiff;
+        if (diffStr) {
+          const sec = parseFloat(diffStr);
+          if (!isNaN(sec) && sec > 0) {
+            if (sec >= 60) {
+              const mins = Math.floor(sec / 60);
+              const remainingSec = Math.round(sec % 60);
+              avgResponseTime =
+                remainingSec > 0 ? `${mins}m ${remainingSec}s` : `${mins}m`;
+            } else {
+              avgResponseTime = `${Math.round(sec)}s`;
+            }
+          }
+        }
+      } catch {
+        // Fallback default
+      }
+    }
+
+    // 7. Real Token Usage calculation (only AI messages consume LLM tokens)
+    let totalTokens = 0;
+    if (siteIds.length > 0) {
+      const tokenSumRaw = await this.chatMessageRepo
+        .createQueryBuilder('m')
+        .innerJoin('m.conversation', 'c')
+        .select('SUM(COALESCE(m.tokenCount, 0))', 'total')
+        .where('c.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('m.senderType = :aiSender', { aiSender: SenderType.AI })
+        .getRawOne<{ total: string | null }>();
+
+      totalTokens = parseInt(tokenSumRaw?.total || '0', 10) || 0;
+    }
+    const estimatedCost = Number(((totalTokens / 1000) * 0.02).toFixed(2));
+
+    // 8. Real Chat Activity & Token Activity Groupings (Daily, Weekly, Monthly)
+    const dailyActivity: ChatActivityPointDto[] = [];
+    const dailyTokenActivity: ChatActivityPointDto[] = [];
+
+    const now = new Date();
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    let startDateObj: Date;
+    let endDateObj: Date;
+    let isCustomRange = false;
+
+    if (startDateStr && endDateStr) {
+      isCustomRange = true;
+      startDateObj = new Date(startDateStr + 'T00:00:00.000Z');
+      endDateObj = new Date(endDateStr + 'T23:59:59.999Z');
+    } else {
+      startDateObj = new Date();
+      startDateObj.setDate(startDateObj.getDate() - 6);
+      startDateObj.setHours(0, 0, 0, 0);
+      endDateObj = new Date();
+    }
+
+    const dailyChatMap: Record<string, number> = {};
+    const dailyTokenMap: Record<string, number> = {};
+
+    if (siteIds.length > 0) {
+      const dailyChatRows = await this.conversationRepo
+        .createQueryBuilder('c')
+        .select("TO_CHAR(c.createdAt, 'YYYY-MM-DD')", 'dayStr')
+        .addSelect('COUNT(c.id)', 'count')
+        .where('c.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('c.createdAt >= :startDate', { startDate: startDateObj })
+        .andWhere('c.createdAt <= :endDate', { endDate: endDateObj })
+        .groupBy("TO_CHAR(c.createdAt, 'YYYY-MM-DD')")
+        .getRawMany<{ dayStr: string; count: string }>();
+
+      for (const row of dailyChatRows) {
+        dailyChatMap[row.dayStr] = parseInt(row.count, 10) || 0;
+      }
+
+      const dailyTokenRows = await this.chatMessageRepo
+        .createQueryBuilder('m')
+        .innerJoin('m.conversation', 'c')
+        .select("TO_CHAR(m.createdAt, 'YYYY-MM-DD')", 'dayStr')
+        .addSelect('SUM(COALESCE(m.tokenCount, 0))', 'tokenSum')
+        .where('c.siteId IN (:...siteIds)', { siteIds })
+        .andWhere('m.senderType = :aiSender', { aiSender: SenderType.AI })
+        .andWhere('m.createdAt >= :startDate', { startDate: startDateObj })
+        .andWhere('m.createdAt <= :endDate', { endDate: endDateObj })
+        .groupBy("TO_CHAR(m.createdAt, 'YYYY-MM-DD')")
+        .getRawMany<{ dayStr: string; tokenSum: string }>();
+
+      for (const row of dailyTokenRows) {
+        dailyTokenMap[row.dayStr] = parseInt(row.tokenSum, 10) || 0;
+      }
+    }
+
+    if (isCustomRange) {
+      const curr = new Date(startDateObj);
+      while (curr <= endDateObj) {
+        const dayStr = curr.toISOString().slice(0, 10);
+        const dayOfMonth = curr.getUTCDate();
+        const monthNum = curr.getUTCMonth() + 1;
+        const label = `${dayOfMonth < 10 ? '0' : ''}${dayOfMonth}/${monthNum < 10 ? '0' : ''}${monthNum}`;
+
+        dailyActivity.push({
+          label,
+          value: dailyChatMap[dayStr] || 0,
+        });
+
+        dailyTokenActivity.push({
+          label,
+          value: dailyTokenMap[dayStr] || 0,
+        });
+
+        curr.setUTCDate(curr.getUTCDate() + 1);
+      }
+    } else {
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(now.getDate() - i);
+        const dayStr = d.toISOString().slice(0, 10);
+        const label = dayNames[d.getDay()];
+
+        dailyActivity.push({
+          label,
+          value: dailyChatMap[dayStr] || 0,
+        });
+
+        dailyTokenActivity.push({
+          label,
+          value: dailyTokenMap[dayStr] || 0,
+        });
+      }
+    }
+
+    // 8.2 Weekly (last 4 weeks)
+    const weeklyActivity: ChatActivityPointDto[] = [];
+    const weeklyTokenActivity: ChatActivityPointDto[] = [];
+
+    for (let w = 3; w >= 0; w--) {
+      const weekLabel = `Week ${4 - w}`;
+      const startW = new Date();
+      startW.setDate(now.getDate() - (w + 1) * 7);
+      const endW = new Date();
+      endW.setDate(now.getDate() - w * 7);
+
+      let wChatCount = 0;
+      let wTokenCount = 0;
+
+      if (siteIds.length > 0) {
+        wChatCount = await this.conversationRepo
+          .createQueryBuilder('c')
+          .where('c.siteId IN (:...siteIds)', { siteIds })
+          .andWhere('c.createdAt >= :startW AND c.createdAt < :endW', {
+            startW,
+            endW,
+          })
+          .getCount();
+
+        const wTokenRaw = await this.chatMessageRepo
+          .createQueryBuilder('m')
+          .innerJoin('m.conversation', 'c')
+          .select('SUM(COALESCE(m.tokenCount, 0))', 'sum')
+          .where('c.siteId IN (:...siteIds)', { siteIds })
+          .andWhere('m.senderType = :aiSender', { aiSender: SenderType.AI })
+          .andWhere('m.createdAt >= :startW AND m.createdAt < :endW', {
+            startW,
+            endW,
+          })
+          .getRawOne<{ sum: string | null }>();
+
+        wTokenCount = parseInt(wTokenRaw?.sum || '0', 10) || 0;
+      }
+
+      weeklyActivity.push({ label: weekLabel, value: wChatCount });
+      weeklyTokenActivity.push({ label: weekLabel, value: wTokenCount });
+    }
+
+    // 8.3 Monthly (last 6 months)
+    const monthNames = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
+    const monthlyActivity: ChatActivityPointDto[] = [];
+    const monthlyTokenActivity: ChatActivityPointDto[] = [];
 
-    const monthlyActivity = [
-      { label: 'May', value: Math.floor(totalChats * 0.8) },
-      { label: 'Jun', value: Math.floor(totalChats * 0.9) },
-      { label: 'Jul', value: totalChats },
-    ];
+    for (let m = 5; m >= 0; m--) {
+      const targetDate = new Date(now.getFullYear(), now.getMonth() - m, 1);
+      const nextMonthDate = new Date(
+        now.getFullYear(),
+        now.getMonth() - m + 1,
+        1,
+      );
+      const label = monthNames[targetDate.getMonth()];
 
-    // 7. Map Recent Activity
+      let mChatCount = 0;
+      let mTokenCount = 0;
+
+      if (siteIds.length > 0) {
+        mChatCount = await this.conversationRepo
+          .createQueryBuilder('c')
+          .where('c.siteId IN (:...siteIds)', { siteIds })
+          .andWhere(
+            'c.createdAt >= :targetDate AND c.createdAt < :nextMonthDate',
+            {
+              targetDate,
+              nextMonthDate,
+            },
+          )
+          .getCount();
+
+        const mTokenRaw = await this.chatMessageRepo
+          .createQueryBuilder('m')
+          .innerJoin('m.conversation', 'c')
+          .select('SUM(COALESCE(m.tokenCount, 0))', 'sum')
+          .where('c.siteId IN (:...siteIds)', { siteIds })
+          .andWhere('m.senderType = :aiSender', { aiSender: SenderType.AI })
+          .andWhere(
+            'm.createdAt >= :targetDate AND m.createdAt < :nextMonthDate',
+            {
+              targetDate,
+              nextMonthDate,
+            },
+          )
+          .getRawOne<{ sum: string | null }>();
+
+        mTokenCount = parseInt(mTokenRaw?.sum || '0', 10) || 0;
+      }
+
+      monthlyActivity.push({ label, value: mChatCount });
+      monthlyTokenActivity.push({ label, value: mTokenCount });
+    }
+
+    // 9. Real Top Documents from database
+    let topDocuments: Array<{
+      id: string;
+      name: string;
+      siteName: string;
+      hits: number;
+    }> = [];
+    if (siteIds.length > 0) {
+      try {
+        const docs = await this.documentRepo
+          .createQueryBuilder('d')
+          .innerJoin('d.site', 's')
+          .leftJoin('d.chunks', 'dc')
+          .select('d.id', 'id')
+          .addSelect('d.filename', 'name')
+          .addSelect('s.name', 'siteName')
+          .addSelect('COUNT(dc.id)', 'chunkCount')
+          .where('d.siteId IN (:...siteIds)', { siteIds })
+          .groupBy('d.id')
+          .addGroupBy('d.filename')
+          .addGroupBy('s.name')
+          .orderBy('d.uploadedAt', 'DESC')
+          .limit(10)
+          .getRawMany<{
+            id: string;
+            name: string;
+            siteName: string;
+            chunkCount: string;
+          }>();
+
+        topDocuments = docs.map((doc) => ({
+          id: doc.id,
+          name: doc.name,
+          siteName: doc.siteName,
+          hits: Math.max(parseInt(doc.chunkCount, 10) || 1, 1),
+        }));
+      } catch {
+        // Fallback empty
+      }
+    }
+
+    // 10. Real Usage by Site from database
+    let usageBySite: Array<{
+      siteId: string;
+      siteName: string;
+      tokens: number;
+      percentage: number;
+      estimatedCost: string;
+    }> = [];
+    if (siteIds.length > 0) {
+      try {
+        const siteUsageRows = await this.siteRepo
+          .createQueryBuilder('s')
+          .leftJoin('conversations', 'c', 'c.siteId = s.id')
+          .leftJoin(
+            'chat_messages',
+            'm',
+            'm.conversationId = c.id AND m.senderType = :aiSender',
+            { aiSender: SenderType.AI },
+          )
+          .select('s.id', 'siteId')
+          .addSelect('s.name', 'siteName')
+          .addSelect('COALESCE(SUM(m.tokenCount), 0)', 'tokens')
+          .where('s.id IN (:...siteIds)', { siteIds })
+          .groupBy('s.id')
+          .addGroupBy('s.name')
+          .orderBy('"tokens"', 'DESC')
+          .getRawMany<{ siteId: string; siteName: string; tokens: string }>();
+
+        const grandTotal = siteUsageRows.reduce(
+          (acc, row) => acc + (parseInt(row.tokens, 10) || 0),
+          0,
+        );
+
+        usageBySite = siteUsageRows.map((row) => {
+          const siteTokens = parseInt(row.tokens, 10) || 0;
+          const pct =
+            grandTotal > 0 ? Math.round((siteTokens / grandTotal) * 100) : 0;
+          const estCost = `$${((siteTokens / 1000) * 0.02).toFixed(2)}`;
+          return {
+            siteId: row.siteId,
+            siteName: row.siteName,
+            tokens: siteTokens,
+            percentage: pct,
+            estimatedCost: estCost,
+          };
+        });
+      } catch {
+        // Fallback empty
+      }
+    }
+
+    // 11. Map Recent Activity
     const recentActivity = recentConversations.map((conv) => {
       const minutesAgo = Math.max(
         Math.floor((Date.now() - new Date(conv.createdAt).getTime()) / 60000),
@@ -214,8 +588,6 @@ export class AnalyticsService {
           id: 'total-chats',
           title: 'Total Chats',
           value: totalChats.toLocaleString('en-US'),
-          trend: 12,
-          trendDirection: 'up',
           icon: 'message',
           iconColor: '#6366f1',
           iconBg: '#ede9fe',
@@ -225,8 +597,6 @@ export class AnalyticsService {
           id: 'active-sites',
           title: 'Active Sites',
           value: activeSites.toString(),
-          trend: 2,
-          trendDirection: 'up',
           icon: 'global',
           iconColor: '#10b981',
           iconBg: '#d1fae5',
@@ -234,25 +604,21 @@ export class AnalyticsService {
         },
         {
           id: 'avg-response-time',
-          title: 'Avg. Response Time',
-          value: '1.2s',
-          trend: 0.3,
-          trendDirection: 'up',
+          title: 'Agent Response Time',
+          value: avgResponseTime,
           icon: 'clock',
           iconColor: '#f59e0b',
           iconBg: '#fef3c7',
-          isMock: true,
+          isMock: false,
         },
         {
           id: 'token-usage',
           title: 'Token Usage',
-          value: '1.2M',
-          trend: 5,
-          trendDirection: 'up',
+          value: formatTokens(totalTokens),
           icon: 'api',
           iconColor: '#8b5cf6',
           iconBg: '#f3e8ff',
-          isMock: true,
+          isMock: false,
         },
       ],
       totalChats,
@@ -261,6 +627,9 @@ export class AnalyticsService {
       totalOrganizations,
       activeOrganizations,
       totalAgents,
+      totalTokens,
+      avgResponseTime,
+      estimatedCost,
       containmentRate: {
         aiResolved,
         agentHandoff,
@@ -271,18 +640,9 @@ export class AnalyticsService {
         monthly: monthlyActivity,
       },
       tokenUsage: {
-        daily: dailyActivity.map((d) => ({
-          label: d.label,
-          value: d.value * 120,
-        })),
-        weekly: weeklyActivity.map((d) => ({
-          label: d.label,
-          value: d.value * 120,
-        })),
-        monthly: monthlyActivity.map((d) => ({
-          label: d.label,
-          value: d.value * 120,
-        })),
+        daily: dailyTokenActivity,
+        weekly: weeklyTokenActivity,
+        monthly: monthlyTokenActivity,
       },
       userFeedback: [
         { label: 'Helpful', value: helpfulCount, color: '#10b981' },
@@ -302,6 +662,8 @@ export class AnalyticsService {
                 timeAgo: 'Just now',
               },
             ],
+      topDocuments,
+      usageBySite,
     };
   }
 }

@@ -122,7 +122,12 @@ export class Site {
   kbSimilarityThreshold: number;
 
   @AutoMap(() => String)
-  @Column({ name: 'systemPromptOverride', type: 'text', nullable: true })
+  @Column({
+    name: 'systemPromptOverride',
+    type: 'text',
+    nullable: true,
+    select: false,
+  })
   systemPromptOverride: string | null;
 
   @AutoMap()
@@ -276,7 +281,12 @@ export class Site {
    * AES-256-GCM encrypted OpenAI API key. Format: "<iv>:<authTag>:<ciphertext>" (hex).
    * NEVER returned to the client — only decrypted inside the AI proxy layer.
    */
-  @Column({ name: 'encryptedOpenAiKey', type: 'text', nullable: true })
+  @Column({
+    name: 'encryptedOpenAiKey',
+    type: 'text',
+    nullable: true,
+    select: false,
+  })
   encryptedOpenAiKey: string | null;
 
   /**

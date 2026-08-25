@@ -26,7 +26,7 @@ export class AuthService {
   }
 
   async login(loginDto: LoginDto) {
-    const user = await this.userService.findByEmail(loginDto.email);
+    const user = await this.userService.findByEmailWithPassword(loginDto.email);
 
     if (!user) {
       throw new UnauthorizedException('Invalid email or password');
@@ -64,7 +64,7 @@ export class AuthService {
   async refreshToken(token: string) {
     try {
       const payload = this.jwtService.verify<{ sub: string }>(token);
-      const user = await this.userService.findById(payload.sub);
+      const user = await this.userService.findByIdWithRefreshToken(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException('Invalid refresh token');
