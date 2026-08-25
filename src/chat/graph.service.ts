@@ -89,6 +89,11 @@ import {
   type ChatMessageComponent,
 } from './chat-message-components';
 import { buildToolSchema } from './tool-schema.utils';
+import { PageContextService } from './page-context.service';
+import type {
+  RawPageContext,
+  SanitizedPageContext,
+} from './interfaces/page-context.interface';
 // ─── Agent State ──────────────────────────────────────────────────────────────
 
 /** Intent categories the classifier node can assign */
@@ -147,6 +152,10 @@ const AgentState = Annotation.Root({
   visitorContext: Annotation<{ name?: string; email?: string }>({
     reducer: (_, y) => y,
     default: () => ({}),
+  }),
+  pageContext: Annotation<SanitizedPageContext | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined,
   }),
   siteContext: Annotation<{
     name?: string;
@@ -218,6 +227,8 @@ export interface GraphRunOptions {
     name?: string;
     email?: string;
   };
+  /** Sanitized page content for this message only; never persisted or summarized. */
+  pageContext?: SanitizedPageContext;
   /** Site details to provide context to the LLM */
   siteContext?: {
     name?: string;
@@ -325,6 +336,7 @@ export class GraphService {
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
     private readonly notificationService: NotificationService,
+    private readonly pageContextService: PageContextService,
   ) {}
 
   // ─── AI Guard ──────────────────────────────────────────────────────────────
@@ -383,6 +395,7 @@ export class GraphService {
     res?: ExpressResponse,
     onNegativeSentiment?: (text: string) => Promise<void>,
     newTestMessageContent?: string,
+    rawPageContext?: RawPageContext,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
@@ -512,6 +525,18 @@ export class GraphService {
       ),
     ]);
 
+    const pageContextResult = this.pageContextService.sanitize(
+      rawPageContext,
+      site?.allowedDomains ?? [],
+      site?.useCurrentPageContent === true,
+    );
+    const pageContext = pageContextResult.context;
+    if (pageContextResult.reason !== 'not_provided') {
+      this.logger.log(
+        `[Page Context] site=${siteId} conversation=${conversationId} status=${pageContext ? 'accepted' : 'rejected'} reason=${pageContextResult.reason} hostname=${pageContextResult.hostname ?? 'none'} contentLength=${pageContextResult.contentLength}`,
+      );
+    }
+
     const messages: LLMMessage[] = dbMessages.map((m) => ({
       role:
         m.senderType === SenderType.VISITOR
@@ -595,6 +620,7 @@ export class GraphService {
           name: conversation.visitorName ?? undefined,
           email: conversation.visitorEmail ?? undefined,
         },
+        pageContext,
         siteContext: {
           name: site?.name ?? undefined,
           domains: site?.allowedDomains ?? [],
@@ -2472,6 +2498,7 @@ export class GraphService {
           siteId: state.siteId,
           conversationId: state.conversationId,
           visitorContext: state.visitorContext,
+          pageContext: state.pageContext,
           siteContext: promptSiteContext,
           systemPromptOverride: options.systemPromptOverride,
           locale: state.locale,
@@ -2904,6 +2931,7 @@ export class GraphService {
         siteId,
         conversationId,
         visitorContext: options.visitorContext ?? {},
+        pageContext: options.pageContext,
         siteContext: options.siteContext ?? {},
         intent: null,
         locale: resolveEffectiveLocale({

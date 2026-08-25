@@ -18,6 +18,7 @@ import { SenderType } from './entities/chat-message.entity';
 import { Conversation } from './entities/conversation.entity';
 import { NotificationGateway } from '../notification/notification.gateway';
 import { ChatToastPayload } from '../notification/types/chat-toast-payload.type';
+import type { RawPageContext } from './interfaces/page-context.interface';
 
 type JwtPayload = {
   sub: string;
@@ -163,7 +164,7 @@ export class ChatGateway
       content: string;
       senderType: SenderType;
       localId?: string;
-    },
+    } & RawPageContext,
   ): Promise<void> {
     await this.chatService.handleSendMessage(client, payload);
   }

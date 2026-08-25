@@ -17,6 +17,7 @@ import { NotificationModule } from '../notification/notification.module';
 import { SiteModule } from '../site/site.module';
 import { BookingModule } from '../booking/booking.module';
 import { SecurityModule } from '../security/security.module';
+import { PageContextService } from './page-context.service';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { SecurityModule } from '../security/security.module';
     ChatTimeoutService,
     AiService,
     GraphService,
+    PageContextService,
     McpToolProviderFactory,
     {
       provide: TOOL_PROVIDER,

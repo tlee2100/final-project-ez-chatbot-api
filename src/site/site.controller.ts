@@ -121,6 +121,7 @@ export class SiteController {
       isEnabled: site.enabled,
       enabled: site.enabled,
       isAiActive: site.isAiActive,
+      useCurrentPageContent: site.useCurrentPageContent,
       allowedDomains: site.allowedDomains ?? [],
       enableConversationTimeout: site.enableConversationTimeout,
       inactivityTimeoutMinutes: site.inactivityTimeoutMinutes,

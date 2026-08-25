@@ -56,6 +56,7 @@ import { BookingService } from '../booking/booking.service';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
 import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
 import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
+import type { RawPageContext } from './interfaces/page-context.interface';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -74,6 +75,24 @@ type ChatMessageDto = Pick<
   senderName?: string | null;
 };
 const MAX_MESSAGE_LENGTH = 1000;
+
+const pageContextFromPayload = (
+  payload: RawPageContext,
+): RawPageContext | undefined => {
+  if (
+    payload.pageUrl === undefined &&
+    payload.pageTitle === undefined &&
+    payload.pageContent === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    pageUrl: payload.pageUrl,
+    pageTitle: payload.pageTitle,
+    pageContent: payload.pageContent,
+  };
+};
 
 /** In-memory state for WS rate limiting (SEC-005) */
 interface WsRateLimitEntry {
@@ -411,7 +430,7 @@ export class ChatService {
       content: string;
       senderType: SenderType;
       localId?: string;
-    },
+    } & RawPageContext,
   ): Promise<void> {
     const socketData = client.data as SocketData;
     const user = socketData.user;
@@ -532,6 +551,7 @@ export class ChatService {
           undefined,
           undefined,
           payload.content,
+          pageContextFromPayload(payload),
         )
         .catch((err: unknown) =>
           this.logger.error(
@@ -620,6 +640,8 @@ export class ChatService {
                   text,
                 );
               },
+              undefined,
+              pageContextFromPayload(payload),
             )
             .catch((err: unknown) =>
               this.logger.error(
