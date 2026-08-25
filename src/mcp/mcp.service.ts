@@ -426,10 +426,10 @@ export class McpService {
   async holdSlot(
     siteId: string,
     payload: {
-      resourceId: string;
+      resourceId?: string;
       serviceId?: string;
-      date: string;
-      timeSlot: string;
+      date?: string;
+      timeSlot?: string;
       slotCount?: number;
       sessionId?: string;
       conversationId?: string;
@@ -438,6 +438,7 @@ export class McpService {
         date: string;
         timeSlot: string;
         serviceId?: string;
+        notes?: string;
       }>;
     },
   ): Promise<{ sessionId: string }> {
@@ -471,7 +472,7 @@ export class McpService {
           serviceId: slot.serviceId ?? payload.serviceId,
         });
       }
-    } else {
+    } else if (payload.resourceId && payload.date && payload.timeSlot) {
       const slotCount = Math.max(1, payload.slotCount ?? 1);
       const localDateTimeStr = `${payload.date}T${payload.timeSlot}:00`;
       let currStart = fromZonedTime(localDateTimeStr, timezone);
@@ -554,9 +555,11 @@ export class McpService {
     const timezone = config.bookingTimezone || 'UTC';
     const duration = config.bookingSlotDuration || 30;
 
-    const resolvedResourceId =
-      (await this.resolveResourceId(siteId, payload.resourceId)) ||
-      payload.resourceId;
+    const rawResourceId = payload.resourceId || payload.slots?.[0]?.resourceId;
+
+    const resolvedResourceId = rawResourceId
+      ? (await this.resolveResourceId(siteId, rawResourceId)) || rawResourceId
+      : undefined;
 
     if (!resolvedResourceId) {
       throw new BadRequestException(
@@ -677,8 +680,14 @@ export class McpService {
       customerName: booking.customerName,
       customerEmail: booking.customerEmail || payload.customerEmail,
       phone: booking.phone,
-      date: payload.date,
-      timeSlot: payload.timeSlot,
+      date:
+        payload.date ||
+        payload.slots?.[0]?.date ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'yyyy-MM-dd'),
+      timeSlot:
+        payload.timeSlot ||
+        payload.slots?.[0]?.timeSlot ||
+        formatInTimeZone(new Date(booking.startAt), timezone, 'HH:mm'),
       endTimeSlot: formatInTimeZone(new Date(booking.endAt), timezone, 'HH:mm'),
       resourceName,
       serviceId: payload.serviceId,

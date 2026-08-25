@@ -2304,7 +2304,15 @@ export class GraphService {
           }
 
           if (bookingOption.action === 'select_date' && currentProvider) {
-            const selectedDate = bookingOption.value;
+            const rawDates = bookingOption.value
+              ? bookingOption.value
+                  .split(',')
+                  .map((d) => d.trim())
+                  .filter(Boolean)
+              : [];
+            const datesToFetch =
+              rawDates.length > 0 ? rawDates : [bookingOption.value || ''];
+
             const userMessages = state.messages
               .filter((m) => m.constructor?.name?.includes('HumanMessage'))
               .map(messageText);
@@ -2322,9 +2330,10 @@ export class GraphService {
               )
               .pop();
 
+            const rawServiceValue = serviceOpt?.value?.split(',')[0]?.trim();
             const serviceId =
-              serviceOpt?.value ??
-              services.find((s) => s.id === serviceOpt?.value)?.id ??
+              rawServiceValue ??
+              services.find((s) => s.id === rawServiceValue)?.id ??
               services.find((s) =>
                 userMessages.some((msg) =>
                   msg.toLowerCase().includes(s.name.toLowerCase()),
@@ -2332,34 +2341,108 @@ export class GraphService {
               )?.id ??
               services[0]?.id;
 
-            const resourceId =
-              resourceOpt?.action === 'no_preference'
-                ? undefined
-                : (resourceOpt?.value ??
-                  resources.find((r) => r.id === resourceOpt?.value)?.id ??
-                  resources.find((r) =>
+            const rawResourceValues: string[] =
+              resourceOpt?.action === 'no_preference' || !resourceOpt?.value
+                ? []
+                : resourceOpt.value
+                    .split(',')
+                    .map((r: string) => r.trim())
+                    .filter(Boolean);
+
+            const resourceIdsToFetch: string[] = rawResourceValues.map(
+              (val: string): string => {
+                const foundById = resources.find(
+                  (r: { id: string }) => r.id === val,
+                );
+                if (foundById && typeof foundById.id === 'string') {
+                  return foundById.id;
+                }
+                const foundByName = resources.find(
+                  (r: { name: string; id: string }) =>
                     userMessages.some(
-                      (msg) =>
+                      (msg: string) =>
                         msg.toLowerCase() === r.name.toLowerCase() ||
                         msg
                           .toLowerCase()
                           .endsWith(` with ${r.name.toLowerCase()}`),
                     ),
-                  )?.id);
+                );
+                if (foundByName && typeof foundByName.id === 'string') {
+                  return foundByName.id;
+                }
+                return val;
+              },
+            );
 
             try {
-              this.logger.log(
-                `[Structured Step] Calling getAvailableSlots directly: date=${selectedDate}, serviceId=${serviceId}, resourceId=${resourceId}`,
-              );
-              const result = await currentProvider.execute({
-                name: 'getAvailableSlots',
-                arguments: {
-                  date: selectedDate,
-                  serviceId,
-                  resourceId,
-                },
+              const queries: Array<{ date: string; resourceId?: string }> = [];
+              datesToFetch.forEach((d) => {
+                if (resourceIdsToFetch.length > 0) {
+                  resourceIdsToFetch.forEach((rId) => {
+                    queries.push({ date: d, resourceId: rId });
+                  });
+                } else {
+                  queries.push({ date: d });
+                }
               });
-              this.chatGateway.emitBookingSlots(conversationId, result.output);
+
+              this.logger.log(
+                `[Structured Step] Calling getAvailableSlots for ${queries.length} query combinations, serviceId=${serviceId}`,
+              );
+
+              const slotResults = await Promise.all(
+                queries.map((q) =>
+                  currentProvider.execute({
+                    name: 'getAvailableSlots',
+                    arguments: {
+                      date: q.date,
+                      serviceId,
+                      resourceId: q.resourceId,
+                    },
+                  }),
+                ),
+              );
+
+              const combinedSlots: Array<Record<string, unknown>> = [];
+              slotResults.forEach((res, i) => {
+                const targetDate = queries[i]?.date;
+                const targetResourceId = queries[i]?.resourceId;
+                const out = res?.output;
+                let slotsArray: Array<Record<string, unknown>> = [];
+                if (Array.isArray(out)) {
+                  slotsArray = out as Array<Record<string, unknown>>;
+                } else if (out && typeof out === 'object') {
+                  const rec = out;
+                  if (Array.isArray(rec.slots)) {
+                    slotsArray = rec.slots as Array<Record<string, unknown>>;
+                  } else if (Array.isArray(rec.result)) {
+                    slotsArray = rec.result as Array<Record<string, unknown>>;
+                  } else if (Array.isArray(rec.data)) {
+                    slotsArray = rec.data as Array<Record<string, unknown>>;
+                  }
+                }
+
+                slotsArray.forEach((s) => {
+                  combinedSlots.push({
+                    ...s,
+                    date: typeof s.date === 'string' ? s.date : targetDate,
+                    resourceId:
+                      typeof s.resourceId === 'string'
+                        ? s.resourceId
+                        : targetResourceId,
+                  });
+                });
+              });
+
+              this.logger.log(
+                `[Structured Step] Emitting ${combinedSlots.length} combined slots for conversation ${conversationId}`,
+              );
+
+              this.chatGateway.emitBookingSlots(conversationId, {
+                date: datesToFetch[0],
+                dates: datesToFetch,
+                slots: combinedSlots,
+              });
               bookingSlotsEmitted = true;
 
               const prompt = getSlotCardPrompt(locale);
@@ -2453,7 +2536,31 @@ export class GraphService {
               options.visitorContext?.name ??
               '';
 
+            const allServiceOpts = userMessages
+              .map((t) => parseBookingOptionSelection(t))
+              .filter((o) => o?.action === 'select_service');
+
+            const collectedServiceIds: string[] = [];
+            for (const opt of allServiceOpts) {
+              if (opt?.value) {
+                const splitValues = opt.value.split(',').map((v) => v.trim());
+                for (const val of splitValues) {
+                  const matched = services.find(
+                    (s) =>
+                      s.id === val ||
+                      s.name.toLowerCase() === val.toLowerCase(),
+                  );
+                  if (matched && !collectedServiceIds.includes(matched.id)) {
+                    collectedServiceIds.push(matched.id);
+                  } else if (val && !collectedServiceIds.includes(val)) {
+                    collectedServiceIds.push(val);
+                  }
+                }
+              }
+            }
+
             const serviceId =
+              collectedServiceIds[0] ??
               serviceOpt?.value ??
               services.find((s) => s.id === serviceOpt?.value)?.id ??
               (services.length > 0 ? services[0]?.id : undefined);
@@ -2470,13 +2577,25 @@ export class GraphService {
               latestSlotSel?.slotCount ??
               (Array.isArray(latestSlotSel?.slots)
                 ? latestSlotSel.slots.length
-                : 1);
+                : collectedServiceIds.length > 0
+                  ? collectedServiceIds.length
+                  : 1);
 
-            const serviceIds = serviceId
-              ? Array(slotCount).fill(serviceId)
-              : undefined;
-            const serviceNames = service
-              ? Array(slotCount).fill(service.name)
+            const serviceIds =
+              collectedServiceIds.length > 0
+                ? collectedServiceIds
+                : serviceId
+                  ? Array(slotCount).fill(serviceId)
+                  : undefined;
+            const serviceNames = serviceIds
+              ? serviceIds.map((sId: string): string => {
+                  const found = services.find(
+                    (s: { id: string; name: string }) => s.id === sId,
+                  );
+                  return found && typeof found.name === 'string'
+                    ? found.name
+                    : sId;
+                })
               : undefined;
 
             this.chatGateway.emitBookingSummary(conversationId, {

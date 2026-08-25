@@ -64,15 +64,16 @@ export interface CreateBookingPayload {
   phone: string;
   serviceId?: string;
   serviceIds?: string[];
-  resourceId: string;
-  date: string;
-  timeSlot: string;
+  resourceId?: string;
+  date?: string;
+  timeSlot?: string;
   slotCount?: number;
   slots?: Array<{
     resourceId: string;
     date: string;
     timeSlot: string;
     serviceId?: string;
+    notes?: string;
   }>;
   sessionId?: string;
 }
