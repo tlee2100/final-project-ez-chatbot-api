@@ -349,22 +349,19 @@ export class GraphService {
       locale?: string,
       components?: ChatMessageComponent[],
     ) => {
-      const cleanDisplayContent = text
-        .replace(/\s*\[cancel:[^\]]+\]/g, '')
-        .replace(/<booking-code>.*?<\/booking-code>/g, '')
-        .replace(/<booking-cancelled>.*?<\/booking-cancelled>/g, '')
-        .trim();
-
-      const finalContent = cleanDisplayContent || text;
+      const isSystemHandoff = text.includes(
+        'An agent has been notified and will be with you shortly.',
+      );
+      const senderType = isSystemHandoff ? SenderType.SYSTEM : SenderType.AI;
 
       this.logger.log(
-        `🤖 [AI Response] [Conv: ${conversationId}] [Site: ${siteId}] [Locale: ${locale ?? 'auto'}] [Components: ${components?.length ?? 0}]\n${finalContent}`,
+        `🤖 [AI Response] [Conv: ${conversationId}] [Site: ${siteId}] [Locale: ${locale ?? 'auto'}] [Components: ${components?.length ?? 0}]\n${text}`,
       );
 
       const savedMessage = await this.chatService.saveMessage(
         conversationId,
         text,
-        SenderType.AI,
+        senderType,
         undefined,
         locale,
         components,
@@ -375,8 +372,8 @@ export class GraphService {
         .emit('newMessage', {
           id: savedMessage.id,
           conversationId,
-          content: finalContent,
-          senderType: 'AI',
+          content: text,
+          senderType: isSystemHandoff ? 'SYSTEM' : 'AI',
           createdAt: savedMessage.createdAt,
           locale: savedMessage.locale ?? locale,
           components: savedMessage.components ?? components,
