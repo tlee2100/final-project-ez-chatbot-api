@@ -10,7 +10,36 @@ env:
   img_name: chatbot-api
 
 jobs:
+  validate:
+    name: Lint, Type Check & Test
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Install dependencies (Strict Lockfile)
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run type-check
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm test
+
   build-docker-image:
+    name: Build Docker Image
+    needs: validate
     runs-on: self-hosted
     timeout-minutes: 30
     outputs:
