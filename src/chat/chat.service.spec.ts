@@ -16,6 +16,7 @@ import {
   MessageStatus,
   SenderType,
   FeedbackRating,
+  ChatMessage,
 } from './entities/chat-message.entity';
 import { createRepositoryMock } from '../test/service-test-helpers';
 
@@ -94,6 +95,192 @@ describe('ChatService saveMessage', () => {
 
     expect(chatMessageRepository.create).not.toHaveBeenCalled();
     expect(chatMessageRepository.save).not.toHaveBeenCalled();
+  });
+
+  describe('responseTimeSec (Turn-based Response Time Calculation)', () => {
+    it('computes responseTimeSec when agent responds to a visitor message within 1 hour', async () => {
+      const { service, conversationRepository, chatMessageRepository } =
+        makeService();
+
+      conversationRepository.findOne.mockResolvedValue({
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      });
+
+      const visitorCreatedAt = new Date(Date.now() - 45 * 1000); // 45s ago
+      chatMessageRepository.findOne.mockResolvedValue({
+        id: 'msg-visitor-1',
+        conversationId: 'conv-1',
+        senderType: SenderType.VISITOR,
+        createdAt: visitorCreatedAt,
+      });
+
+      chatMessageRepository.create.mockImplementation((data: unknown) => {
+        const payload = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Partial<ChatMessage>;
+        return {
+          id: 'msg-agent-1',
+          ...payload,
+          createdAt: new Date(),
+        };
+      });
+      chatMessageRepository.save.mockImplementation((msg: unknown) =>
+        Promise.resolve(msg as ChatMessage),
+      );
+
+      const saved = await service.saveMessage(
+        'conv-1',
+        'Hello from agent',
+        SenderType.AGENT,
+        'agent-uuid-1',
+      );
+
+      expect(chatMessageRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderType: SenderType.AGENT,
+          agentId: 'agent-uuid-1',
+        }),
+      );
+      expect(typeof saved.responseTimeSec).toBe('number');
+      expect(saved.responseTimeSec).toBeGreaterThanOrEqual(44);
+      expect(saved.responseTimeSec).toBeLessThanOrEqual(46);
+    });
+
+    it('sets responseTimeSec to null when agent sends consecutive messages', async () => {
+      const { service, conversationRepository, chatMessageRepository } =
+        makeService();
+
+      conversationRepository.findOne.mockResolvedValue({
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      });
+
+      chatMessageRepository.findOne.mockResolvedValue({
+        id: 'msg-agent-1',
+        conversationId: 'conv-1',
+        senderType: SenderType.AGENT,
+        createdAt: new Date(Date.now() - 10 * 1000),
+      });
+
+      chatMessageRepository.create.mockImplementation((data: unknown) => {
+        const payload = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Partial<ChatMessage>;
+        return {
+          id: 'msg-agent-2',
+          ...payload,
+          createdAt: new Date(),
+        };
+      });
+      chatMessageRepository.save.mockImplementation((msg: unknown) =>
+        Promise.resolve(msg as ChatMessage),
+      );
+
+      const saved = await service.saveMessage(
+        'conv-1',
+        'Follow-up message from agent',
+        SenderType.AGENT,
+        'agent-uuid-1',
+      );
+
+      expect(chatMessageRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderType: SenderType.AGENT,
+          responseTimeSec: null,
+        }),
+      );
+      expect(saved.responseTimeSec).toBeNull();
+    });
+
+    it('sets responseTimeSec to null when visitor message is older than 1 hour (3600s)', async () => {
+      const { service, conversationRepository, chatMessageRepository } =
+        makeService();
+
+      conversationRepository.findOne.mockResolvedValue({
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      });
+
+      const oldVisitorTime = new Date(Date.now() - 4000 * 1000); // > 1 hour
+      chatMessageRepository.findOne.mockResolvedValue({
+        id: 'msg-visitor-old',
+        conversationId: 'conv-1',
+        senderType: SenderType.VISITOR,
+        createdAt: oldVisitorTime,
+      });
+
+      chatMessageRepository.create.mockImplementation((data: unknown) => {
+        const payload = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Partial<ChatMessage>;
+        return {
+          id: 'msg-agent-1',
+          ...payload,
+          createdAt: new Date(),
+        };
+      });
+      chatMessageRepository.save.mockImplementation((msg: unknown) =>
+        Promise.resolve(msg as ChatMessage),
+      );
+
+      const saved = await service.saveMessage(
+        'conv-1',
+        'Delayed agent reply',
+        SenderType.AGENT,
+        'agent-uuid-1',
+      );
+
+      expect(chatMessageRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderType: SenderType.AGENT,
+          responseTimeSec: null,
+        }),
+      );
+      expect(saved.responseTimeSec).toBeNull();
+    });
+
+    it('sets responseTimeSec to null for VISITOR messages', async () => {
+      const { service, conversationRepository, chatMessageRepository } =
+        makeService();
+
+      conversationRepository.findOne.mockResolvedValue({
+        id: 'conv-1',
+        siteId: 'site-1',
+        status: ConversationStatus.OPEN,
+      });
+
+      chatMessageRepository.create.mockImplementation((data: unknown) => {
+        const payload = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Partial<ChatMessage>;
+        return {
+          id: 'msg-visitor-1',
+          ...payload,
+          createdAt: new Date(),
+        };
+      });
+      chatMessageRepository.save.mockImplementation((msg: unknown) =>
+        Promise.resolve(msg as ChatMessage),
+      );
+
+      const saved = await service.saveMessage(
+        'conv-1',
+        'Hello from visitor',
+        SenderType.VISITOR,
+      );
+
+      expect(chatMessageRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          senderType: SenderType.VISITOR,
+          responseTimeSec: null,
+        }),
+      );
+      expect(saved.responseTimeSec).toBeNull();
+    });
   });
 
   it('exposes public conversation status without messages', async () => {

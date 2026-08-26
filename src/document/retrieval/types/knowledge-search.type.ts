@@ -22,4 +22,6 @@ export type KnowledgeSearchResult = {
   sectionTitle: string | null;
   metadata: Record<string, unknown>;
   similarity: number;
+  /** True when the chunk contains an exact meaningful term from the query. */
+  keywordMatched?: boolean;
 };

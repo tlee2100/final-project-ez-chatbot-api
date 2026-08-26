@@ -29,18 +29,18 @@ export class User {
   @Column({ unique: true })
   email: string;
 
-  @Column()
+  @Column({ select: false })
   password: string;
 
   @AutoMap()
   @Column({ default: true })
   isActive: boolean;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   activationTokenHash: string | null;
 
   @AutoMap(() => Date)
-  @Column({ type: 'timestamp with time zone', nullable: true })
+  @Column({ type: 'timestamp with time zone', nullable: true, select: false })
   activationTokenExpiresAt: Date | null;
 
   @AutoMap()
@@ -75,16 +75,16 @@ export class User {
   @Column({ default: false })
   twoFactorEnabled: boolean;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   twoFactorSecret: string | null;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   refreshToken: string | null;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', nullable: true, select: false })
   previousRefreshToken: string | null;
 
-  @Column({ type: 'timestamp with time zone', nullable: true })
+  @Column({ type: 'timestamp with time zone', nullable: true, select: false })
   previousRefreshTokenExpiresAt: Date | null;
 
   @DeleteDateColumn({ type: 'timestamp', nullable: true })

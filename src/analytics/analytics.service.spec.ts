@@ -14,10 +14,17 @@ import type { JwtUser } from '../auth/types/jwt-user.type';
 describe('AnalyticsService', () => {
   function makeService() {
     const conversationRepo = createRepositoryMock();
-    const chatMessageRepo = createRepositoryMock();
+    const chatMessageRepo = {
+      ...createRepositoryMock(),
+      manager: {
+        query: jest.fn().mockResolvedValue([{ avgDiff: null }]),
+      },
+    };
     const siteRepo = createRepositoryMock();
     const userRepo = createRepositoryMock();
     const orgRepo = createRepositoryMock();
+    const documentRepo = createRepositoryMock();
+    const documentChunkRepo = createRepositoryMock();
 
     const service = new AnalyticsService(
       conversationRepo as never,
@@ -25,6 +32,8 @@ describe('AnalyticsService', () => {
       siteRepo as never,
       userRepo as never,
       orgRepo as never,
+      documentRepo as never,
+      documentChunkRepo as never,
     );
 
     return {
@@ -34,6 +43,8 @@ describe('AnalyticsService', () => {
       siteRepo,
       userRepo,
       orgRepo,
+      documentRepo,
+      documentChunkRepo,
     };
   }
 
@@ -48,17 +59,25 @@ describe('AnalyticsService', () => {
 
     const qbMock = {
       innerJoin: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       addSelect: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
       groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      setParameter: jest.fn().mockReturnThis(),
+      getCount: jest.fn().mockResolvedValue(0),
+      getRawOne: jest.fn().mockResolvedValue(null),
       getRawMany: jest.fn().mockResolvedValue([
         { rating: FeedbackRating.HELPFUL, count: '15' },
         { rating: FeedbackRating.UNHELPFUL, count: '3' },
       ]),
     };
-    chatMessageRepo.createQueryBuilder.mockReturnValue(qbMock);
+    chatMessageRepo.createQueryBuilder.mockReturnValue(qbMock as never);
+    conversationRepo.createQueryBuilder.mockReturnValue(qbMock as never);
 
     const user: JwtUser = {
       id: 'user-1',

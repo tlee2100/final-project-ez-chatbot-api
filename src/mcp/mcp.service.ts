@@ -287,10 +287,11 @@ export class McpService {
       sourceUrl: string | null;
       sectionTitle: string | null;
       similarity: number;
+      keywordMatched: boolean;
     }[];
   }> {
     this.logger.log(
-      `[MCP] searchKnowledge: query="${query}", siteId=${siteId}, topK=${topK}, minSimilarity=${minSimilarity}`,
+      `[MCP] searchKnowledge request: query="${query}", siteId=${siteId}, requestedTopK=${topK}, requestedMinSimilarity=${minSimilarity}; site retrieval settings take precedence`,
     );
 
     const results = await this.knowledgeRetrievalService.searchRelevantChunks({
@@ -306,6 +307,7 @@ export class McpService {
         sourceUrl: item.sourceUrl ?? null,
         sectionTitle: item.sectionTitle,
         similarity: item.similarity,
+        keywordMatched: item.keywordMatched ?? false,
       })),
     };
   }

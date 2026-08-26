@@ -59,6 +59,7 @@ import {
   extractRequestedTimeSlot,
   isBookingFlowIntent,
   isBookingSlotSelection,
+  isNaturalBookingTrigger,
   isTimeSlotAvailable,
   parseBookingSlotSelection,
   parseMultimodalContent,
@@ -77,6 +78,8 @@ import {
   type ChatMessageComponent,
 } from './chat-message-components';
 import { buildToolSchema } from './tool-schema.utils';
+import { PageContextService } from './page-context.service';
+import type { RawPageContext } from './interfaces/page-context.interface';
 
 export { AgentState };
 export type {
@@ -128,6 +131,7 @@ export class GraphService {
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
     private readonly notificationService: NotificationService,
+    private readonly pageContextService: PageContextService,
   ) {}
 
   // ─── AI Guard ──────────────────────────────────────────────────────────────
@@ -173,6 +177,27 @@ export class GraphService {
     return true;
   }
 
+  // ─── Checkpoint Management ────────────────────────────────────────────────
+
+  /**
+   * Clears the MemorySaver checkpoint for a conversation thread.
+   * Called when a new booking flow starts so stale internal messages
+   * from the previous flow are not concatenated, preventing exponential
+   * message growth.
+   */
+  private async clearCheckpointForThread(threadId: string): Promise<void> {
+    try {
+      await this.checkpointer.deleteThread(threadId);
+      this.logger.log(
+        `Cleared checkpoint state for thread ${threadId} (new booking flow)`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to clear checkpoint for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // ─── High-level entry point (called by Controller & Gateway) ───────────────
 
   /**
@@ -186,6 +211,7 @@ export class GraphService {
     res?: ExpressResponse,
     onNegativeSentiment?: (text: string) => Promise<void>,
     newTestMessageContent?: string,
+    rawPageContext?: RawPageContext,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
@@ -194,15 +220,15 @@ export class GraphService {
     }
 
     if (conversationId.startsWith('admin-test-')) {
-      const site = await this.siteRepo.findOne({
-        where: { id: siteId },
-        relations: {
-          industryTemplateInfo: true,
-          bookingConfig: true,
-          bookingServices: true,
-          bookingResources: true,
-        },
-      });
+      const site = await this.siteRepo
+        .createQueryBuilder('site')
+        .addSelect(['site.encryptedOpenAiKey', 'site.systemPromptOverride'])
+        .leftJoinAndSelect('site.industryTemplateInfo', 'industryTemplateInfo')
+        .leftJoinAndSelect('site.bookingConfig', 'bookingConfig')
+        .leftJoinAndSelect('site.bookingServices', 'bookingServices')
+        .leftJoinAndSelect('site.bookingResources', 'bookingResources')
+        .where('site.id = :siteId', { siteId })
+        .getOne();
 
       if (!this.testSessionMessages.has(conversationId)) {
         this.testSessionMessages.set(conversationId, []);
@@ -291,6 +317,21 @@ export class GraphService {
           sentimentDetection: false,
           site: site ?? undefined,
         });
+      } catch (err: unknown) {
+        const errorMsg =
+          'AI service is temporarily unavailable. Please try again later or request support from an agent.';
+        this.logger.error(
+          `AI test stream error for conversation ${conversationId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('messageError', {
+            conversationId,
+            message: errorMsg,
+          });
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('aiMessageComplete', { conversationId });
       } finally {
         this.chatGateway.server
           .to(`conversation-${conversationId}`)
@@ -301,21 +342,33 @@ export class GraphService {
 
     const [conversation, site, dbMessages] = await Promise.all([
       this.chatService.getConversationById(conversationId),
-      this.siteRepo.findOne({
-        where: { id: siteId },
-        relations: {
-          industryTemplateInfo: true,
-          bookingConfig: true,
-          bookingServices: true,
-          bookingResources: true,
-        },
-      }),
+      this.siteRepo
+        .createQueryBuilder('site')
+        .addSelect(['site.encryptedOpenAiKey', 'site.systemPromptOverride'])
+        .leftJoinAndSelect('site.industryTemplateInfo', 'industryTemplateInfo')
+        .leftJoinAndSelect('site.bookingConfig', 'bookingConfig')
+        .leftJoinAndSelect('site.bookingServices', 'bookingServices')
+        .leftJoinAndSelect('site.bookingResources', 'bookingResources')
+        .where('site.id = :siteId', { siteId })
+        .getOne(),
       this.chatService.getMessagesForConversation(
         conversationId,
         undefined,
         '30',
       ),
     ]);
+
+    const pageContextResult = this.pageContextService.sanitize(
+      rawPageContext,
+      site?.allowedDomains ?? [],
+      site?.useCurrentPageContent === true,
+    );
+    const pageContext = pageContextResult.context;
+    if (pageContextResult.reason !== 'not_provided') {
+      this.logger.log(
+        `[Page Context] site=${siteId} conversation=${conversationId} status=${pageContext ? 'accepted' : 'rejected'} reason=${pageContextResult.reason} hostname=${pageContextResult.hostname ?? 'none'} contentLength=${pageContextResult.contentLength}`,
+      );
+    }
 
     const messages: LLMMessage[] = dbMessages.map((m) => ({
       role:
@@ -411,6 +464,7 @@ export class GraphService {
               : undefined,
           email: conversation.visitorEmail ?? undefined,
         },
+        pageContext,
         siteContext: {
           name: site?.name ?? undefined,
           domains: site?.allowedDomains ?? [],
@@ -450,6 +504,21 @@ export class GraphService {
         initialCancelState,
         site: site ?? undefined,
       });
+    } catch (err: unknown) {
+      const errorMsg =
+        'AI service is temporarily unavailable. Please try again later or request support from an agent.';
+      this.logger.error(
+        `AI stream error for conversation ${conversationId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('messageError', {
+          conversationId,
+          message: errorMsg,
+        });
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('aiMessageComplete', { conversationId });
     } finally {
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
@@ -770,6 +839,17 @@ export class GraphService {
                 const services = options.siteContext?.bookingServices ?? [];
                 const resources = options.siteContext?.bookingResources ?? [];
 
+                const isGeneral =
+                  options.siteContext?.industryTemplateId === 'general' ||
+                  (options.siteContext?.industryTemplateId !== undefined &&
+                    options.siteContext?.industryTemplateId !== 'salon');
+
+                const isSkipServiceSelected = userMessages.some((msg) =>
+                  msg.includes(
+                    '/select-booking-option {"action":"skip_service"',
+                  ),
+                );
+
                 const normalizeStr = (str: string) =>
                   str
                     .toLowerCase()
@@ -778,38 +858,55 @@ export class GraphService {
                     .replace(/đ/g, 'd')
                     .trim();
 
-                const matchedServices = services.filter((item) => {
-                  if (
-                    Array.isArray(args.serviceIds) &&
-                    (args.serviceIds as string[]).includes(item.id)
-                  )
-                    return true;
-                  if (args.serviceId === item.id) return true;
-                  if (
-                    Array.isArray(args.serviceNames) &&
-                    (args.serviceNames as string[]).some(
-                      (n) => n.toLowerCase() === item.name.toLowerCase(),
-                    )
-                  )
-                    return true;
-                  if (
-                    typeof args.serviceName === 'string' &&
-                    args.serviceName.toLowerCase() === item.name.toLowerCase()
-                  )
-                    return true;
-                  const itemNorm = normalizeStr(item.name);
-                  return userMessages.some((msg) =>
-                    normalizeStr(msg).includes(itemNorm),
-                  );
-                });
+                const matchedServices = isSkipServiceSelected
+                  ? []
+                  : services.filter((item) => {
+                      if (
+                        Array.isArray(args.serviceIds) &&
+                        (args.serviceIds as string[]).includes(item.id)
+                      )
+                        return true;
+                      if (args.serviceId === item.id) return true;
+                      if (
+                        Array.isArray(args.serviceNames) &&
+                        (args.serviceNames as string[]).some(
+                          (n) => n.toLowerCase() === item.name.toLowerCase(),
+                        )
+                      )
+                        return true;
+                      if (
+                        typeof args.serviceName === 'string' &&
+                        args.serviceName.toLowerCase() ===
+                          item.name.toLowerCase()
+                      )
+                        return true;
+
+                      // For general template without explicit service selection, do not falsely substring match
+                      const hasExplicitServiceAction = userMessages.some(
+                        (msg) =>
+                          msg.includes(
+                            '/select-booking-option {"action":"select_service"',
+                          ),
+                      );
+                      if (isGeneral && !hasExplicitServiceAction) {
+                        return false;
+                      }
+
+                      const itemNorm = normalizeStr(item.name);
+                      return userMessages.some((msg) =>
+                        normalizeStr(msg).includes(itemNorm),
+                      );
+                    });
 
                 const service =
                   matchedServices[0] ??
-                  services.find((item) => item.id === args.serviceId);
+                  (isSkipServiceSelected
+                    ? undefined
+                    : services.find((item) => item.id === args.serviceId));
                 const serviceIds =
                   matchedServices.length > 0
                     ? matchedServices.map((s) => s.id)
-                    : Array.isArray(args.serviceIds)
+                    : Array.isArray(args.serviceIds) && !isSkipServiceSelected
                       ? (args.serviceIds as string[])
                       : service?.id
                         ? [service.id]
@@ -858,8 +955,13 @@ export class GraphService {
 
                 toolArgs = {
                   ...args,
-                  serviceId: serviceIds[0] ?? service?.id ?? args.serviceId,
-                  serviceIds: serviceIds.length > 0 ? serviceIds : undefined,
+                  serviceId: isSkipServiceSelected
+                    ? undefined
+                    : (serviceIds[0] ?? service?.id ?? args.serviceId),
+                  serviceIds:
+                    !isSkipServiceSelected && serviceIds.length > 0
+                      ? serviceIds
+                      : undefined,
                   slotCount,
                   resourceId: resource?.id ?? args.resourceId,
                   date: args.date ?? slotSelection?.date,
@@ -877,6 +979,7 @@ export class GraphService {
                 }
 
                 if (
+                  !isGeneral &&
                   services.length > 0 &&
                   !service &&
                   serviceIds.length === 0
@@ -896,13 +999,20 @@ export class GraphService {
                   this.chatGateway.emitBookingSummary(conversationId, {
                     ...toolArgs,
                     locale: activeFlowLocale ?? currentLocale,
-                    serviceId: serviceIds[0] ?? service?.id,
-                    serviceIds: serviceIds.length ? serviceIds : undefined,
-                    serviceName:
-                      serviceNames[0] ?? service?.name ?? args.serviceName,
-                    serviceNames: serviceNames.length
-                      ? serviceNames
-                      : undefined,
+                    serviceId: isSkipServiceSelected
+                      ? undefined
+                      : (serviceIds[0] ?? service?.id),
+                    serviceIds:
+                      !isSkipServiceSelected && serviceIds.length
+                        ? serviceIds
+                        : undefined,
+                    serviceName: isSkipServiceSelected
+                      ? undefined
+                      : (serviceNames[0] ?? service?.name ?? args.serviceName),
+                    serviceNames:
+                      !isSkipServiceSelected && serviceNames.length
+                        ? serviceNames
+                        : undefined,
                     slotCount,
                     slots: finalSlots,
                     endTimeSlot: calculatedEndTimeSlot,
@@ -1202,10 +1312,20 @@ export class GraphService {
         return { messages: [new AIMessage(handoffMsg)] };
       };
 
-      const abandonBookingNode = (state: typeof AgentState.State) => ({
-        exitSubgraph: null,
-        messages: [new AIMessage(getAbandonBookingPrompt(state.locale))],
-      });
+      const abandonBookingNode = async (state: typeof AgentState.State) => {
+        try {
+          await this.bookingService.releaseSessionHolds(siteId, conversationId);
+        } catch (err) {
+          this.logger.warn(
+            `Failed to release session holds on abandon for conv ${conversationId}`,
+            err,
+          );
+        }
+        return {
+          exitSubgraph: null,
+          messages: [new AIMessage(getAbandonBookingPrompt(state.locale))],
+        };
+      };
 
       const SUMMARIZE_THRESHOLD = 25;
       const summarizeMemory = (state: typeof AgentState.State) => {
@@ -1330,9 +1450,35 @@ export class GraphService {
       };
 
       // ── 6. Resume-Aware Invocation ──────────────────────────────────────────
+      //
+      // When a fresh booking flow starts (e.g. visitor says "Đặt lịch" again
+      // after completing a previous booking), the MemorySaver checkpoint from
+      // the prior flow contains thousands of internal messages.  The concat
+      // reducer would merge them with the new DB messages, causing exponential
+      // growth (observed: 622 513 messages after a few steps).  We therefore
+      // clear the checkpoint whenever a new booking init is detected.
+      // ──────────────────────────────────────────────────────────────────────────
       let finalState: typeof AgentState.State;
 
       if (!isTestSession) {
+        const isFreshBookingInit =
+          !activeFlow && isNaturalBookingTrigger(latestUserText, currentLocale);
+
+        if (isFreshBookingInit) {
+          await this.clearCheckpointForThread(conversationId);
+          try {
+            await this.bookingService.releaseSessionHolds(
+              siteId,
+              conversationId,
+            );
+          } catch (err) {
+            this.logger.warn(
+              `Failed to release lingering session holds for conv ${conversationId}`,
+              err,
+            );
+          }
+        }
+
         const currentState = await app.getState(threadConfig).catch(() => null);
         const hasPendingInterrupt = Boolean(
           currentState &&
@@ -1350,7 +1496,10 @@ export class GraphService {
           });
 
           finalState = await app.invoke(
-            new Command({ resume: latestUserText }),
+            new Command({
+              resume: latestUserText,
+              update: { pageContext: options.pageContext },
+            }),
             threadConfig,
           );
         } else {
@@ -1360,6 +1509,7 @@ export class GraphService {
               siteId,
               conversationId,
               visitorContext: options.visitorContext ?? {},
+              pageContext: options.pageContext,
               siteContext: options.siteContext ?? {},
               intent: null,
               locale: resolveEffectiveLocale({
@@ -1390,6 +1540,7 @@ export class GraphService {
           siteId,
           conversationId,
           visitorContext: options.visitorContext ?? {},
+          pageContext: options.pageContext,
           siteContext: options.siteContext ?? {},
           intent: null,
           locale: resolveEffectiveLocale({

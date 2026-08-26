@@ -1,6 +1,7 @@
 export function createRepositoryMock() {
+  const findOneMock = jest.fn();
   return {
-    findOne: jest.fn(),
+    findOne: findOneMock,
     findAndCount: jest.fn(),
     find: jest.fn(),
     save: jest.fn(),
@@ -10,7 +11,11 @@ export function createRepositoryMock() {
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     delete: jest.fn().mockResolvedValue({ affected: 1 }),
     count: jest.fn().mockResolvedValue(0),
-    createQueryBuilder: jest.fn(),
+    createQueryBuilder: jest.fn(() => {
+      const qb = createQueryBuilderMock();
+      qb.getOne.mockImplementation(() => findOneMock() as Promise<unknown>);
+      return qb;
+    }),
     merge: jest.fn(),
   };
 }

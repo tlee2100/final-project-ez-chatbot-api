@@ -84,6 +84,15 @@ export class BookingGateway
     this.server.to(this.getSiteRoom(siteId)).emit('booking_slot_held', payload);
   }
 
+  public emitSlotsHeld(
+    siteId: string,
+    payload: Array<{ resourceId: string; startAt: string; endAt: string }>,
+  ): void {
+    this.server
+      .to(this.getSiteRoom(siteId))
+      .emit('booking_slots_held', payload);
+  }
+
   public emitSlotConfirmed(
     siteId: string,
     payload: { resourceId: string; startAt: string; endAt: string },

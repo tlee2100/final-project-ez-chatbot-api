@@ -26,6 +26,7 @@
     "format:check": "prettier --check .",
     "prepare": "husky",
     "type-check": "tsc --noEmit",
+    "validate": "npm run lint && npm run type-check && npm test",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/data-source.ts",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/data-source.ts"
@@ -76,6 +77,7 @@
     "date-fns-tz": "^3.2.0",
     "dotenv": "^17.4.2",
     "fast-xml-parser": "^5.10.1",
+    "helmet": "^8.3.0",
     "ipaddr.js": "^2.5.0",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^26.1.0",

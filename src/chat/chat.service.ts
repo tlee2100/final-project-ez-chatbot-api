@@ -38,6 +38,7 @@ import {
 } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import { CloseConversationResponseDto } from './dto/close-conversation-response.dto';
 import {
   SubmitMessageFeedbackDto,
   MessageFeedbackResponseDto,
@@ -57,6 +58,7 @@ import { BookingService } from '../booking/booking.service';
 import { latestActiveBookingCode } from './booking-cancellation.utils';
 import { AI_MODERATION_SERVICE } from '../security/interfaces/moderation.interface';
 import type { IAIModerationService as IAIModerationServiceType } from '../security/interfaces/moderation.interface';
+import type { RawPageContext } from './interfaces/page-context.interface';
 
 type ChatMessageDto = Pick<
   ChatMessage,
@@ -75,6 +77,24 @@ type ChatMessageDto = Pick<
   senderName?: string | null;
 };
 const MAX_MESSAGE_LENGTH = 1000;
+
+const pageContextFromPayload = (
+  payload: RawPageContext,
+): RawPageContext | undefined => {
+  if (
+    payload.pageUrl === undefined &&
+    payload.pageTitle === undefined &&
+    payload.pageContent === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    pageUrl: payload.pageUrl,
+    pageTitle: payload.pageTitle,
+    pageContent: payload.pageContent,
+  };
+};
 
 /** In-memory state for WS rate limiting (SEC-005) */
 interface WsRateLimitEntry {
@@ -412,7 +432,7 @@ export class ChatService implements BeforeApplicationShutdown {
       content: string;
       senderType: SenderType;
       localId?: string;
-    },
+    } & RawPageContext,
   ): Promise<void> {
     const socketData = client.data as SocketData;
     const user = socketData.user;
@@ -533,6 +553,7 @@ export class ChatService implements BeforeApplicationShutdown {
           undefined,
           undefined,
           payload.content,
+          pageContextFromPayload(payload),
         )
         .catch((err: unknown) =>
           this.logger.error(
@@ -625,12 +646,27 @@ export class ChatService implements BeforeApplicationShutdown {
                   text,
                 );
               },
+              undefined,
+              pageContextFromPayload(payload),
             )
-            .catch((err: unknown) =>
+            .catch((err: unknown) => {
+              const errorMsg =
+                'AI service is temporarily unavailable. Please try again later or request support from an agent.';
               this.logger.error(
                 `AI stream error: ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
+              );
+              this.chatGateway.server
+                .to(`conversation-${payload.conversationId}`)
+                .emit('messageError', {
+                  conversationId: payload.conversationId,
+                  message: errorMsg,
+                });
+              this.chatGateway.server
+                .to(`conversation-${payload.conversationId}`)
+                .emit('aiMessageComplete', {
+                  conversationId: payload.conversationId,
+                });
+            });
         }
       }
     } catch (error: unknown) {
@@ -777,7 +813,7 @@ export class ChatService implements BeforeApplicationShutdown {
     );
 
     // Schedule inactivity timeout & warning timers for the new conversation
-    this.chatTimeoutService.scheduleTimers(
+    void this.chatTimeoutService.scheduleTimers(
       result.conversationId,
       site,
       new Date(),
@@ -882,7 +918,7 @@ export class ChatService implements BeforeApplicationShutdown {
     );
 
     // Schedule timers for test conversation
-    this.chatTimeoutService.scheduleTimers(
+    void this.chatTimeoutService.scheduleTimers(
       saved.id,
       site,
       saved.lastActivityAt,
@@ -1495,7 +1531,7 @@ export class ChatService implements BeforeApplicationShutdown {
   async updatePublicConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
-  ): Promise<Conversation> {
+  ): Promise<CloseConversationResponseDto> {
     if (!id.startsWith('admin-test-')) {
       const conversation = await this.conversationRepository.findOne({
         where: { id },
@@ -1508,12 +1544,20 @@ export class ChatService implements BeforeApplicationShutdown {
         throw new ForbiddenException('siteId does not match conversation');
       }
     }
-    return this.updateStatusAndNotify(
+    const updated = await this.updateStatusAndNotify(
       id,
       dto.status,
       dto.reason || ClosedReason.VISITOR,
       dto.transcriptEmail,
     );
+
+    return {
+      conversationId: updated.id,
+      status: updated.status,
+      handlingStatus: updated.handlingStatus,
+      closedReason: updated.closedReason,
+      updatedAt: updated.updatedAt,
+    };
   }
 
   async getPublicConversationStatus(id: string) {
@@ -1625,7 +1669,19 @@ export class ChatService implements BeforeApplicationShutdown {
     agentId?: string,
     locale?: string,
     components?: Record<string, unknown>[],
+    tokenCount?: number,
   ): Promise<ChatMessage> {
+    // Only AI messages consume LLM tokens. Visitor and Agent messages have 0 tokens.
+    let calculatedTokens = 0;
+    if (senderType === SenderType.AI) {
+      calculatedTokens =
+        tokenCount !== undefined && tokenCount !== null
+          ? tokenCount
+          : content
+            ? Math.max(1, Math.ceil(content.length / 4))
+            : 0;
+    }
+
     if (conversationId.startsWith('admin-test-')) {
       return {
         id: `test-msg-${Date.now()}`,
@@ -1635,11 +1691,32 @@ export class ChatService implements BeforeApplicationShutdown {
         agentId: agentId ?? null,
         status: MessageStatus.SENT,
         createdAt: new Date(),
+        tokenCount: calculatedTokens,
+        responseTimeSec: null,
       } as ChatMessage;
     }
     const conversation = await this.getConversationById(conversationId);
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ForbiddenException('Conversation is closed');
+    }
+
+    // ── Turn-based Response Time Calculation for AGENT ──────────────────────
+    let responseTimeSec: number | null = null;
+    if (senderType === SenderType.AGENT) {
+      const lastMessage = await this.chatMessageRepository.findOne({
+        where: { conversationId },
+        order: { createdAt: 'DESC' },
+      });
+
+      // Only compute if preceding message was from VISITOR (avoid consecutive AGENT bursts)
+      if (lastMessage && lastMessage.senderType === SenderType.VISITOR) {
+        const diffMs = Date.now() - new Date(lastMessage.createdAt).getTime();
+        const diffSec = Math.round(diffMs / 1000);
+        // Limit calculation to a 1-hour window (3600 seconds)
+        if (diffSec >= 0 && diffSec <= 3600) {
+          responseTimeSec = diffSec;
+        }
+      }
     }
 
     const message = this.chatMessageRepository.create({
@@ -1649,6 +1726,8 @@ export class ChatService implements BeforeApplicationShutdown {
       agentId: agentId ?? null,
       locale: locale ?? null,
       components: components ?? null,
+      tokenCount: calculatedTokens,
+      responseTimeSec,
     });
 
     this.logger.log({
@@ -1821,7 +1900,10 @@ export class ChatService implements BeforeApplicationShutdown {
       void this.sendCloseEmails(conversation, transcriptEmail);
     }
 
-    return this.getConversationById(id);
+    const updated = await this.conversationRepository.findOne({
+      where: { id },
+    });
+    return updated ?? conversation;
   }
 
   /**

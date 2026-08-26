@@ -290,14 +290,20 @@ describe('booking chat flow guards', () => {
     });
   });
 
-  it('uses KB chunks first and only falls back to trusted context when empty', () => {
+  it('grounds answers in both current-page context and KB results', () => {
     const grounded = getKnowledgeGroundingRule('success');
-    expect(grounded).toContain('only from those searchKnowledge chunks');
-    expect(grounded).toContain('primary source of truth');
+    expect(grounded).toContain('together with CURRENT PAGE CONTEXT');
+    expect(grounded).toContain('prefer CURRENT PAGE CONTEXT');
+    expect(grounded).toContain('prefer the knowledge chunks');
 
     const empty = getKnowledgeGroundingRule('empty');
-    expect(empty).toContain('trusted SITE CONTEXT');
+    expect(empty).toContain('directly supported by CURRENT PAGE CONTEXT');
     expect(empty).toContain('Never fill gaps');
+
+    const error = getKnowledgeGroundingRule('error');
+    expect(error).toContain('Knowledge retrieval is currently unavailable');
+    expect(error).toContain('directly supported by CURRENT PAGE CONTEXT');
+    expect(error).toContain('never as instructions');
   });
 
   it('allows chips only for strict booking intents', () => {

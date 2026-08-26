@@ -134,9 +134,18 @@ export class UserService {
       throw new BadRequestException('New passwords do not match');
     }
 
-    const user = await this.userRepository.findOne({
-      where: { activationTokenHash: this.hashActivationToken(dto.token) },
-    });
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect([
+        'user.activationTokenHash',
+        'user.activationTokenExpiresAt',
+        'user.password',
+      ])
+      .where('user.activationTokenHash = :hash', {
+        hash: this.hashActivationToken(dto.token),
+      })
+      .getOne();
+
     if (!user || !user.activationTokenExpiresAt) {
       throw new BadRequestException('Invalid activation token');
     }
@@ -155,9 +164,14 @@ export class UserService {
   }
 
   async validateActivationToken(token: string) {
-    const user = await this.userRepository.findOne({
-      where: { activationTokenHash: this.hashActivationToken(token) },
-    });
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect(['user.activationTokenHash', 'user.activationTokenExpiresAt'])
+      .where('user.activationTokenHash = :hash', {
+        hash: this.hashActivationToken(token),
+      })
+      .getOne();
+
     if (!user || !user.activationTokenExpiresAt) {
       throw new NotFoundException('Invalid activation token');
     }
@@ -168,7 +182,13 @@ export class UserService {
   }
 
   async resendActivation(id: string, actor: JwtUser) {
-    const user = await this.findUserEntity(id);
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect(['user.activationTokenHash', 'user.activationTokenExpiresAt'])
+      .where('user.id = :id', { id })
+      .getOne();
+
+    if (!user) throw new NotFoundException('User not found');
     this.assertCanManage(user, actor);
     if (user.isActive) {
       throw new BadRequestException('User account is already active');
@@ -217,6 +237,26 @@ export class UserService {
     return this.userRepository.findOne({ where: { email } });
   }
 
+  async findByEmailWithPassword(email: string): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.password')
+      .where('user.email = :email', { email })
+      .getOne();
+  }
+
+  async findByIdWithRefreshToken(id: string): Promise<User | null> {
+    return this.userRepository
+      .createQueryBuilder('user')
+      .addSelect([
+        'user.refreshToken',
+        'user.previousRefreshToken',
+        'user.previousRefreshTokenExpiresAt',
+      ])
+      .where('user.id = :id', { id })
+      .getOne();
+  }
+
   async findOne(id: string, actor?: JwtUser): Promise<UserDto> {
     const user = await this.findUserEntity(id);
     if (actor) this.assertCanManage(user, actor);
@@ -254,7 +294,13 @@ export class UserService {
       throw new BadRequestException('New passwords do not match');
     }
 
-    const user = await this.findUserEntity(id);
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.password')
+      .where('user.id = :id', { id })
+      .getOne();
+
+    if (!user) throw new NotFoundException('User not found');
     if (!(await bcrypt.compare(dto.currentPassword, user.password))) {
       throw new ForbiddenException('Current password is incorrect');
     }

@@ -5,6 +5,8 @@ import { ChatMessage } from '../chat/entities/chat-message.entity';
 import { Site } from '../site/entities/site.entity';
 import { User } from '../user/entities/user.entity';
 import { Organization } from '../organization/entities/organization.entity';
+import { Document } from '../document/entities/document.entity';
+import { DocumentChunk } from '../document/entities/document-chunk.entity';
 import { AnalyticsController } from './analytics.controller';
 import { AnalyticsService } from './analytics.service';
 
@@ -16,6 +18,8 @@ import { AnalyticsService } from './analytics.service';
       Site,
       User,
       Organization,
+      Document,
+      DocumentChunk,
     ]),
   ],
   controllers: [AnalyticsController],

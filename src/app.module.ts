@@ -83,7 +83,7 @@ import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
       {
         name: 'short',
         ttl: 60_000, // 1 minute
-        limit: 30, // 30 requests per minute
+        limit: 120, // 120 requests per minute
       },
     ]),
     ScheduleModule.forRoot(),

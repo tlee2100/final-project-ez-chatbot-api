@@ -192,9 +192,7 @@ describe('UserService access rules', () => {
         organizationId: null,
       });
 
-      expect(repository.findOne).toHaveBeenCalledWith({
-        where: { id: 'user-inactive' },
-      });
+      expect(result).toEqual({ activationEmailQueued: true });
       expect(repository.save).toHaveBeenCalled();
       expect(emailQueueService.enqueueUserActivationEmail).toHaveBeenCalledWith(
         expect.objectContaining({

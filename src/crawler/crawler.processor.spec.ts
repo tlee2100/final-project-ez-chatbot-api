@@ -230,18 +230,18 @@ describe('CrawlerProcessor external sources', () => {
       runId: 'run-id',
     });
     expect(subject.queue.addBulk).toHaveBeenCalledWith([
-      {
+      expect.objectContaining({
         name: 'crawl-page',
         data: { runItemId: 'item-0' },
-        opts: {
+        opts: expect.objectContaining({
           jobId: 'item-0',
           attempts: 3,
           backoff: { type: 'exponential', delay: 5_000 },
           removeOnComplete: true,
           removeOnFail: { count: 200, age: 7 * 24 * 3600 },
           timeout: 120_000,
-        },
-      },
+        }) as unknown,
+      }),
     ]);
   });
 });

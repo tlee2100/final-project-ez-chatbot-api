@@ -185,10 +185,16 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           typeof draftPayload.sessionId === 'string'
             ? draftPayload.sessionId
             : undefined;
+
+        // Always use conversationId as fallback — the original holdSlot
+        // call used conversationId when no sessionId was provided, so we
+        // must match it here to release old holds correctly.
+        const effectiveSessionId = updatedSessionId || conversationId;
+
         if (toolProvider && holdResourceId && holdDate && holdTimeSlot) {
           try {
             logger.log(
-              `[Structured Step] Updating hold on draft edit: date=${holdDate}, timeSlot=${holdTimeSlot}, resourceId=${holdResourceId}`,
+              `[Structured Step] Updating hold on draft edit: date=${holdDate}, timeSlot=${holdTimeSlot}, resourceId=${holdResourceId}, sessionId=${effectiveSessionId}`,
             );
             const holdResult = await toolProvider.execute({
               name: 'holdSlot',
@@ -204,7 +210,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
                       ? draftPayload.slots.length
                       : 1,
                 slots: draftPayload.slots,
-                sessionId: draftPayload.sessionId,
+                sessionId: effectiveSessionId,
               },
             });
             if (
@@ -236,7 +242,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
 
         chatGateway.emitBookingSummary(conversationId, {
           ...draftPayload,
-          sessionId: updatedSessionId,
+          sessionId: updatedSessionId || effectiveSessionId,
           locale: state.activeFlowLocale ?? state.locale,
           serviceId: rawServiceIds[0] ?? service?.id,
           serviceIds: rawServiceIds.length > 0 ? rawServiceIds : undefined,
@@ -354,7 +360,10 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
 
     // 3. Handle /select-booking-option actions
     if (bookingOption) {
-      if (bookingOption.action === 'select_service') {
+      if (
+        bookingOption.action === 'select_service' ||
+        bookingOption.action === 'skip_service'
+      ) {
         if (resources.length === 0) {
           const prompt = getBookingOptionPrompt(locale, 'date', templateId);
           return {
@@ -401,10 +410,18 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           .filter((m) => m.constructor?.name?.includes('HumanMessage'))
           .map(messageText);
 
-        const serviceOpt = userMessages
+        const lastServiceOpt = userMessages
           .map((t) => parseBookingOptionSelection(t))
-          .filter((o) => o?.action === 'select_service')
+          .filter(
+            (o) =>
+              o?.action === 'select_service' || o?.action === 'skip_service',
+          )
           .pop();
+        const serviceOpt =
+          lastServiceOpt?.action === 'select_service'
+            ? lastServiceOpt
+            : undefined;
+
         const resourceOpt = userMessages
           .map((t) => parseBookingOptionSelection(t))
           .filter(
@@ -413,15 +430,19 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           )
           .pop();
 
-        const serviceId =
-          serviceOpt?.value ??
-          services.find((s) => s.id === serviceOpt?.value)?.id ??
-          services.find((s) =>
-            userMessages.some((msg) =>
-              msg.toLowerCase().includes(s.name.toLowerCase()),
-            ),
-          )?.id ??
-          services[0]?.id;
+        const isSkipService = lastServiceOpt?.action === 'skip_service';
+        const isSalon = templateId === 'salon';
+
+        const serviceId = isSkipService
+          ? undefined
+          : (serviceOpt?.value ??
+            services.find((s) => s.id === serviceOpt?.value)?.id ??
+            services.find((s) =>
+              userMessages.some((msg) =>
+                msg.toLowerCase().includes(s.name.toLowerCase()),
+              ),
+            )?.id ??
+            (isSalon ? services[0]?.id : undefined));
 
         const resourceId =
           resourceOpt?.action === 'no_preference'
@@ -501,10 +522,20 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             .replace(/đ/g, 'd')
             .trim();
 
-        const serviceOpt = userMessages
+        const lastServiceOpt = userMessages
           .map((t) => parseBookingOptionSelection(t))
-          .filter((o) => o?.action === 'select_service')
+          .filter(
+            (o) =>
+              o?.action === 'select_service' || o?.action === 'skip_service',
+          )
           .pop();
+
+        const isSkipService = lastServiceOpt?.action === 'skip_service';
+        const isSalon = templateId === 'salon';
+        const serviceOpt =
+          lastServiceOpt?.action === 'select_service'
+            ? lastServiceOpt
+            : undefined;
 
         const resourceOpt = userMessages
           .map((t) => parseBookingOptionSelection(t))
@@ -566,24 +597,48 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           (!isAnonymousVisitor ? options.visitorContext?.name : '') ??
           '';
 
-        const matchedService = services.find((s) => {
-          if (serviceOpt?.value === s.id) return true;
-          const sNorm = normalizeStr(s.name);
-          return userMessages.some((msg) => normalizeStr(msg).includes(sNorm));
-        });
+        const rawSelectedServiceIds = (serviceOpt?.value || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
 
-        const serviceId =
-          serviceOpt?.value ??
-          matchedService?.id ??
-          (services.length > 0 ? services[0]?.id : undefined);
+        const selectedServices = isSkipService
+          ? []
+          : rawSelectedServiceIds
+              .map((sId) =>
+                services.find(
+                  (s) =>
+                    s.id === sId || s.name.toLowerCase() === sId.toLowerCase(),
+                ),
+              )
+              .filter((s): s is NonNullable<typeof s> => Boolean(s));
 
+        const matchedService =
+          isSkipService || (!isSalon && !serviceOpt)
+            ? undefined
+            : services.find((s) => {
+                if (serviceOpt?.value === s.id) return true;
+                const sNorm = normalizeStr(s.name);
+                return userMessages.some((msg) =>
+                  normalizeStr(msg).includes(sNorm),
+                );
+              });
+
+        const singleServiceId = isSkipService
+          ? undefined
+          : (serviceOpt?.value ??
+            matchedService?.id ??
+            (isSalon && services.length > 0 ? services[0]?.id : undefined));
+
+        const singleService = isSkipService
+          ? undefined
+          : services.find((s) => s.id === singleServiceId);
         const resourceId =
           latestSlotSel?.resourceId ??
           (resourceOpt?.action === 'no_preference'
             ? undefined
             : (resourceOpt?.value ?? resources[0]?.id));
 
-        const service = services.find((s) => s.id === serviceId);
         const resource = resources.find((r) => r.id === resourceId);
         const slotCount =
           latestSlotSel?.slotCount ??
@@ -591,29 +646,76 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             ? latestSlotSel.slots.length
             : 1);
 
-        const serviceIds = serviceId
-          ? Array(slotCount).fill(serviceId)
-          : undefined;
-        const serviceNames = service
-          ? Array(slotCount).fill(service.name)
-          : undefined;
+        const serviceIds: string[] | undefined =
+          selectedServices.length > 0
+            ? selectedServices.map((s) => s.id)
+            : rawSelectedServiceIds.length > 0
+              ? rawSelectedServiceIds
+              : singleServiceId
+                ? Array(slotCount).fill(singleServiceId)
+                : undefined;
+
+        const serviceNames: string[] | undefined =
+          selectedServices.length > 0
+            ? selectedServices.map((s) => s.name)
+            : singleService
+              ? Array(slotCount).fill(singleService.name)
+              : undefined;
+
+        const primaryServiceId: string | undefined =
+          serviceIds?.[0] ?? singleServiceId;
+        const primaryServiceName: string | undefined =
+          serviceNames?.[0] ?? singleService?.name;
+
+        // Calculate chronological endTimeSlot
+        let calculatedEndTimeSlot = latestSlotSel?.endTimeSlot;
+        if (
+          Array.isArray(latestSlotSel?.slots) &&
+          latestSlotSel.slots.length > 0
+        ) {
+          const sorted = [...latestSlotSel.slots].sort((a, b) => {
+            const dc = (a.date || '').localeCompare(b.date || '');
+            if (dc !== 0) return dc;
+            return (a.timeSlot || '').localeCompare(b.timeSlot || '');
+          });
+          const lastSlot = sorted[sorted.length - 1];
+          if (lastSlot?.timeSlot) {
+            const [h, m] = lastSlot.timeSlot.split(':').map(Number);
+            const endM = (h || 0) * 60 + (m || 0) + 30;
+            calculatedEndTimeSlot = `${String(Math.floor(endM / 60) % 24).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
+          }
+        } else if (latestSlotSel?.timeSlot) {
+          const [h, m] = latestSlotSel.timeSlot.split(':').map(Number);
+          const endM = (h || 0) * 60 + (m || 0) + 30 * slotCount;
+          calculatedEndTimeSlot = `${String(Math.floor(endM / 60) % 24).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
+        }
+
+        const enrichedSlots = latestSlotSel?.slots?.map((s, idx) => ({
+          resourceId: s.resourceId,
+          date: s.date,
+          timeSlot: s.timeSlot,
+          serviceId: s.serviceId ?? serviceIds?.[idx] ?? primaryServiceId,
+          serviceName:
+            s.serviceName ?? serviceNames?.[idx] ?? primaryServiceName,
+          staffName: s.staffName ?? resource?.name,
+        }));
 
         chatGateway.emitBookingSummary(conversationId, {
           locale: state.activeFlowLocale ?? state.locale,
           customerName: rawName || 'Khách hàng',
           phone: phoneMsg?.trim() ?? '',
           customerEmail: submittedEmail,
-          serviceId,
+          serviceId: primaryServiceId,
           serviceIds,
-          serviceName: service?.name,
+          serviceName: primaryServiceName,
           serviceNames,
           resourceId,
           resourceName: resource?.name,
           date: latestSlotSel?.date,
           timeSlot: latestSlotSel?.timeSlot,
-          endTimeSlot: latestSlotSel?.endTimeSlot,
+          endTimeSlot: calculatedEndTimeSlot,
           slotCount,
-          slots: latestSlotSel?.slots,
+          slots: enrichedSlots ?? latestSlotSel?.slots,
         });
 
         const prompt =
@@ -695,6 +797,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             resourceId: slotSelection.resourceId,
             slotCount,
             slots: slotSelection.slots,
+            sessionId: conversationId,
           },
         });
       } catch (err) {
