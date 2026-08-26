@@ -245,7 +245,7 @@ export class ChatService implements BeforeApplicationShutdown {
         this.logger.log(
           `Visitor connected to site ${visitor.siteId} for realtime settings`,
         );
-        void client.join(`site-${visitor.siteId}`);
+        void client.join(`site-settings-${visitor.siteId}`);
         if (!visitor.conversationId) {
           client.emit('connected', {
             message: `Connected to site ${visitor.siteId}`,
