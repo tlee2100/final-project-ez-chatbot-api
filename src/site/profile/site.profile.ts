@@ -6,11 +6,17 @@ import { Site } from '../entities/site.entity';
 
 @Injectable()
 export class SiteProfile extends AutomapperProfile {
+  /** Default LLM model for master-key sites — read once at startup from env. */
+  private readonly defaultLlmModel: string;
+
   constructor(@InjectMapper() mapper: Mapper) {
     super(mapper);
+    this.defaultLlmModel =
+      process.env.DEEPSEEK_MODEL || process.env.AI_MODEL || 'qwen3.7-flash';
   }
 
   override get profile() {
+    const defaultLlmModel = this.defaultLlmModel;
     return (mapper: Mapper) => {
       createMap(
         mapper,
@@ -35,6 +41,14 @@ export class SiteProfile extends AutomapperProfile {
         forMember(
           (d) => d.keyMask,
           mapFrom((s) => s.keyMask ?? null),
+        ),
+        forMember(
+          (d) => d.llmModel,
+          // When BYOK is active, expose the site's chosen model.
+          // Otherwise, always reflect the master-key env model so the UI stays in sync.
+          mapFrom((s) =>
+            s.useCustomOpenAiKey && s.llmModel ? s.llmModel : defaultLlmModel,
+          ),
         ),
       );
     };

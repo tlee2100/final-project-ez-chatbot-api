@@ -1011,8 +1011,15 @@ export class SiteService {
   async removeCustomApiKey(
     siteId: string,
     user: JwtUser,
-  ): Promise<{ useCustomOpenAiKey: boolean; customKeyStatus: 'unknown' }> {
+  ): Promise<{
+    useCustomOpenAiKey: boolean;
+    customKeyStatus: 'unknown';
+    llmModel: string;
+  }> {
     await this.assertSiteAccess(siteId, user);
+
+    const defaultModel =
+      process.env.DEEPSEEK_MODEL || process.env.AI_MODEL || 'qwen3.7-flash';
 
     await this.siteRepository.update(siteId, {
       encryptedOpenAiKey: null,
@@ -1020,12 +1027,17 @@ export class SiteService {
       customKeyStatus: 'unknown',
       customBaseUrl: null,
       keyMask: null,
+      llmModel: defaultModel,
     });
 
     this.logger.log(
       `Custom OpenAI key removed for site ${siteId} by user ${user.id}`,
     );
-    return { useCustomOpenAiKey: false, customKeyStatus: 'unknown' };
+    return {
+      useCustomOpenAiKey: false,
+      customKeyStatus: 'unknown',
+      llmModel: defaultModel,
+    };
   }
 
   /**
