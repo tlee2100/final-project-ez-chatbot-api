@@ -66,7 +66,7 @@ describe('KnowledgeRetrievalService', () => {
       siteId,
       queryVector: vector,
       embeddingModel: model,
-      topK: 4,
+      topK: 12,
     });
   });
 
@@ -74,7 +74,7 @@ describe('KnowledgeRetrievalService', () => {
     await service.searchRelevantChunks({ siteId, query: 'shipping', topK: 12 });
 
     expect(searchSimilarChunks).toHaveBeenCalledWith(
-      expect.objectContaining({ topK: 4 }),
+      expect.objectContaining({ topK: 12 }),
     );
   });
 
@@ -106,6 +106,27 @@ describe('KnowledgeRetrievalService', () => {
         minSimilarity: 0,
       }),
     ).resolves.toEqual([candidates[0]]);
+  });
+
+  it('prioritizes and accepts an exact meaningful keyword match', async () => {
+    const generic = result('generic', 0.9);
+    const exact = {
+      ...result('refine', 0.31),
+      content: 'Refine is a React-based framework for building applications.',
+    };
+    searchSimilarChunks.mockResolvedValue([generic, exact]);
+
+    const results = await service.searchRelevantChunks({
+      siteId,
+      query: 'refine là gì',
+    });
+
+    expect(results[0]).toMatchObject({
+      chunkId: 'refine',
+      keywordMatched: true,
+      similarity: 0.31,
+    });
+    expect(results).toHaveLength(2);
   });
 
   it('does not query the repository when query embedding fails', async () => {
