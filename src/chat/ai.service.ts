@@ -109,7 +109,7 @@ export class AiService {
   ): ChatOpenAI {
     let resolvedApiKey = this.apiKey;
     let resolvedBaseURL: string | undefined = this.baseURL;
-    let resolvedModelName: string = site.llmModel?.trim() || this.modelName;
+    let resolvedModelName: string = this.modelName;
 
     if (site.useCustomOpenAiKey) {
       if (!site.encryptedOpenAiKey) {
@@ -141,6 +141,7 @@ export class AiService {
         );
       }
     }
+    // If !site.useCustomOpenAiKey: resolvedApiKey/baseURL/modelName already default to master env values.
 
     return new ChatOpenAI({
       apiKey: resolvedApiKey,
