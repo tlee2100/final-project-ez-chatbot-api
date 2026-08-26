@@ -203,29 +203,45 @@ export class AnalyticsService {
       agentHandoff = 100 - aiResolved;
     }
 
-    // 6. Real Avg Agent Response Time calculation (Only human Agent responses, paired with latest visitor message)
+    // 6. Real Avg Agent Response Time calculation (Turn-based precomputed responseTimeSec)
     let avgResponseTime = 'N/A';
     if (siteIds.length > 0) {
       try {
-        const resTimeRaw = await this.chatMessageRepo.manager.query<
-          { avgDiff: string | null }[]
-        >(
-          `SELECT AVG(EXTRACT(EPOCH FROM (agent."createdAt" - (
-             SELECT MAX(v."createdAt")
-             FROM chat_messages v
-             WHERE v."conversationId" = agent."conversationId"
-               AND v."senderType" = $1
-               AND v."createdAt" < agent."createdAt"
-               AND v."createdAt" >= agent."createdAt" - INTERVAL '1 hour'
-           )))) AS "avgDiff"
-           FROM chat_messages agent
-           INNER JOIN conversations c ON c.id = agent."conversationId"
-           WHERE c."siteId" = ANY($2)
-             AND agent."senderType" = $3`,
-          [SenderType.VISITOR, siteIds, SenderType.AGENT],
-        );
+        const resTimeRaw = await this.chatMessageRepo
+          .createQueryBuilder('m')
+          .innerJoin('m.conversation', 'c')
+          .select('AVG(m.responseTimeSec)', 'avgDiff')
+          .where('c.siteId IN (:...siteIds)', { siteIds })
+          .andWhere('m.senderType = :agentType', {
+            agentType: SenderType.AGENT,
+          })
+          .andWhere('m.responseTimeSec IS NOT NULL')
+          .getRawOne<{ avgDiff: string | null }>();
 
-        const diffStr = resTimeRaw?.[0]?.avgDiff;
+        let diffStr = resTimeRaw?.avgDiff;
+
+        // Fallback to on-the-fly calculation for historical messages not yet backfilled
+        if (!diffStr) {
+          const legacyRaw = await this.chatMessageRepo.manager.query<
+            { avgDiff: string | null }[]
+          >(
+            `SELECT AVG(EXTRACT(EPOCH FROM (agent."createdAt" - (
+               SELECT MAX(v."createdAt")
+               FROM chat_messages v
+               WHERE v."conversationId" = agent."conversationId"
+                 AND v."senderType" = $1
+                 AND v."createdAt" < agent."createdAt"
+                 AND v."createdAt" >= agent."createdAt" - INTERVAL '1 hour'
+             )))) AS "avgDiff"
+             FROM chat_messages agent
+             INNER JOIN conversations c ON c.id = agent."conversationId"
+             WHERE c."siteId" = ANY($2)
+               AND agent."senderType" = $3`,
+            [SenderType.VISITOR, siteIds, SenderType.AGENT],
+          );
+          diffStr = legacyRaw?.[0]?.avgDiff;
+        }
+
         if (diffStr) {
           const sec = parseFloat(diffStr);
           if (!isNaN(sec) && sec > 0) {

@@ -1616,11 +1616,31 @@ export class ChatService {
         status: MessageStatus.SENT,
         createdAt: new Date(),
         tokenCount: calculatedTokens,
+        responseTimeSec: null,
       } as ChatMessage;
     }
     const conversation = await this.getConversationById(conversationId);
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ForbiddenException('Conversation is closed');
+    }
+
+    // ── Turn-based Response Time Calculation for AGENT ──────────────────────
+    let responseTimeSec: number | null = null;
+    if (senderType === SenderType.AGENT) {
+      const lastMessage = await this.chatMessageRepository.findOne({
+        where: { conversationId },
+        order: { createdAt: 'DESC' },
+      });
+
+      // Only compute if preceding message was from VISITOR (avoid consecutive AGENT bursts)
+      if (lastMessage && lastMessage.senderType === SenderType.VISITOR) {
+        const diffMs = Date.now() - new Date(lastMessage.createdAt).getTime();
+        const diffSec = Math.round(diffMs / 1000);
+        // Limit calculation to a 1-hour window (3600 seconds)
+        if (diffSec >= 0 && diffSec <= 3600) {
+          responseTimeSec = diffSec;
+        }
+      }
     }
 
     const message = this.chatMessageRepository.create({
@@ -1631,6 +1651,7 @@ export class ChatService {
       locale: locale ?? null,
       components: components ?? null,
       tokenCount: calculatedTokens,
+      responseTimeSec,
     });
 
     this.logger.log({
