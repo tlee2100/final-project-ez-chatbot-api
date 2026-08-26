@@ -27,7 +27,6 @@ import {
   isEqual,
   parseISO,
   startOfDay,
-  endOfDay,
   getDay,
 } from 'date-fns';
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
@@ -241,6 +240,21 @@ export class BookingService {
     endDate: string,
     timezone: string,
   ) {
+    const parseToDateStr = (str: string): string => {
+      if (!str) return formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd');
+      try {
+        if (str.includes('T') || str.includes(':')) {
+          const parsed = parseISO(str);
+          if (!isNaN(parsed.getTime())) {
+            return formatInTimeZone(parsed, timezone, 'yyyy-MM-dd');
+          }
+        }
+        return str.trim().split('T')[0];
+      } catch {
+        return str.trim().split('T')[0];
+      }
+    };
+
     const startDates = startDate
       .split(',')
       .map((d) => d.trim())
@@ -250,22 +264,30 @@ export class BookingService {
       .map((d) => d.trim())
       .filter(Boolean);
 
-    const allDateStrs = Array.from(
-      new Set([...startDates, ...endDates]),
+    const rawDateStrs = [...startDates, ...endDates];
+    const normalizedDates = Array.from(
+      new Set(rawDateStrs.map((d) => parseToDateStr(d))),
     ).sort();
-    const minDateStr = allDateStrs[0] || format(new Date(), 'yyyy-MM-dd');
-    const maxDateStr = allDateStrs[allDateStrs.length - 1] || minDateStr;
 
-    const requestedStart = parseISO(minDateStr);
+    const minDateStr =
+      normalizedDates[0] ||
+      formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd');
+    const maxDateStr =
+      normalizedDates[normalizedDates.length - 1] || minDateStr;
+
+    const minZonedStart = fromZonedTime(`${minDateStr}T00:00:00`, timezone);
+    const maxZonedEnd = fromZonedTime(`${maxDateStr}T23:59:59.999`, timezone);
+
     const todayInSiteTimezone = formatInTimeZone(
       new Date(),
       timezone,
       'yyyy-MM-dd',
     );
     const startBoundary =
-      minDateStr === todayInSiteTimezone ? new Date() : requestedStart;
-    const endBoundary = endOfDay(parseISO(maxDateStr));
-    return { startBoundary, endBoundary, requestedDates: allDateStrs };
+      minDateStr === todayInSiteTimezone ? new Date() : minZonedStart;
+    const endBoundary = maxZonedEnd;
+
+    return { startBoundary, endBoundary, requestedDates: normalizedDates };
   }
 
   private async fetchConfirmedBookings(
@@ -469,24 +491,21 @@ export class BookingService {
         });
 
         if (freeResources.length > 0) {
-          let availableResourcesCount = 0;
-          for (const resource of freeResources) {
+          const unheldResources = freeResources.filter((resource) => {
             const key = this.buildHoldKey(
               siteId,
               resource.id,
               slotStart.toISOString(),
               slotEnd.toISOString(),
             );
-            if (!redisMap.has(key)) {
-              availableResourcesCount++;
-            }
-          }
+            return !redisMap.has(key);
+          });
 
           availableSlots.push({
             startAt: slotStart.toISOString(),
             endAt: slotEnd.toISOString(),
-            status: availableResourcesCount > 0 ? 'AVAILABLE' : 'HOLDING',
-            availableResources: freeResources.map((r) => ({
+            status: unheldResources.length > 0 ? 'AVAILABLE' : 'HOLDING',
+            availableResources: unheldResources.map((r) => ({
               resourceId: r.id,
               resourceName: r.name,
             })),
@@ -498,7 +517,7 @@ export class BookingService {
     return { slots: availableSlots };
   }
 
-  async holdSlot(siteId: string, dto: HoldSlotDto) {
+  async holdSlot(siteId: string, dto: HoldSlotDto, emitEvent = true) {
     if (dto.slots && dto.slots.length > 0) {
       return this.holdSlots(siteId, dto.slots, dto.sessionId);
     }
@@ -570,11 +589,13 @@ export class BookingService {
       throw new ConflictException('Slot is currently being held');
     }
 
-    this.bookingGateway.emitSlotHeld(siteId, {
-      resourceId: dto.resourceId,
-      startAt: dto.startAt,
-      endAt: dto.endAt,
-    });
+    if (emitEvent) {
+      this.bookingGateway.emitSlotHeld(siteId, {
+        resourceId: dto.resourceId,
+        startAt: dto.startAt,
+        endAt: dto.endAt,
+      });
+    }
 
     return { success: true };
   }
@@ -589,6 +610,18 @@ export class BookingService {
     }>,
     sessionId: string,
   ): Promise<{ sessionId: string }> {
+    // Validate duplicate slots in request
+    const seenHoldKeys = new Set<string>();
+    for (const s of slots) {
+      const key = this.buildHoldKey(siteId, s.resourceId, s.startAt, s.endAt);
+      if (seenHoldKeys.has(key)) {
+        throw new BadRequestException(
+          'Duplicate slots detected in hold request for the same resource and time.',
+        );
+      }
+      seenHoldKeys.add(key);
+    }
+
     const newKeys = slots.map((s) =>
       this.buildHoldKey(siteId, s.resourceId, s.startAt, s.endAt),
     );
@@ -597,14 +630,27 @@ export class BookingService {
     await this.releaseSessionHolds(siteId, sessionId, newKeys);
 
     for (const slot of slots) {
-      await this.holdSlot(siteId, {
-        resourceId: slot.resourceId,
-        serviceId: slot.serviceId,
-        startAt: slot.startAt,
-        endAt: slot.endAt,
-        sessionId,
-      });
+      await this.holdSlot(
+        siteId,
+        {
+          resourceId: slot.resourceId,
+          serviceId: slot.serviceId,
+          startAt: slot.startAt,
+          endAt: slot.endAt,
+          sessionId,
+        },
+        false,
+      );
     }
+
+    this.bookingGateway.emitSlotsHeld(
+      siteId,
+      slots.map((s) => ({
+        resourceId: s.resourceId,
+        startAt: s.startAt,
+        endAt: s.endAt,
+      })),
+    );
 
     return { sessionId };
   }
@@ -749,6 +795,18 @@ export class BookingService {
 
     // Multi-slot array mode
     if (dto.slots && dto.slots.length > 0) {
+      // Validate no duplicate slots in the same request
+      const seenSlots = new Set<string>();
+      for (const slot of dto.slots) {
+        const slotKey = `${slot.resourceId || 'default'}__${slot.date}__${slot.timeSlot}`;
+        if (seenSlots.has(slotKey)) {
+          throw new BadRequestException(
+            `Duplicate slot detected for staff on date ${slot.date} at ${slot.timeSlot}. Each slot must have a unique time or staff.`,
+          );
+        }
+        seenSlots.add(slotKey);
+      }
+
       const groupedSpans = groupConsecutiveSlots(
         dto.slots,
         duration,

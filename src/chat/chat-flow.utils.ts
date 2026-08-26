@@ -60,6 +60,8 @@ export type BookingSlotSelection = {
     date: string;
     timeSlot: string;
     serviceId?: string;
+    serviceName?: string;
+    staffName?: string;
   }>;
   resourceId?: string;
   language?: string;
@@ -400,9 +402,12 @@ export type BookingHoursConfig = {
 export type BookingSiteContext = {
   name?: string;
   bookingEnabled?: boolean;
+  humanHandoffEnabled?: boolean;
   bookingServices?: { id?: string; name: string }[];
   bookingResources?: { id?: string; name: string }[];
   bookingHours?: BookingHoursConfig;
+  industryTemplateId?: string;
+  industryTemplateConfig?: Record<string, unknown>;
 };
 
 export type BookingVisitorContext = {

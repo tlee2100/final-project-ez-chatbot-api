@@ -239,7 +239,7 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
         .emit('conversationTimerReset', { conversationId });
     }
 
-    this.scheduleTimers(conversationId, site, new Date());
+    void this.scheduleTimers(conversationId, site, new Date());
   }
 
   /**
@@ -291,7 +291,7 @@ export class ChatTimeoutService implements OnModuleInit, OnModuleDestroy {
       });
 
       for (const conv of conversations) {
-        this.scheduleTimers(
+        await this.scheduleTimers(
           conv.id,
           conv.site,
           conv.lastActivityAt,

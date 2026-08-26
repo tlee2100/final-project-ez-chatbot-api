@@ -59,6 +59,7 @@ import {
   extractRequestedTimeSlot,
   isBookingFlowIntent,
   isBookingSlotSelection,
+  isNaturalBookingTrigger,
   isTimeSlotAvailable,
   parseBookingSlotSelection,
   parseMultimodalContent,
@@ -174,6 +175,27 @@ export class GraphService {
     }
 
     return true;
+  }
+
+  // ─── Checkpoint Management ────────────────────────────────────────────────
+
+  /**
+   * Clears the MemorySaver checkpoint for a conversation thread.
+   * Called when a new booking flow starts so stale internal messages
+   * from the previous flow are not concatenated, preventing exponential
+   * message growth.
+   */
+  private async clearCheckpointForThread(threadId: string): Promise<void> {
+    try {
+      await this.checkpointer.deleteThread(threadId);
+      this.logger.log(
+        `Cleared checkpoint state for thread ${threadId} (new booking flow)`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to clear checkpoint for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // ─── High-level entry point (called by Controller & Gateway) ───────────────
@@ -808,6 +830,17 @@ export class GraphService {
                 const services = options.siteContext?.bookingServices ?? [];
                 const resources = options.siteContext?.bookingResources ?? [];
 
+                const isGeneral =
+                  options.siteContext?.industryTemplateId === 'general' ||
+                  (options.siteContext?.industryTemplateId !== undefined &&
+                    options.siteContext?.industryTemplateId !== 'salon');
+
+                const isSkipServiceSelected = userMessages.some((msg) =>
+                  msg.includes(
+                    '/select-booking-option {"action":"skip_service"',
+                  ),
+                );
+
                 const normalizeStr = (str: string) =>
                   str
                     .toLowerCase()
@@ -816,38 +849,55 @@ export class GraphService {
                     .replace(/đ/g, 'd')
                     .trim();
 
-                const matchedServices = services.filter((item) => {
-                  if (
-                    Array.isArray(args.serviceIds) &&
-                    (args.serviceIds as string[]).includes(item.id)
-                  )
-                    return true;
-                  if (args.serviceId === item.id) return true;
-                  if (
-                    Array.isArray(args.serviceNames) &&
-                    (args.serviceNames as string[]).some(
-                      (n) => n.toLowerCase() === item.name.toLowerCase(),
-                    )
-                  )
-                    return true;
-                  if (
-                    typeof args.serviceName === 'string' &&
-                    args.serviceName.toLowerCase() === item.name.toLowerCase()
-                  )
-                    return true;
-                  const itemNorm = normalizeStr(item.name);
-                  return userMessages.some((msg) =>
-                    normalizeStr(msg).includes(itemNorm),
-                  );
-                });
+                const matchedServices = isSkipServiceSelected
+                  ? []
+                  : services.filter((item) => {
+                      if (
+                        Array.isArray(args.serviceIds) &&
+                        (args.serviceIds as string[]).includes(item.id)
+                      )
+                        return true;
+                      if (args.serviceId === item.id) return true;
+                      if (
+                        Array.isArray(args.serviceNames) &&
+                        (args.serviceNames as string[]).some(
+                          (n) => n.toLowerCase() === item.name.toLowerCase(),
+                        )
+                      )
+                        return true;
+                      if (
+                        typeof args.serviceName === 'string' &&
+                        args.serviceName.toLowerCase() ===
+                          item.name.toLowerCase()
+                      )
+                        return true;
+
+                      // For general template without explicit service selection, do not falsely substring match
+                      const hasExplicitServiceAction = userMessages.some(
+                        (msg) =>
+                          msg.includes(
+                            '/select-booking-option {"action":"select_service"',
+                          ),
+                      );
+                      if (isGeneral && !hasExplicitServiceAction) {
+                        return false;
+                      }
+
+                      const itemNorm = normalizeStr(item.name);
+                      return userMessages.some((msg) =>
+                        normalizeStr(msg).includes(itemNorm),
+                      );
+                    });
 
                 const service =
                   matchedServices[0] ??
-                  services.find((item) => item.id === args.serviceId);
+                  (isSkipServiceSelected
+                    ? undefined
+                    : services.find((item) => item.id === args.serviceId));
                 const serviceIds =
                   matchedServices.length > 0
                     ? matchedServices.map((s) => s.id)
-                    : Array.isArray(args.serviceIds)
+                    : Array.isArray(args.serviceIds) && !isSkipServiceSelected
                       ? (args.serviceIds as string[])
                       : service?.id
                         ? [service.id]
@@ -896,8 +946,13 @@ export class GraphService {
 
                 toolArgs = {
                   ...args,
-                  serviceId: serviceIds[0] ?? service?.id ?? args.serviceId,
-                  serviceIds: serviceIds.length > 0 ? serviceIds : undefined,
+                  serviceId: isSkipServiceSelected
+                    ? undefined
+                    : (serviceIds[0] ?? service?.id ?? args.serviceId),
+                  serviceIds:
+                    !isSkipServiceSelected && serviceIds.length > 0
+                      ? serviceIds
+                      : undefined,
                   slotCount,
                   resourceId: resource?.id ?? args.resourceId,
                   date: args.date ?? slotSelection?.date,
@@ -915,6 +970,7 @@ export class GraphService {
                 }
 
                 if (
+                  !isGeneral &&
                   services.length > 0 &&
                   !service &&
                   serviceIds.length === 0
@@ -934,13 +990,20 @@ export class GraphService {
                   this.chatGateway.emitBookingSummary(conversationId, {
                     ...toolArgs,
                     locale: activeFlowLocale ?? currentLocale,
-                    serviceId: serviceIds[0] ?? service?.id,
-                    serviceIds: serviceIds.length ? serviceIds : undefined,
-                    serviceName:
-                      serviceNames[0] ?? service?.name ?? args.serviceName,
-                    serviceNames: serviceNames.length
-                      ? serviceNames
-                      : undefined,
+                    serviceId: isSkipServiceSelected
+                      ? undefined
+                      : (serviceIds[0] ?? service?.id),
+                    serviceIds:
+                      !isSkipServiceSelected && serviceIds.length
+                        ? serviceIds
+                        : undefined,
+                    serviceName: isSkipServiceSelected
+                      ? undefined
+                      : (serviceNames[0] ?? service?.name ?? args.serviceName),
+                    serviceNames:
+                      !isSkipServiceSelected && serviceNames.length
+                        ? serviceNames
+                        : undefined,
                     slotCount,
                     slots: finalSlots,
                     endTimeSlot: calculatedEndTimeSlot,
@@ -1224,10 +1287,20 @@ export class GraphService {
         return { messages: [new AIMessage(handoffMsg)] };
       };
 
-      const abandonBookingNode = (state: typeof AgentState.State) => ({
-        exitSubgraph: null,
-        messages: [new AIMessage(getAbandonBookingPrompt(state.locale))],
-      });
+      const abandonBookingNode = async (state: typeof AgentState.State) => {
+        try {
+          await this.bookingService.releaseSessionHolds(siteId, conversationId);
+        } catch (err) {
+          this.logger.warn(
+            `Failed to release session holds on abandon for conv ${conversationId}`,
+            err,
+          );
+        }
+        return {
+          exitSubgraph: null,
+          messages: [new AIMessage(getAbandonBookingPrompt(state.locale))],
+        };
+      };
 
       const SUMMARIZE_THRESHOLD = 25;
       const summarizeMemory = (state: typeof AgentState.State) => {
@@ -1352,9 +1425,35 @@ export class GraphService {
       };
 
       // ── 6. Resume-Aware Invocation ──────────────────────────────────────────
+      //
+      // When a fresh booking flow starts (e.g. visitor says "Đặt lịch" again
+      // after completing a previous booking), the MemorySaver checkpoint from
+      // the prior flow contains thousands of internal messages.  The concat
+      // reducer would merge them with the new DB messages, causing exponential
+      // growth (observed: 622 513 messages after a few steps).  We therefore
+      // clear the checkpoint whenever a new booking init is detected.
+      // ──────────────────────────────────────────────────────────────────────────
       let finalState: typeof AgentState.State;
 
       if (!isTestSession) {
+        const isFreshBookingInit =
+          !activeFlow && isNaturalBookingTrigger(latestUserText, currentLocale);
+
+        if (isFreshBookingInit) {
+          await this.clearCheckpointForThread(conversationId);
+          try {
+            await this.bookingService.releaseSessionHolds(
+              siteId,
+              conversationId,
+            );
+          } catch (err) {
+            this.logger.warn(
+              `Failed to release lingering session holds for conv ${conversationId}`,
+              err,
+            );
+          }
+        }
+
         const currentState = await app.getState(threadConfig).catch(() => null);
         const hasPendingInterrupt = Boolean(
           currentState &&

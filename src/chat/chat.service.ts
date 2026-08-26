@@ -813,7 +813,7 @@ export class ChatService implements BeforeApplicationShutdown {
     );
 
     // Schedule inactivity timeout & warning timers for the new conversation
-    this.chatTimeoutService.scheduleTimers(
+    void this.chatTimeoutService.scheduleTimers(
       result.conversationId,
       site,
       new Date(),
@@ -918,7 +918,7 @@ export class ChatService implements BeforeApplicationShutdown {
     );
 
     // Schedule timers for test conversation
-    this.chatTimeoutService.scheduleTimers(
+    void this.chatTimeoutService.scheduleTimers(
       saved.id,
       site,
       saved.lastActivityAt,
