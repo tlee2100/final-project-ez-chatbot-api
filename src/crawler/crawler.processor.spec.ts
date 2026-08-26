@@ -125,6 +125,9 @@ describe('CrawlerProcessor external sources', () => {
       update: jest.fn().mockResolvedValue(undefined),
     };
     const http = { isNotModified: jest.fn().mockResolvedValue(true) };
+    const crawlerService = {
+      startNextWaitingRun: jest.fn().mockResolvedValue(null),
+    };
     const processor = new CrawlerProcessor(
       configRepository as never,
       runRepository as never,
@@ -132,7 +135,7 @@ describe('CrawlerProcessor external sources', () => {
       documentRepository as never,
       siteRepository as never,
       queue as never,
-      {} as never,
+      crawlerService as never,
       sitemapService as never,
       {
         isAllowed: jest.fn().mockResolvedValue(true),
@@ -157,6 +160,9 @@ describe('CrawlerProcessor external sources', () => {
       urlService,
       documentRepository,
       http,
+      crawlerService,
+      run,
+      queryBuilder,
     };
   }
 
@@ -243,5 +249,39 @@ describe('CrawlerProcessor external sources', () => {
         }) as unknown,
       }),
     ]);
+  });
+
+  it('starts the next waiting URL after a run completes', async () => {
+    const subject = createSubject();
+    subject.run.totalPages = 1;
+
+    await subject.processor.handlePage({
+      data: { runItemId: 'item-id' },
+      opts: { attempts: 1 },
+      attemptsMade: 0,
+    } as never);
+
+    expect(subject.crawlerService.startNextWaitingRun).toHaveBeenCalledWith(
+      'site-id',
+    );
+  });
+
+  it('starts the next waiting URL after a sitemap run fails', async () => {
+    const subject = createSubject(CrawlRunTrigger.MANUAL_SITEMAP);
+    subject.sitemapService.discover.mockRejectedValueOnce(
+      new Error('Unable to read sitemap'),
+    );
+
+    await subject.processor.handleSitemap({
+      data: { runId: 'run-id' },
+    } as never);
+
+    expect(subject.runRepository.update).toHaveBeenCalledWith(
+      'run-id',
+      expect.objectContaining({ status: CrawlRunStatus.FAILED }),
+    );
+    expect(subject.crawlerService.startNextWaitingRun).toHaveBeenCalledWith(
+      'site-id',
+    );
   });
 });

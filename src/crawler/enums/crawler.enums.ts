@@ -12,6 +12,7 @@ export enum CrawlRunTrigger {
 }
 
 export enum CrawlRunStatus {
+  WAITING = 'waiting',
   QUEUED = 'queued',
   DISCOVERING = 'discovering',
   PROCESSING = 'processing',

@@ -12,7 +12,7 @@ import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bull';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import type { JwtUser } from '../auth/types/jwt-user.type';
 import { Document } from '../document/entities/document.entity';
 import { DocumentService } from '../document/document.service';
@@ -57,6 +57,7 @@ export class CrawlerService implements OnModuleInit {
     private readonly runRepository: Repository<CrawlRun>,
     @InjectRepository(CrawlRunItem)
     private readonly itemRepository: Repository<CrawlRunItem>,
+    private readonly dataSource: DataSource,
     @InjectRepository(Document)
     private readonly documentRepository: Repository<Document>,
     @InjectQueue(CRAWLER_QUEUE)
@@ -154,14 +155,45 @@ export class CrawlerService implements OnModuleInit {
     await this.siteService.assertSiteAccess(siteId, user);
     const normalizedUrl = this.urlService.normalize(rawUrl);
     await this.urlService.assertPublicUrl(normalizedUrl);
-    const run = await this.createRun({
+    const runInput: Partial<CrawlRun> = {
       siteId,
       crawlerConfigId: null,
       requestedByUserId: user.id,
       trigger,
       targetUrl: normalizedUrl,
-    });
-    const item = await this.itemRepository.save(
+    };
+
+    let run: CrawlRun;
+    let item: CrawlRunItem;
+    let isWaiting = false;
+
+    try {
+      run = await this.createRun(runInput);
+    } catch (error) {
+      if (
+        trigger !== CrawlRunTrigger.MANUAL_URL ||
+        !(error instanceof ConflictException)
+      ) {
+        throw error;
+      }
+      ({ run, item } = await this.createWaitingManualUrlRun(
+        runInput,
+        normalizedUrl,
+      ));
+      isWaiting = true;
+    }
+
+    if (isWaiting) {
+      const startedRunId = await this.startNextWaitingRun(siteId);
+      return {
+        runId: run.id,
+        status:
+          startedRunId === run.id
+            ? CrawlRunStatus.PROCESSING
+            : CrawlRunStatus.WAITING,
+      };
+    }
+    item = await this.itemRepository.save(
       this.itemRepository.create({
         runId: run.id,
         url: normalizedUrl,
@@ -343,6 +375,45 @@ export class CrawlerService implements OnModuleInit {
     return { runId: run.id, status: CrawlRunStatus.PROCESSING };
   }
 
+  async deleteFailedItem(
+    siteId: string,
+    runId: string,
+    itemId: string,
+    user: JwtUser,
+  ) {
+    this.assertFeatureEnabled();
+    await this.siteService.assertSiteAccess(siteId, user);
+    const run = await this.runRepository.findOne({
+      where: { id: runId, siteId },
+    });
+    if (!run) throw new NotFoundException('Crawl run not found');
+
+    const item = await this.itemRepository.findOne({
+      where: { id: itemId, runId },
+    });
+    if (!item) throw new NotFoundException('Crawl run item not found');
+
+    if (
+      item.status !== CrawlRunItemStatus.FAILED &&
+      item.status !== CrawlRunItemStatus.QUOTA_EXCEEDED
+    ) {
+      throw new ConflictException('Can only delete failed crawl items');
+    }
+
+    await this.itemRepository.remove(item);
+
+    if (item.status === CrawlRunItemStatus.FAILED) {
+      run.failedPages = Math.max(0, run.failedPages - 1);
+    } else if (item.status === CrawlRunItemStatus.QUOTA_EXCEEDED) {
+      run.quotaExceededPages = Math.max(0, run.quotaExceededPages - 1);
+    }
+    run.totalPages = Math.max(0, run.totalPages - 1);
+    run.processedPages = Math.max(0, run.processedPages - 1);
+    await this.runRepository.save(run);
+
+    return { success: true };
+  }
+
   async listRuns(siteId: string, page: number, limit: number, user: JwtUser) {
     await this.siteService.assertSiteAccess(siteId, user);
     const safePage = Math.max(1, Number(page) || 1);
@@ -467,6 +538,96 @@ export class CrawlerService implements OnModuleInit {
     });
   }
 
+  private createWaitingManualUrlRun(
+    runInput: Partial<CrawlRun>,
+    normalizedUrl: string,
+  ): Promise<{ run: CrawlRun; item: CrawlRunItem }> {
+    return this.dataSource.transaction(async (manager) => {
+      const runRepository = manager.getRepository(CrawlRun);
+      const itemRepository = manager.getRepository(CrawlRunItem);
+      const run = await runRepository.save(
+        runRepository.create({
+          ...runInput,
+          status: CrawlRunStatus.WAITING,
+          totalPages: 1,
+        }),
+      );
+      const item = await itemRepository.save(
+        itemRepository.create({
+          runId: run.id,
+          url: normalizedUrl,
+          normalizedUrl,
+          status: CrawlRunItemStatus.QUEUED,
+        }),
+      );
+      return { run, item };
+    });
+  }
+
+  async startNextWaitingRun(siteId: string): Promise<string | null> {
+    if (await this.findActiveRun(siteId)) return null;
+
+    const waitingRun = await this.runRepository.findOne({
+      where: { siteId, status: CrawlRunStatus.WAITING },
+      order: { createdAt: 'ASC' },
+    });
+    if (!waitingRun) return null;
+
+    try {
+      const claimed = await this.runRepository.update(
+        { id: waitingRun.id, status: CrawlRunStatus.WAITING },
+        {
+          status: CrawlRunStatus.PROCESSING,
+          startedAt: new Date(),
+          errorMessage: null,
+        },
+      );
+      if (claimed.affected !== 1) return null;
+    } catch (error) {
+      if (
+        error instanceof QueryFailedError &&
+        (error as { code?: string }).code === '23505'
+      ) {
+        return null;
+      }
+      throw error;
+    }
+
+    const items = await this.itemRepository.find({
+      where: {
+        runId: waitingRun.id,
+        status: In([CrawlRunItemStatus.QUEUED, CrawlRunItemStatus.RENDERING]),
+      },
+      order: { createdAt: 'ASC' },
+    });
+
+    if (items.length === 0) {
+      await this.runRepository.update(waitingRun.id, {
+        status: CrawlRunStatus.FAILED,
+        errorMessage: 'Waiting crawl has no URL item',
+        finishedAt: new Date(),
+      });
+      return this.startNextWaitingRun(siteId);
+    }
+
+    for (const item of items) {
+      if (item.status !== CrawlRunItemStatus.QUEUED) {
+        await this.itemRepository.update(item.id, {
+          status: CrawlRunItemStatus.QUEUED,
+        });
+      }
+      try {
+        await this.enqueuePage(item.id);
+      } catch (error) {
+        this.logger.error(
+          `Failed to enqueue waiting crawl item ${item.id}; recovery will retry: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    return waitingRun.id;
+  }
+
   private enqueuePage(runItemId: string) {
     return this.queue.add(
       CRAWL_PAGE_JOB,
@@ -496,11 +657,11 @@ export class CrawlerService implements OnModuleInit {
       where: { status: In(ACTIVE_CRAWL_RUN_STATUSES) },
       order: { createdAt: 'ASC' },
     });
-    if (activeRuns.length === 0) return;
-
-    this.logger.log(
-      `Found ${activeRuns.length} active crawl run(s) to inspect for recovery`,
-    );
+    if (activeRuns.length > 0) {
+      this.logger.log(
+        `Found ${activeRuns.length} active crawl run(s) to inspect for recovery`,
+      );
+    }
 
     for (const run of activeRuns) {
       const isSitemapDiscovery =
@@ -614,6 +775,16 @@ export class CrawlerService implements OnModuleInit {
           `Re-enqueued ${reEnqueuedCount} orphaned page job(s) for run ${run.id}`,
         );
       }
+    }
+
+    const waitingRuns = await this.runRepository.find({
+      where: { status: CrawlRunStatus.WAITING },
+      order: { createdAt: 'ASC' },
+      select: { siteId: true },
+    });
+    const waitingSiteIds = [...new Set(waitingRuns.map((run) => run.siteId))];
+    for (const waitingSiteId of waitingSiteIds) {
+      await this.startNextWaitingRun(waitingSiteId);
     }
   }
 
