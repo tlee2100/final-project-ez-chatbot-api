@@ -288,6 +288,21 @@ export class GraphService {
           sentimentDetection: false,
           site: site ?? undefined,
         });
+      } catch (err: unknown) {
+        const errorMsg =
+          'AI service is temporarily unavailable. Please try again later or request support from an agent.';
+        this.logger.error(
+          `AI test stream error for conversation ${conversationId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('messageError', {
+            conversationId,
+            message: errorMsg,
+          });
+        this.chatGateway.server
+          .to(`conversation-${conversationId}`)
+          .emit('aiMessageComplete', { conversationId });
       } finally {
         this.chatGateway.server
           .to(`conversation-${conversationId}`)
@@ -435,6 +450,21 @@ export class GraphService {
         initialCancelState,
         site: site ?? undefined,
       });
+    } catch (err: unknown) {
+      const errorMsg =
+        'AI service is temporarily unavailable. Please try again later or request support from an agent.';
+      this.logger.error(
+        `AI stream error for conversation ${conversationId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('messageError', {
+          conversationId,
+          message: errorMsg,
+        });
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('aiMessageComplete', { conversationId });
     } finally {
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
