@@ -1134,7 +1134,7 @@ export class ChatService implements BeforeApplicationShutdown {
           .getCount(),
       ]);
 
-    const total = activeBotCount + waitingCount + assignedCount;
+    const total = activeBotCount + waitingCount + assignedCount + closedCount;
 
     return {
       total,
@@ -1178,16 +1178,8 @@ export class ChatService implements BeforeApplicationShutdown {
     const queryBuilder = this.conversationRepository
       .createQueryBuilder('conversation')
       .leftJoinAndSelect('conversation.site', 'site')
-      .leftJoinAndSelect('conversation.agent', 'agent');
-
-    // Only exclude CLOSED if the client hasn't explicitly asked for a status filter
-    if (!query.filter || !query.filter.status) {
-      queryBuilder.where('conversation.status != :closed', {
-        closed: ConversationStatus.CLOSED,
-      });
-    } else {
-      queryBuilder.where('1=1'); // Dummy where so subsequent andWhere works properly
-    }
+      .leftJoinAndSelect('conversation.agent', 'agent')
+      .where('1=1');
 
     if (user.role === UserRole.SUPER_ADMIN) {
       // Super Admins see ALL conversations across the platform. No siteId restriction needed.
