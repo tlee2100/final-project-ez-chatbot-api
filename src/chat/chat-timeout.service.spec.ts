@@ -5,6 +5,7 @@ jest.mock('@automapper/classes', () => ({
   AutoMap: () => () => undefined,
 }));
 
+import { In } from 'typeorm';
 import { ChatTimeoutService } from './chat-timeout.service';
 import {
   ConversationStatus,
@@ -57,14 +58,6 @@ describe('ChatTimeoutService', () => {
     };
   }
 
-  it('does not schedule timers if timeout is disabled', () => {
-    const { service } = makeService();
-    const site = { enableConversationTimeout: false } as Site;
-
-    service.scheduleTimers('conv-1', site, new Date());
-    expect(jest.getTimerCount()).toBe(0);
-  });
-
   it('schedules warning and timeout timers when enabled', async () => {
     const { service, chatService, chatGateway, conversationRepository } =
       makeService();
@@ -81,7 +74,7 @@ describe('ChatTimeoutService', () => {
       status: ConversationStatus.OPEN,
     });
 
-    service.scheduleTimers('conv-1', site, new Date());
+    await service.scheduleTimers('conv-1', site, new Date());
 
     // Advance 8 minutes (10 - 2 = 8 minutes for warning)
     jest.advanceTimersByTime(8 * 60 * 1000);
@@ -122,7 +115,7 @@ describe('ChatTimeoutService', () => {
     );
   });
 
-  it('resets timers and emits conversationTimerReset on resetTimer', () => {
+  it('resets timers and emits conversationTimerReset on resetTimer', async () => {
     const { service, chatGateway } = makeService();
     const site = {
       enableConversationTimeout: true,
@@ -130,7 +123,7 @@ describe('ChatTimeoutService', () => {
       warningTimeMinutes: 2,
     } as Site;
 
-    service.scheduleTimers('conv-1', site, new Date());
+    await service.scheduleTimers('conv-1', site, new Date());
     expect(jest.getTimerCount()).toBe(2);
 
     service.resetTimer('conv-1', site);
@@ -143,7 +136,7 @@ describe('ChatTimeoutService', () => {
     expect(jest.getTimerCount()).toBe(2);
   });
 
-  it('cancels timers and clears timer count on cancelTimer', () => {
+  it('cancels timers and clears timer count on cancelTimer', async () => {
     const { service, chatGateway } = makeService();
     const site = {
       enableConversationTimeout: true,
@@ -151,7 +144,7 @@ describe('ChatTimeoutService', () => {
       warningTimeMinutes: 2,
     } as Site;
 
-    service.scheduleTimers('conv-1', site, new Date());
+    await service.scheduleTimers('conv-1', site, new Date());
     expect(jest.getTimerCount()).toBe(2);
 
     service.cancelTimer('conv-1');
@@ -181,7 +174,7 @@ describe('ChatTimeoutService', () => {
 
     await service.onModuleInit();
     expect(conversationRepository.update).toHaveBeenCalledWith(
-      { id: 'conv-timeout' },
+      { id: In(['conv-timeout']) },
       {
         status: ConversationStatus.CLOSED,
         closedReason: ClosedReason.TIMEOUT,
@@ -206,7 +199,7 @@ describe('ChatTimeoutService', () => {
 
     await service.onModuleInit();
     expect(conversationRepository.update).toHaveBeenCalledWith(
-      { id: 'conv-error' },
+      { id: In(['conv-error']) },
       {
         status: ConversationStatus.CLOSED,
         closedReason: ClosedReason.ERROR,

@@ -7,6 +7,7 @@ import type { LLMMessage } from './interfaces/llm-request.interface';
 
 export type BookingChipAction =
   | 'select_service'
+  | 'skip_service'
   | 'select_resource'
   | 'select_date'
   | 'choose_date'
@@ -38,6 +39,7 @@ export type BookingOptionSelection = {
 
 const bookingChipActions = new Set<BookingChipAction>([
   'select_service',
+  'skip_service',
   'select_resource',
   'select_date',
   'choose_date',
@@ -275,7 +277,8 @@ export const buildChatMessageComponents = (
 
   const selectedOption = parseBookingOptionSelection(latestUserText);
   let step = selectedOption
-    ? selectedOption.action === 'select_service'
+    ? selectedOption.action === 'select_service' ||
+      selectedOption.action === 'skip_service'
       ? 'resource'
       : selectedOption.action === 'select_resource' ||
           selectedOption.action === 'no_preference'
@@ -305,6 +308,17 @@ export const buildChatMessageComponents = (
       value: service.id ?? service.name,
       label: service.name,
     }));
+    const isGeneral =
+      siteContext?.industryTemplateId === 'general' ||
+      (siteContext?.industryTemplateId !== undefined &&
+        siteContext?.industryTemplateId !== 'salon');
+    if (isGeneral && items.length > 0) {
+      items.push({
+        action: 'skip_service',
+        labelKey: 'chip.noService',
+        label: 'Không chọn dịch vụ',
+      });
+    }
   } else if (step === 'resource') {
     items = [
       ...(siteContext?.bookingResources ?? []).map((resource) => ({

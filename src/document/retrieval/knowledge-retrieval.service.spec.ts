@@ -181,5 +181,6 @@ function result(id: string, similarity: number): KnowledgeSearchResult {
     sectionTitle: null,
     metadata: {},
     similarity,
+    keywordMatched: false,
   };
 }
