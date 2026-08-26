@@ -489,6 +489,7 @@ export class CrawlerProcessor {
     ) {
       await this.applyMissingPolicy(runId, run.crawlerConfigId);
     }
+    await this.crawlerService.startNextWaitingRun(run.siteId);
   }
 
   private async applyMissingPolicy(
@@ -526,11 +527,13 @@ export class CrawlerProcessor {
   }
 
   private async failRun(runId: string, message: string): Promise<void> {
+    const run = await this.runRepository.findOne({ where: { id: runId } });
     await this.runRepository.update(runId, {
       status: CrawlRunStatus.FAILED,
       errorMessage: message,
       finishedAt: new Date(),
     });
+    if (run) await this.crawlerService.startNextWaitingRun(run.siteId);
   }
 
   private isRetriable(error: unknown): boolean {

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Delete,
   HttpCode,
   HttpStatus,
   Param,
@@ -117,6 +118,23 @@ export class CrawlerController {
     @Req() req: AuthRequest,
   ) {
     return this.crawlerService.retryFailed(siteId, runId, req.user);
+  }
+
+  @Delete('crawls/:runId/pages/:itemId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a failed URL from a crawl run' })
+  deleteFailedItem(
+    @Param('siteId') siteId: string,
+    @Param('runId', ParseUUIDPipe) runId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Req() req: AuthRequest,
+  ) {
+    return this.crawlerService.deleteFailedItem(
+      siteId,
+      runId,
+      itemId,
+      req.user,
+    );
   }
 
   @Post('sources/:documentId/recrawl')
