@@ -364,6 +364,7 @@ export class SiteService {
     }
     this.chatGateway.server
       .to(`site-${id}`)
+      .to(`site-settings-${id}`)
       .emit('siteSettingsUpdated', updatedSite);
 
     return updatedSite;

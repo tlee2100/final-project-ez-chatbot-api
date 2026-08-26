@@ -238,6 +238,7 @@ export class SiteController {
     const updated = await this.siteService.update(id, dto, req.user);
     this.chatGateway.server
       .to(`site-${id}`)
+      .to(`site-settings-${id}`)
       .emit('siteSettingsUpdated', updated);
     return updated;
   }
