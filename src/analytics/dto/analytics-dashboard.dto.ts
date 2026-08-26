@@ -85,12 +85,6 @@ export class DashboardStatItemDto {
   @ApiProperty({ example: '1,248' })
   value: string;
 
-  @ApiProperty({ example: 12 })
-  trend: number;
-
-  @ApiProperty({ example: 'up' })
-  trendDirection: string;
-
   @ApiProperty({ example: 'message' })
   icon: string;
 
@@ -102,6 +96,37 @@ export class DashboardStatItemDto {
 
   @ApiProperty({ example: false })
   isMock: boolean;
+}
+
+export class KBDocumentDto {
+  @ApiProperty({ example: 'doc-uuid-1' })
+  id: string;
+
+  @ApiProperty({ example: 'FAQ.pdf' })
+  name: string;
+
+  @ApiProperty({ example: 'Main Site' })
+  siteName: string;
+
+  @ApiProperty({ example: 120 })
+  hits: number;
+}
+
+export class SiteUsageDto {
+  @ApiProperty({ example: 'site-uuid-1' })
+  siteId: string;
+
+  @ApiProperty({ example: 'TechSolutions Inc.' })
+  siteName: string;
+
+  @ApiProperty({ example: 450000 })
+  tokens: number;
+
+  @ApiProperty({ example: 38 })
+  percentage: number;
+
+  @ApiProperty({ example: '$9.00' })
+  estimatedCost: string;
 }
 
 export class DashboardAnalyticsDto {
@@ -126,6 +151,15 @@ export class DashboardAnalyticsDto {
   @ApiProperty({ example: 12 })
   totalAgents: number;
 
+  @ApiProperty({ example: 450000 })
+  totalTokens: number;
+
+  @ApiProperty({ example: '1.2s' })
+  avgResponseTime: string;
+
+  @ApiProperty({ example: 9.0 })
+  estimatedCost: number;
+
   @ApiProperty({ type: ContainmentRateDto })
   containmentRate: ContainmentRateDto;
 
@@ -140,4 +174,10 @@ export class DashboardAnalyticsDto {
 
   @ApiProperty({ type: [RecentActivityItemDto] })
   recentActivity: RecentActivityItemDto[];
+
+  @ApiProperty({ type: [KBDocumentDto] })
+  topDocuments: KBDocumentDto[];
+
+  @ApiProperty({ type: [SiteUsageDto] })
+  usageBySite: SiteUsageDto[];
 }

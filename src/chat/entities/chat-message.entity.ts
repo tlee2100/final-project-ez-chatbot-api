@@ -77,6 +77,16 @@ export class ChatMessage {
   @Column({ type: 'timestamptz', nullable: true, default: null })
   feedbackAt: Date | null;
 
+  @Column({ type: 'integer', nullable: true, default: 0 })
+  tokenCount: number | null;
+
+  /**
+   * Response time in seconds compared to the preceding visitor message.
+   * Only computed for the first AGENT response in a reply turn (null for consecutive agent messages, AI, Visitor).
+   */
+  @Column({ type: 'integer', nullable: true, default: null })
+  responseTimeSec: number | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

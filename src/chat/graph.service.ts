@@ -198,15 +198,15 @@ export class GraphService {
     }
 
     if (conversationId.startsWith('admin-test-')) {
-      const site = await this.siteRepo.findOne({
-        where: { id: siteId },
-        relations: {
-          industryTemplateInfo: true,
-          bookingConfig: true,
-          bookingServices: true,
-          bookingResources: true,
-        },
-      });
+      const site = await this.siteRepo
+        .createQueryBuilder('site')
+        .addSelect(['site.encryptedOpenAiKey', 'site.systemPromptOverride'])
+        .leftJoinAndSelect('site.industryTemplateInfo', 'industryTemplateInfo')
+        .leftJoinAndSelect('site.bookingConfig', 'bookingConfig')
+        .leftJoinAndSelect('site.bookingServices', 'bookingServices')
+        .leftJoinAndSelect('site.bookingResources', 'bookingResources')
+        .where('site.id = :siteId', { siteId })
+        .getOne();
 
       if (!this.testSessionMessages.has(conversationId)) {
         this.testSessionMessages.set(conversationId, []);
@@ -305,15 +305,15 @@ export class GraphService {
 
     const [conversation, site, dbMessages] = await Promise.all([
       this.chatService.getConversationById(conversationId),
-      this.siteRepo.findOne({
-        where: { id: siteId },
-        relations: {
-          industryTemplateInfo: true,
-          bookingConfig: true,
-          bookingServices: true,
-          bookingResources: true,
-        },
-      }),
+      this.siteRepo
+        .createQueryBuilder('site')
+        .addSelect(['site.encryptedOpenAiKey', 'site.systemPromptOverride'])
+        .leftJoinAndSelect('site.industryTemplateInfo', 'industryTemplateInfo')
+        .leftJoinAndSelect('site.bookingConfig', 'bookingConfig')
+        .leftJoinAndSelect('site.bookingServices', 'bookingServices')
+        .leftJoinAndSelect('site.bookingResources', 'bookingResources')
+        .where('site.id = :siteId', { siteId })
+        .getOne(),
       this.chatService.getMessagesForConversation(
         conversationId,
         undefined,

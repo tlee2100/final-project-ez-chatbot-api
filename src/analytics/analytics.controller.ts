@@ -1,7 +1,8 @@
-import { Controller, Get, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
@@ -22,7 +23,19 @@ export class AnalyticsController {
   @Get('dashboard')
   @ApiOperation({
     summary:
-      'Get aggregate analytics for dashboard. Scoped by role and organization ID.',
+      'Get aggregate analytics for dashboard. Scoped by role and organization ID with optional date range.',
+  })
+  @ApiQuery({
+    name: 'startDate',
+    required: false,
+    example: '2026-08-01',
+    description: 'Filter start date (YYYY-MM-DD)',
+  })
+  @ApiQuery({
+    name: 'endDate',
+    required: false,
+    example: '2026-08-25',
+    description: 'Filter end date (YYYY-MM-DD)',
   })
   @ApiResponse({
     status: 200,
@@ -32,7 +45,15 @@ export class AnalyticsController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.AGENT)
-  async getDashboardAnalytics(@Req() req: AuthRequest) {
-    return this.analyticsService.getDashboardAnalytics(req.user);
+  async getDashboardAnalytics(
+    @Req() req: AuthRequest,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    return this.analyticsService.getDashboardAnalytics(
+      req.user,
+      startDate,
+      endDate,
+    );
   }
 }

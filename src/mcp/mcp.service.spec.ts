@@ -37,7 +37,9 @@ describe('McpService & McpController (Tenant Isolation)', () => {
 
   beforeEach(async () => {
     userRepository = createRepositoryMock();
-    userRepository.createQueryBuilder.mockReturnValue(mockQueryBuilder);
+    userRepository.createQueryBuilder.mockReturnValue(
+      mockQueryBuilder as never,
+    );
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [McpController],

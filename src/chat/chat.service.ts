@@ -38,6 +38,7 @@ import {
 } from './entities/chat-message.entity';
 import { User } from '../user/entities/user.entity';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import { CloseConversationResponseDto } from './dto/close-conversation-response.dto';
 import {
   SubmitMessageFeedbackDto,
   MessageFeedbackResponseDto,
@@ -1481,7 +1482,7 @@ export class ChatService implements BeforeApplicationShutdown {
   async updatePublicConversationStatus(
     id: string,
     dto: UpdateConversationStatusDto,
-  ): Promise<Conversation> {
+  ): Promise<CloseConversationResponseDto> {
     if (!id.startsWith('admin-test-')) {
       const conversation = await this.conversationRepository.findOne({
         where: { id },
@@ -1494,12 +1495,20 @@ export class ChatService implements BeforeApplicationShutdown {
         throw new ForbiddenException('siteId does not match conversation');
       }
     }
-    return this.updateStatusAndNotify(
+    const updated = await this.updateStatusAndNotify(
       id,
       dto.status,
       dto.reason || ClosedReason.VISITOR,
       dto.transcriptEmail,
     );
+
+    return {
+      conversationId: updated.id,
+      status: updated.status,
+      handlingStatus: updated.handlingStatus,
+      closedReason: updated.closedReason,
+      updatedAt: updated.updatedAt,
+    };
   }
 
   async getPublicConversationStatus(id: string) {
@@ -1611,7 +1620,19 @@ export class ChatService implements BeforeApplicationShutdown {
     agentId?: string,
     locale?: string,
     components?: Record<string, unknown>[],
+    tokenCount?: number,
   ): Promise<ChatMessage> {
+    // Only AI messages consume LLM tokens. Visitor and Agent messages have 0 tokens.
+    let calculatedTokens = 0;
+    if (senderType === SenderType.AI) {
+      calculatedTokens =
+        tokenCount !== undefined && tokenCount !== null
+          ? tokenCount
+          : content
+            ? Math.max(1, Math.ceil(content.length / 4))
+            : 0;
+    }
+
     if (conversationId.startsWith('admin-test-')) {
       return {
         id: `test-msg-${Date.now()}`,
@@ -1621,11 +1642,32 @@ export class ChatService implements BeforeApplicationShutdown {
         agentId: agentId ?? null,
         status: MessageStatus.SENT,
         createdAt: new Date(),
+        tokenCount: calculatedTokens,
+        responseTimeSec: null,
       } as ChatMessage;
     }
     const conversation = await this.getConversationById(conversationId);
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ForbiddenException('Conversation is closed');
+    }
+
+    // ── Turn-based Response Time Calculation for AGENT ──────────────────────
+    let responseTimeSec: number | null = null;
+    if (senderType === SenderType.AGENT) {
+      const lastMessage = await this.chatMessageRepository.findOne({
+        where: { conversationId },
+        order: { createdAt: 'DESC' },
+      });
+
+      // Only compute if preceding message was from VISITOR (avoid consecutive AGENT bursts)
+      if (lastMessage && lastMessage.senderType === SenderType.VISITOR) {
+        const diffMs = Date.now() - new Date(lastMessage.createdAt).getTime();
+        const diffSec = Math.round(diffMs / 1000);
+        // Limit calculation to a 1-hour window (3600 seconds)
+        if (diffSec >= 0 && diffSec <= 3600) {
+          responseTimeSec = diffSec;
+        }
+      }
     }
 
     const message = this.chatMessageRepository.create({
@@ -1635,6 +1677,8 @@ export class ChatService implements BeforeApplicationShutdown {
       agentId: agentId ?? null,
       locale: locale ?? null,
       components: components ?? null,
+      tokenCount: calculatedTokens,
+      responseTimeSec,
     });
 
     this.logger.log({
@@ -1793,7 +1837,10 @@ export class ChatService implements BeforeApplicationShutdown {
       void this.sendCloseEmails(conversation, transcriptEmail);
     }
 
-    return this.getConversationById(id);
+    const updated = await this.conversationRepository.findOne({
+      where: { id },
+    });
+    return updated ?? conversation;
   }
 
   /**
