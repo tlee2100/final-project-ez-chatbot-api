@@ -649,11 +649,24 @@ export class ChatService implements BeforeApplicationShutdown {
               undefined,
               pageContextFromPayload(payload),
             )
-            .catch((err: unknown) =>
+            .catch((err: unknown) => {
+              const errorMsg =
+                'AI service is temporarily unavailable. Please try again later or request support from an agent.';
               this.logger.error(
                 `AI stream error: ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
+              );
+              this.chatGateway.server
+                .to(`conversation-${payload.conversationId}`)
+                .emit('messageError', {
+                  conversationId: payload.conversationId,
+                  message: errorMsg,
+                });
+              this.chatGateway.server
+                .to(`conversation-${payload.conversationId}`)
+                .emit('aiMessageComplete', {
+                  conversationId: payload.conversationId,
+                });
+            });
         }
       }
     } catch (error: unknown) {
