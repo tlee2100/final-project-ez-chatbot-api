@@ -23,4 +23,3 @@ export class CreateConversationDto {
   @IsTimeZone()
   timezone?: string;
 }
-
