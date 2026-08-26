@@ -238,10 +238,7 @@ export function buildKnowledgeSubgraph(deps: KnowledgeSubgraphDeps) {
       locale: state.locale,
     });
 
-    if (
-      state.knowledgeSearchStatus === 'success' ||
-      state.knowledgeSearchStatus === 'empty'
-    ) {
+    if (state.knowledgeSearchStatus !== 'idle') {
       systemPrompt += `\n\n${getKnowledgeGroundingRule(state.knowledgeSearchStatus)}`;
     }
 
@@ -290,7 +287,7 @@ export function buildKnowledgeSubgraph(deps: KnowledgeSubgraphDeps) {
     .addConditionalEdges(
       'parse_tools',
       (state) =>
-        state.intent === 'question' && state.knowledgeSearchStatus === 'error'
+        state.knowledgeSearchStatus === 'error' && !state.pageContext
           ? 'knowledge_fallback'
           : 'model_node',
       { knowledge_fallback: 'knowledge_fallback', model_node: 'model_node' },

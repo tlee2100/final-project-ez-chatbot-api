@@ -18,6 +18,24 @@ jest.mock('@automapper/nestjs', () => ({
   AutomapperProfile: class {},
 }));
 
+const invokedSystemPrompt = (invokeMock: jest.Mock): string => {
+  const calls = invokeMock.mock.calls as unknown[][];
+  const messages = calls[0]?.[0];
+  if (!Array.isArray(messages)) return '';
+
+  const firstMessage: unknown = messages[0];
+  if (
+    !firstMessage ||
+    typeof firstMessage !== 'object' ||
+    !('content' in firstMessage)
+  ) {
+    return '';
+  }
+
+  const content = firstMessage.content;
+  return typeof content === 'string' ? content : '';
+};
+
 describe('LangGraph Subgraphs & Interrupts', () => {
   describe('Knowledge Subgraph', () => {
     it('returns knowledge fallback message when retrieval fails', async () => {
@@ -27,9 +45,10 @@ describe('LangGraph Subgraphs & Interrupts', () => {
         execute: executeMock,
       };
 
+      const buildModelForSiteMock = jest.fn();
       const mockAiService = {
         buildSystemPrompt: jest.fn().mockReturnValue('System Prompt'),
-        buildModelForSite: jest.fn(),
+        buildModelForSite: buildModelForSiteMock,
       } as unknown as AiService;
 
       const mockLogger = {
@@ -83,6 +102,7 @@ describe('LangGraph Subgraphs & Interrupts', () => {
         arguments: { query: 'What are your services?' },
       });
       expect(result.knowledgeSearchStatus).toBe('error');
+      expect(buildModelForSiteMock).not.toHaveBeenCalled();
       const lastMsg = result.messages[result.messages.length - 1];
       expect(lastMsg).toBeInstanceOf(AIMessage);
       expect(typeof lastMsg.content).toBe('string');
@@ -154,6 +174,82 @@ describe('LangGraph Subgraphs & Interrupts', () => {
 
       expect(buildSystemPromptMock).toHaveBeenCalledWith(
         expect.objectContaining({ pageContext }),
+      );
+      expect(invokedSystemPrompt(invokeMock)).toContain(
+        'directly supported by CURRENT PAGE CONTEXT',
+      );
+    });
+
+    it('uses current page context when knowledge retrieval is unavailable', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn().mockRejectedValue(new Error('KB Offline')),
+      };
+      const invokeMock = jest
+        .fn()
+        .mockResolvedValue(new AIMessage('The page price is $10.'));
+      const buildSystemPromptMock = jest.fn().mockReturnValue('System Prompt');
+      const mockAiService = {
+        buildSystemPrompt: buildSystemPromptMock,
+        buildModelForSite: jest.fn().mockReturnValue({ invoke: invokeMock }),
+      } as unknown as AiService;
+      const mockLogger = {
+        log: jest.fn(),
+        error: jest.fn(),
+        warn: jest.fn(),
+      } as unknown as Logger;
+      const mockServer = {
+        to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+      } as unknown as SocketServer;
+      const pageContext = {
+        pageUrl: 'https://example.com/products/alpha',
+        pageTitle: 'Alpha',
+        pageContent: 'Price: $10.',
+      };
+
+      const subgraph = buildKnowledgeSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: mockAiService,
+        logger: mockLogger,
+        conversationId: 'test-conv-page-kb-error',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          maxTokensPerResponse: 500,
+        },
+        server: mockServer,
+      });
+
+      const result = await subgraph.invoke({
+        messages: [new HumanMessage('What is the price on this page?')],
+        siteId: 'site-1',
+        conversationId: 'test-conv-page-kb-error',
+        visitorContext: {},
+        pageContext,
+        siteContext: {
+          domains: ['example.com'],
+          bookingEnabled: false,
+          bookingServices: [],
+          bookingResources: [],
+        },
+        intent: 'question',
+        locale: 'en',
+        activeFlow: null,
+        activeFlowLocale: null,
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      expect(result.knowledgeSearchStatus).toBe('error');
+      expect(buildSystemPromptMock).toHaveBeenCalledWith(
+        expect.objectContaining({ pageContext }),
+      );
+      expect(invokedSystemPrompt(invokeMock)).toMatch(
+        /Knowledge retrieval is currently unavailable[\s\S]*directly supported by CURRENT PAGE CONTEXT/,
       );
     });
   });
