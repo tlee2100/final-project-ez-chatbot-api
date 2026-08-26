@@ -474,6 +474,61 @@ describe('ChatService saveMessage', () => {
       expect(result.visitorToken).toBe('mock-signed-visitor-token');
       expect(result.conversationId).toBe('conv-123');
     });
+
+    it('creates an anonymous conversation with default Guest and null email', async () => {
+      const { service, siteRepository, conversationRepository } = makeService();
+
+      siteRepository.findOne.mockResolvedValue({
+        id: 'site-1',
+        enabled: true,
+        isAiActive: true,
+        ownerId: 'owner-1',
+        agents: [],
+      });
+
+      const mockSavedConversation = {
+        id: 'conv-anon-123',
+        siteId: 'site-1',
+        visitorName: 'Guest',
+        visitorEmail: null,
+        status: ConversationStatus.OPEN,
+        handlingStatus: 'AI_HANDLING',
+      };
+
+      const createSpy = jest.fn().mockReturnValue(mockSavedConversation);
+      (
+        conversationRepository as unknown as {
+          manager: { transaction: jest.Mock };
+        }
+      ).manager = {
+        transaction: jest
+          .fn()
+          .mockImplementation(
+            (cb: (em: { create: jest.Mock; save: jest.Mock }) => unknown) => {
+              const transactionalEntityManager = {
+                create: createSpy,
+                save: jest.fn().mockResolvedValue(mockSavedConversation),
+              };
+              return Promise.resolve(cb(transactionalEntityManager));
+            },
+          ),
+      };
+
+      const result = await service.createConversation({
+        siteId: 'site-1',
+      });
+
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          visitorName: 'Guest',
+          visitorEmail: null,
+        }),
+      );
+      expect(result.visitorName).toBe('Guest');
+      expect(result.visitorEmail).toBeNull();
+      expect(result.conversationId).toBe('conv-anon-123');
+    });
   });
   describe('Server Shutdown Timer Cleanup', () => {
     it('cleans up all conversation timers on application shutdown', () => {

@@ -155,6 +155,21 @@ describe('chat message components', () => {
     ]);
   });
 
+  it('does not create name chip if visitor is anonymous Guest', () => {
+    const anonymousVisitorContext = {
+      name: 'Guest',
+      email: undefined,
+    };
+
+    expect(
+      buildChatMessageComponents(
+        '<booking-step>name</booking-step>',
+        siteContext,
+        anonymousVisitorContext,
+      ),
+    ).toEqual([]);
+  });
+
   it('does not create options without a backend-supported step', () => {
     expect(
       buildChatMessageComponents(

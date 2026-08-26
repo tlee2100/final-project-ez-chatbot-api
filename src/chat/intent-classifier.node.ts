@@ -120,7 +120,11 @@ export function buildIntentClassifierNode(deps: IntentClassifierDeps) {
       return applyLocaleState('cancel_booking', state.locale);
     }
 
-    if (extractedCode && /^[A-Z0-9]{8}$/i.test(contentStr.trim())) {
+    if (
+      activeFlow !== 'BOOKING' &&
+      extractedCode &&
+      /^[A-Z0-9]{8}$/i.test(contentStr.trim())
+    ) {
       logger.log(`[Fast-Path Intent] booking code entered: ${extractedCode}`);
       return applyLocaleState('cancel_booking', state.locale);
     }

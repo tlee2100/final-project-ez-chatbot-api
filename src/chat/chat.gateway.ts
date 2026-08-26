@@ -84,21 +84,25 @@ export class ChatGateway
       const token = extractToken(client);
 
       if (!token) {
-        const conversationId = this.extractVisitorConversationId(client);
+        const requestedConvId = this.extractVisitorConversationId(client);
+        if (requestedConvId) {
+          next(new Error('Visitor token is required to access conversation'));
+          return;
+        }
+
         const siteId = (client.handshake.auth?.siteId ||
           client.handshake.query?.siteId) as string;
 
-        if (conversationId || siteId) {
+        if (siteId) {
           const socketData = client.data as SocketData;
           socketData.visitor = {
-            conversationId: conversationId || undefined,
-            siteId: siteId || undefined,
+            siteId,
           };
           next();
           return;
         }
 
-        next(new Error('Missing access token or visitor conversation ID'));
+        next(new Error('Missing access token or visitor token'));
         return;
       }
 

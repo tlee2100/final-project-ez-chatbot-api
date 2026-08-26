@@ -352,7 +352,11 @@ export class GraphService {
       const isSystemHandoff = text.includes(
         'An agent has been notified and will be with you shortly.',
       );
-      const senderType = isSystemHandoff ? SenderType.SYSTEM : SenderType.AI;
+      if (isSystemHandoff) {
+        // escalateToAgent already saved the system message and emitted newMessage
+        return;
+      }
+      const senderType = SenderType.AI;
 
       this.logger.log(
         `🤖 [AI Response] [Conv: ${conversationId}] [Site: ${siteId}] [Locale: ${locale ?? 'auto'}] [Components: ${components?.length ?? 0}]\n${text}`,
@@ -399,7 +403,12 @@ export class GraphService {
         systemPromptOverride: site?.systemPromptOverride ?? null,
         maxTokensPerResponse: site?.maxTokensPerResponse ?? 1000,
         visitorContext: {
-          name: conversation.visitorName ?? undefined,
+          name:
+            conversation.visitorName &&
+            conversation.visitorName.trim().toLowerCase() !== 'guest' &&
+            conversation.visitorName.trim().toLowerCase() !== '[none]'
+              ? conversation.visitorName
+              : undefined,
           email: conversation.visitorEmail ?? undefined,
         },
         siteContext: {
@@ -1032,8 +1041,27 @@ export class GraphService {
         streamedTokensRef,
         bookingTools: aiTools,
         clearActiveFlow,
-        onCreatedBookingCode: (code) => {
+        onCreatedBookingCode: (code, details) => {
           createdBookingCode = code;
+          if (!conversationId.startsWith('admin-test-') && details) {
+            const updates: { visitorName?: string; visitorEmail?: string } = {};
+            if (details.customerName && details.customerName.trim()) {
+              updates.visitorName = details.customerName.trim();
+            }
+            if (details.customerEmail && details.customerEmail.trim()) {
+              updates.visitorEmail = details.customerEmail.trim();
+            }
+            if (Object.keys(updates).length > 0) {
+              this.conversationRepo
+                .update(conversationId, updates)
+                .catch((err: unknown) => {
+                  this.logger.error(
+                    `Failed to update conversation ${conversationId} with booking details`,
+                    err,
+                  );
+                });
+            }
+          }
         },
       });
 
@@ -1171,9 +1199,6 @@ export class GraphService {
         if (res) {
           res.write(handoffMsg);
         }
-        server
-          .to(`conversation-${conversationId}`)
-          .emit('aiChunk', { token: handoffMsg, conversationId });
         return { messages: [new AIMessage(handoffMsg)] };
       };
 

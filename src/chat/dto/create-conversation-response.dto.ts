@@ -13,7 +13,7 @@ export class CreateConversationResponseDto {
   conversationId: string;
   siteId: string;
   visitorName: string;
-  visitorEmail: string;
+  visitorEmail: string | null;
   status: ConversationStatus;
   handlingStatus: HandlingStatus;
   visitorToken?: string;

@@ -316,7 +316,12 @@ export const buildChatMessageComponents = (
     ];
   } else if (step === 'date') {
     items = bookingDateItems(siteContext, baseNow);
-  } else if (step === 'name' && visitorContext?.name) {
+  } else if (
+    step === 'name' &&
+    visitorContext?.name &&
+    visitorContext.name.trim().toLowerCase() !== 'guest' &&
+    visitorContext.name.trim().toLowerCase() !== '[none]'
+  ) {
     items = [
       {
         action: 'submit_text',

@@ -48,7 +48,10 @@ export interface BookingSubgraphDeps {
   streamedTokensRef?: { count: number };
   bookingTools: DynamicStructuredTool[];
   clearActiveFlow: () => Promise<void>;
-  onCreatedBookingCode?: (code: string) => void;
+  onCreatedBookingCode?: (
+    code: string,
+    details?: { customerName?: string; customerEmail?: string },
+  ) => void;
 }
 
 const messageText = (message: BaseMessage): string => {
@@ -310,7 +313,14 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         const p = result.output as Record<string, unknown> | undefined;
         if (p && !p.error && typeof p.bookingCode === 'string') {
           if (onCreatedBookingCode) {
-            onCreatedBookingCode(p.bookingCode);
+            onCreatedBookingCode(p.bookingCode, {
+              customerName:
+                typeof p.customerName === 'string' ? p.customerName : undefined,
+              customerEmail:
+                typeof p.customerEmail === 'string'
+                  ? p.customerEmail
+                  : undefined,
+            });
           }
           chatGateway.emitBookingSuccess(conversationId, {
             ...p,
@@ -545,10 +555,15 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             ? bookingOption.value
             : undefined;
 
+        const isAnonymousVisitor =
+          !options.visitorContext?.name ||
+          options.visitorContext.name.trim().toLowerCase() === 'guest' ||
+          options.visitorContext.name.trim().toLowerCase() === '[none]';
+
         const rawName =
           nameOpt?.value ??
           nameOpt?.label ??
-          options.visitorContext?.name ??
+          (!isAnonymousVisitor ? options.visitorContext?.name : '') ??
           '';
 
         const matchedService = services.find((s) => {
@@ -686,9 +701,13 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         logger.error('[Structured Step] Failed to hold slot', err);
       }
 
-      const hasName = !!options.visitorContext?.name;
+      const visitorName = options.visitorContext?.name?.trim();
+      const isKnownName =
+        Boolean(visitorName) &&
+        visitorName?.toLowerCase() !== 'guest' &&
+        visitorName?.toLowerCase() !== '[none]';
       const prompt = getBookingOptionPrompt(locale, 'name');
-      const marker = hasName ? '\n\n<booking-step>name</booking-step>' : '';
+      const marker = isKnownName ? '\n\n<booking-step>name</booking-step>' : '';
       return {
         messages: [new AIMessage(`${prompt}${marker}`)],
       };
@@ -839,7 +858,16 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             bookingCode.trim().length > 0
           ) {
             if (onCreatedBookingCode) {
-              onCreatedBookingCode(bookingCode);
+              onCreatedBookingCode(bookingCode, {
+                customerName:
+                  typeof p?.customerName === 'string'
+                    ? p.customerName
+                    : undefined,
+                customerEmail:
+                  typeof p?.customerEmail === 'string'
+                    ? p.customerEmail
+                    : undefined,
+              });
             }
             chatGateway.emitBookingSuccess(conversationId, {
               ...p,

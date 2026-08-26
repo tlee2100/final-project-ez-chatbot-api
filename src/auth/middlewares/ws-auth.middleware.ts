@@ -40,14 +40,23 @@ export const WsAuthMiddleware = (jwtService: JwtService) => {
 };
 
 export function extractToken(client: Socket): string | null {
-  const authToken = (client.handshake.auth as Partial<{ token: string }>).token;
-  if (typeof authToken === 'string') {
-    return authToken;
+  const auth = client.handshake.auth as Partial<{
+    token: string;
+    visitorToken: string;
+  }>;
+  if (typeof auth?.token === 'string' && auth.token) {
+    return auth.token;
+  }
+  if (typeof auth?.visitorToken === 'string' && auth.visitorToken) {
+    return auth.visitorToken;
   }
 
-  const queryToken = client.handshake.query?.token;
-  if (typeof queryToken === 'string') {
-    return queryToken;
+  const query = client.handshake.query;
+  if (typeof query?.token === 'string' && query.token) {
+    return query.token;
+  }
+  if (typeof query?.visitorToken === 'string' && query.visitorToken) {
+    return query.visitorToken;
   }
 
   const authorization = client.handshake.headers.authorization;

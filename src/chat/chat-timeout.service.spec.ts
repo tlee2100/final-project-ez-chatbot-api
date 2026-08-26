@@ -11,6 +11,7 @@ import {
   ClosedReason,
 } from './entities/conversation.entity';
 import { createRepositoryMock } from '../test/service-test-helpers';
+import { In } from 'typeorm';
 import { Site } from '../site/entities/site.entity';
 import { SenderType } from './entities/chat-message.entity';
 
@@ -181,7 +182,7 @@ describe('ChatTimeoutService', () => {
 
     await service.onModuleInit();
     expect(conversationRepository.update).toHaveBeenCalledWith(
-      { id: 'conv-timeout' },
+      { id: In(['conv-timeout']) },
       {
         status: ConversationStatus.CLOSED,
         closedReason: ClosedReason.TIMEOUT,
@@ -206,7 +207,7 @@ describe('ChatTimeoutService', () => {
 
     await service.onModuleInit();
     expect(conversationRepository.update).toHaveBeenCalledWith(
-      { id: 'conv-error' },
+      { id: In(['conv-error']) },
       {
         status: ConversationStatus.CLOSED,
         closedReason: ClosedReason.ERROR,

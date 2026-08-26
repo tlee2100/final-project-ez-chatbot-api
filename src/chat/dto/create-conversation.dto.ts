@@ -1,13 +1,14 @@
-import { IsEmail, IsString, IsUUID, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class CreateConversationDto {
   @IsUUID()
   siteId: string;
 
+  @IsOptional()
   @IsString()
-  @MinLength(1)
-  visitorName: string;
+  visitorName?: string;
 
+  @IsOptional()
   @IsEmail()
-  visitorEmail: string;
+  visitorEmail?: string;
 }

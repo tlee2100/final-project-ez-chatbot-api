@@ -714,8 +714,8 @@ export class ChatService implements BeforeApplicationShutdown {
       async (transactionalEntityManager) => {
         const conversation = transactionalEntityManager.create(Conversation, {
           siteId: dto.siteId,
-          visitorName: dto.visitorName,
-          visitorEmail: dto.visitorEmail,
+          visitorName: dto.visitorName?.trim() || 'Guest',
+          visitorEmail: dto.visitorEmail?.trim() || null,
           status: ConversationStatus.OPEN,
           handlingStatus: site.isAiActive
             ? HandlingStatus.AI_HANDLING
@@ -930,11 +930,37 @@ export class ChatService implements BeforeApplicationShutdown {
     const savedConversation =
       await this.conversationRepository.save(conversation);
 
+    // Save and broadcast system handoff message
+    const handoffMsg =
+      'An agent has been notified and will be with you shortly.';
+    const savedMsg = await this.saveMessage(
+      conversationId,
+      handoffMsg,
+      SenderType.SYSTEM,
+    );
+
+    this.chatGateway.server
+      .to(`conversation-${conversationId}`)
+      .emit('newMessage', {
+        id: savedMsg.id,
+        conversationId,
+        content: savedMsg.content,
+        senderType: 'SYSTEM',
+        createdAt: savedMsg.createdAt,
+      });
+
     // Emit socket events
     this.chatGateway.server
       .to(`conversation-${conversationId}`)
       .emit('handlingStatusUpdated', {
         conversationId,
+        handlingStatus: HandlingStatus.WAITING_FOR_AGENT,
+      });
+    this.chatGateway.server
+      .to(`conversation-${conversationId}`)
+      .emit('aiToggled', {
+        conversationId,
+        isAiActive: false,
         handlingStatus: HandlingStatus.WAITING_FOR_AGENT,
       });
     this.chatGateway.server
@@ -1261,18 +1287,28 @@ export class ChatService implements BeforeApplicationShutdown {
           createdAt: joinMsg.createdAt,
         });
 
+      // Broadcast handling status update to conversation room
+      this.chatGateway.server
+        .to(`conversation-${conversationId}`)
+        .emit('handlingStatusUpdated', {
+          conversationId,
+          handlingStatus: HandlingStatus.AGENT_HANDLING,
+        });
+
       // Notify admin dashboard to sync its AI toggle UI
       this.chatGateway.server
         .to(`conversation-${conversationId}`)
         .emit('aiToggled', {
           conversationId,
           isAiActive: false,
+          handlingStatus: HandlingStatus.AGENT_HANDLING,
         });
       this.chatGateway.server
         .to(`site-${conversation.siteId}`)
         .emit('aiToggled', {
           conversationId,
           isAiActive: false,
+          handlingStatus: HandlingStatus.AGENT_HANDLING,
         });
     }
 
@@ -1735,10 +1771,24 @@ export class ChatService implements BeforeApplicationShutdown {
     if (!conversation) {
       throw new NotFoundException(`Conversation ${id} not found`);
     }
-    await this.conversationRepository.update(id, {
+    const updatePayload: {
+      status: ConversationStatus;
+      closedReason: ClosedReason;
+      visitorEmail?: string;
+    } = {
       status: ConversationStatus.CLOSED,
       closedReason: reason,
-    });
+    };
+    if (
+      transcriptEmail &&
+      transcriptEmail.trim() &&
+      transcriptEmail.trim() !== 'skip_email' &&
+      !conversation.visitorEmail
+    ) {
+      updatePayload.visitorEmail = transcriptEmail.trim();
+      conversation.visitorEmail = transcriptEmail.trim();
+    }
+    await this.conversationRepository.update(id, updatePayload);
 
     this.chatTimeoutService.cancelTimer(id);
 
