@@ -78,10 +78,23 @@ export interface ChatTranscriptEmailJobData {
   messages: {
     displayName: string;
     content: string;
-    timestamp: string; // ISO string
+    timestamp: string; // formatted local time string
+    senderType?: string;
+    isVisitor?: boolean;
+    isBot?: boolean;
+    isAgent?: boolean;
+    badgeText?: string;
+    bubbleBg?: string;
+    bubbleBorder?: string;
+    accentColor?: string;
+    badgeBg?: string;
+    textColor?: string;
+    timeColor?: string;
   }[];
   startedAt: string;
   closedAt: string;
+  /** IANA timezone used to format the timestamps above (e.g. "Asia/Ho_Chi_Minh") */
+  timezone?: string;
 }
 export const DEFAULT_EMAIL_JOB_OPTIONS: JobOptions = {
   attempts: 3,

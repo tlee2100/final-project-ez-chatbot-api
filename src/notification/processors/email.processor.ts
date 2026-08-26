@@ -243,8 +243,9 @@ export class EmailProcessor {
         context: {
           ...job.data,
           messages: messagesWithHtml,
-          startedAt: formatEmailDateTime(job.data.startedAt),
-          closedAt: formatEmailDateTime(job.data.closedAt),
+          // startedAt and closedAt are already formatted local-time strings
+          // produced by ChatService.formatForEmail() — do NOT re-parse them.
+          timezone: job.data.timezone ?? 'UTC',
         },
       });
       this.logger.log(
