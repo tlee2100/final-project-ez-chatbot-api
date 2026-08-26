@@ -39,6 +39,21 @@ describe('PageContextService', () => {
     ).toBe('domain_not_allowed');
   });
 
+  it('allows any hostname when the domain list is empty or contains a global wildcard', () => {
+    expect(
+      service.sanitize(
+        { pageUrl: 'https://store.example.com/products/alpha' },
+        [],
+      ).reason,
+    ).toBe('accepted');
+    expect(
+      service.sanitize(
+        { pageUrl: 'https://store.example.com/products/alpha' },
+        ['*'],
+      ).reason,
+    ).toBe('accepted');
+  });
+
   it('neutralizes prompt boundary tags encoded as visible page text', () => {
     const result = service.sanitize(
       {

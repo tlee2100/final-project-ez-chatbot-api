@@ -130,9 +130,14 @@ export class PageContextService {
   }
 
   private isDomainAllowed(hostname: string, allowedDomains: string[]): boolean {
-    return allowedDomains.some((rawPattern) => {
-      const pattern = rawPattern.trim().toLowerCase();
-      if (!pattern) return false;
+    const patterns = allowedDomains
+      .map((rawPattern) => rawPattern.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (patterns.length === 0) return true;
+
+    return patterns.some((pattern) => {
+      if (pattern === '*') return true;
       if (pattern.startsWith('*.')) {
         const baseDomain = pattern.slice(2);
         return hostname.endsWith(`.${baseDomain}`);
