@@ -758,6 +758,7 @@ export class ChatService implements BeforeApplicationShutdown {
             : HandlingStatus.WAITING_FOR_AGENT,
           lastActivityAt: new Date(),
           isAiActive: site.isAiActive,
+          timezone: dto.timezone ?? null,
         });
         const savedConversation = await transactionalEntityManager.save(
           Conversation,
@@ -1889,6 +1890,9 @@ export class ChatService implements BeforeApplicationShutdown {
       conversation.site &&
       conversation.site.owner
     ) {
+      this.logger.log(
+        `[Transcript] closeConversation conv=${conversation.id} transcriptEmail=${transcriptEmail ?? 'none'} emailTranscript=${conversation.site.emailTranscript}`,
+      );
       void this.sendCloseEmails(conversation, transcriptEmail);
     }
 
@@ -1973,6 +1977,9 @@ export class ChatService implements BeforeApplicationShutdown {
       });
 
       // Only send chat transcript if emailTranscript is enabled on the site OR a transcriptEmail was explicitly requested
+      this.logger.debug(
+        `[Transcript] conv=${conversation.id} emailTranscript=${conversation.site?.emailTranscript} transcriptEmail=${transcriptEmail ?? 'none'} messageCount=${messageCount}`,
+      );
       if (
         conversation.site &&
         (conversation.site.emailTranscript || transcriptEmail) &&
@@ -2001,6 +2008,10 @@ export class ChatService implements BeforeApplicationShutdown {
             }
           }
 
+          this.logger.debug(
+            `[Transcript] targetEmail=${targetEmail ?? 'MISSING'} targetName=${targetName ?? 'none'} bookingCode=${bookingCode ?? 'none'}`,
+          );
+
           if (targetEmail) {
             const transcriptMessages = rawMessages
               .filter((m) => m.senderType !== SenderType.SYSTEM)
@@ -2011,62 +2022,167 @@ export class ChatService implements BeforeApplicationShutdown {
                   .replace(/<chips>.*?<\/chips>/gs, '')
                   .trim();
 
-                const slashCmdMatch = cleanContent.match(
-                  /^\/([\\w-]+)(?:\\s+((?:(?!\\s*::).)*))?(?:\\s*::\\s*(.*))?$/s,
-                );
-                if (slashCmdMatch) {
-                  const command = slashCmdMatch[1];
-                  const payload = slashCmdMatch[2];
-                  const textAfter = slashCmdMatch[3];
+                // ── Slash-command messages (sent by the widget UI) ──────────────
+                // Format: /command-name {json} :: Human readable label
+                // Only show the human-readable part after " :: ".
+                // If no " :: " separator exists, skip the message entirely.
+                if (cleanContent.startsWith('/')) {
+                  const separatorIdx = cleanContent.indexOf(' :: ');
+                  if (separatorIdx !== -1) {
+                    const readable = cleanContent
+                      .slice(separatorIdx + 4)
+                      .trim();
 
-                  if (command === 'confirm-booking' && payload) {
-                    try {
-                      const data = JSON.parse(payload) as Record<
-                        string,
-                        unknown
-                      >;
-                      let formatted = `**[Booking Confirmed]**`;
-                      if (typeof data.date === 'string')
-                        formatted += `\n- Date: ${data.date}`;
-                      if (typeof data.timeSlot === 'string')
-                        formatted += `\n- Time: ${data.timeSlot}`;
-                      if (typeof data.customerName === 'string')
-                        formatted += `\n- Name: ${data.customerName}`;
-                      if (typeof data.phone === 'string')
-                        formatted += `\n- Phone: ${data.phone}`;
-                      cleanContent = formatted;
-                    } catch {
-                      cleanContent = `**[Booking Confirmed]**`;
+                    // Special case: /confirm-booking — parse JSON and pretty-print
+                    if (cleanContent.startsWith('/confirm-booking ')) {
+                      const jsonStr = cleanContent
+                        .slice('/confirm-booking '.length, separatorIdx)
+                        .trim();
+                      try {
+                        const data = JSON.parse(jsonStr) as Record<
+                          string,
+                          unknown
+                        >;
+                        let formatted = `<strong>[Booking Confirmed]</strong>`;
+                        if (typeof data.date === 'string')
+                          formatted += `<br>- Date: ${data.date}`;
+                        if (typeof data.timeSlot === 'string')
+                          formatted += `<br>- Time: ${data.timeSlot}`;
+                        if (typeof data.customerName === 'string')
+                          formatted += `<br>- Name: ${data.customerName}`;
+                        if (typeof data.phone === 'string')
+                          formatted += `<br>- Phone: ${data.phone}`;
+                        cleanContent = formatted;
+                      } catch {
+                        cleanContent =
+                          readable || '<strong>[Booking Confirmed]</strong>';
+                      }
+                    } else {
+                      cleanContent = readable;
                     }
-                  } else if (textAfter) {
-                    cleanContent = textAfter;
                   } else {
+                    // No readable label — skip this internal widget message
                     cleanContent = '';
                   }
+                } else {
+                  // Convert simple markdown bold (**text**) to <strong> for email
+                  cleanContent = cleanContent
+                    .replace(/\*\*(.*?)\*\*/gs, '<strong>$1</strong>')
+                    .replace(/\n/g, '<br>');
                 }
 
+                const isVisitor = m.senderType === SenderType.VISITOR;
+                const isBot = m.senderType === SenderType.AI;
+                const isAgent = m.senderType === SenderType.AGENT;
+
+                const displayName = isVisitor
+                  ? 'You'
+                  : isBot
+                    ? 'Bot'
+                    : m.agent?.name || 'Agent';
+
+                const badgeText = isVisitor
+                  ? 'You'
+                  : isBot
+                    ? 'Bot'
+                    : m.agent?.name || 'Agent';
+
+                // Color Themes:
+                // Visitor: Soft Indigo/Blue (#EEF2FF bg, #4F46E5 badge & border)
+                // Bot (AI): Soft Slate/White with Violet Accent (#F8FAFC bg, #8B5CF6 badge & border)
+                // Agent: Soft Emerald/Green (#F0FDF4 bg, #10B981 badge & border)
+                const bubbleBg = isVisitor
+                  ? '#EEF2FF'
+                  : isBot
+                    ? '#F8FAFC'
+                    : '#F0FDF4';
+                const bubbleBorder = isVisitor
+                  ? '#C7D2FE'
+                  : isBot
+                    ? '#E2E8F0'
+                    : '#BBF7D0';
+                const accentColor = isVisitor
+                  ? '#4F46E5'
+                  : isBot
+                    ? '#8B5CF6'
+                    : '#10B981';
+                const badgeBg = isVisitor
+                  ? '#4F46E5'
+                  : isBot
+                    ? '#8B5CF6'
+                    : '#10B981';
+                const textColor = isVisitor
+                  ? '#1E1B4B'
+                  : isBot
+                    ? '#0F172A'
+                    : '#064E3B';
+                const timeColor = isVisitor
+                  ? '#6366F1'
+                  : isBot
+                    ? '#64748B'
+                    : '#059669';
+
                 return {
-                  displayName:
-                    m.senderType === SenderType.VISITOR
-                      ? 'You'
-                      : m.senderType === SenderType.AI
-                        ? 'Bot'
-                        : m.agent?.name || 'Agent',
+                  displayName,
                   content: cleanContent,
-                  timestamp: m.createdAt.toISOString(),
+                  timestamp: this.formatForEmail(
+                    m.createdAt,
+                    conversation.timezone,
+                  ),
+                  senderType: m.senderType,
+                  isVisitor,
+                  isBot,
+                  isAgent,
+                  badgeText,
+                  bubbleBg,
+                  bubbleBorder,
+                  accentColor,
+                  badgeBg,
+                  textColor,
+                  timeColor,
                 };
               })
               .filter((m) => m.content.length > 0);
 
+            this.logger.debug(
+              `[Transcript] filtered messages count=${transcriptMessages.length} (raw=${rawMessages.length})`,
+            );
+
             if (transcriptMessages.length > 0) {
+              this.logger.log(
+                `[Transcript] Enqueueing transcript email to ${targetEmail}`,
+              );
+
+              // Clean visitorName (e.g. remove "[NONE]" or "[NONE] hi")
+              let sanitizedVisitorName = (targetName || '')
+                .replace(/^\[NONE\]\s*/i, '')
+                .trim();
+              if (
+                !sanitizedVisitorName ||
+                sanitizedVisitorName.toLowerCase() === 'none'
+              ) {
+                sanitizedVisitorName = 'Customer';
+              }
+
               void this.emailQueueService.enqueueChatTranscriptEmail({
                 to: targetEmail,
-                visitorName: targetName || 'Visitor',
+                visitorName: sanitizedVisitorName,
                 siteName: conversation.site.name || 'Support Chat',
                 messages: transcriptMessages,
-                startedAt: conversation.createdAt.toISOString(),
-                closedAt: new Date().toISOString(),
+                startedAt: this.formatForEmail(
+                  conversation.createdAt,
+                  conversation.timezone,
+                ),
+                closedAt: this.formatForEmail(
+                  new Date(),
+                  conversation.timezone,
+                ),
+                timezone: conversation.timezone ?? 'UTC',
               });
+            } else {
+              this.logger.warn(
+                `[Transcript] Skipped — no displayable messages after filtering (conv=${conversation.id})`,
+              );
             }
           }
         }
@@ -2120,6 +2236,41 @@ export class ChatService implements BeforeApplicationShutdown {
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /**
+   * Format a Date for use in email transcript timestamps.
+   * Converts to the visitor's local timezone so the time matches what
+   * they saw in the chat widget (which uses the browser's local clock).
+   *
+   * Falls back to "Asia/Ho_Chi_Minh" when no timezone is stored.
+   */
+  private formatForEmail(date: Date, timezone: string | null): string {
+    const tz = timezone ?? 'Asia/Ho_Chi_Minh';
+    try {
+      return date.toLocaleString('en-GB', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    } catch {
+      // Fallback: invalid timezone string stored in DB
+      return date.toLocaleString('en-GB', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    }
+  }
 
   private validateMessagePayload(payload: ChatMessagePayload): string {
     const message =

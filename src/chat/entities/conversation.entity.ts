@@ -119,6 +119,15 @@ export class Conversation {
   @Column({ type: 'varchar', length: 35, nullable: true })
   activeFlowLocale: string | null;
 
+  /**
+   * IANA timezone string of the visitor (e.g. "Asia/Ho_Chi_Minh").
+   * Captured at conversation creation from the widget and used to
+   * format timestamps in the email transcript so times match what
+   * the visitor saw in the chat UI.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  timezone: string | null;
+
   @OneToMany(() => ChatMessage, (msg) => msg.conversation)
   messages: ChatMessage[];
 

@@ -1,4 +1,10 @@
-import { IsEmail, IsOptional, IsString, IsUUID } from 'class-validator';
+import {
+  IsEmail,
+  IsOptional,
+  IsString,
+  IsTimeZone,
+  IsUUID,
+} from 'class-validator';
 
 export class CreateConversationDto {
   @IsUUID()
@@ -11,4 +17,10 @@ export class CreateConversationDto {
   @IsOptional()
   @IsEmail()
   visitorEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsTimeZone()
+  timezone?: string;
 }
+
