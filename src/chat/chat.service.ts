@@ -1227,6 +1227,7 @@ export class ChatService implements BeforeApplicationShutdown {
           FilterOperator.LTE,
           FilterOperator.BTW,
         ],
+        visitorName: [FilterOperator.ILIKE],
       },
     });
 

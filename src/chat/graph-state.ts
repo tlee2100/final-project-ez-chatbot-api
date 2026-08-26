@@ -36,7 +36,16 @@ export type IntentType =
  */
 export const AgentState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
-    reducer: (x, y) => x.concat(y),
+    reducer: (current, incoming) => {
+      if (!incoming || incoming.length === 0) return current ?? [];
+      if (!current || current.length === 0) return incoming.slice(-30);
+      // When a full message history array from DB is passed into graph invoke (length > 1), replace state with the latest up to 30 messages
+      if (incoming.length > 1) {
+        return incoming.slice(-30);
+      }
+      // When a single node returns a new message to append
+      return [...current.slice(-29), ...incoming];
+    },
     default: () => [],
   }),
   siteId: Annotation<string>({

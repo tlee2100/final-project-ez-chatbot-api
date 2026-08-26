@@ -815,13 +815,16 @@ export class BookingService {
 
       const totalSlots = dto.slots.length;
       const slotServiceIds = dto.slots.map((s) => s.serviceId).filter(Boolean);
-      const providedServices =
+      const providedServices: string[] =
         dto.serviceIds && dto.serviceIds.length > 0
           ? dto.serviceIds
           : slotServiceIds.length === totalSlots
-            ? (slotServiceIds as string[])
+            ? slotServiceIds.filter((id): id is string => Boolean(id))
             : dto.serviceId
-              ? [dto.serviceId]
+              ? Array.from(
+                  { length: totalSlots },
+                  () => dto.serviceId as string,
+                )
               : [];
 
       if (isSalon && totalSlots > 1) {
@@ -836,7 +839,7 @@ export class BookingService {
       let serviceIndex = 0;
 
       for (const span of groupedSpans) {
-        const spanServiceIds = isSalon
+        const spanServiceIds: string[] = isSalon
           ? span.serviceIds && span.serviceIds.length === span.slotCount
             ? span.serviceIds
             : providedServices.slice(

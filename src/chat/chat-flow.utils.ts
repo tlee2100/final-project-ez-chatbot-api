@@ -57,6 +57,7 @@ export type BookingSlotSelection = {
   serviceIds?: string[];
   slots?: Array<{
     resourceId: string;
+    resourceName?: string;
     date: string;
     timeSlot: string;
     serviceId?: string;
@@ -92,9 +93,12 @@ export const parseBookingSlotSelection = (
       slots: Array.isArray(value.slots)
         ? (value.slots as Array<{
             resourceId: string;
+            resourceName?: string;
             date: string;
             timeSlot: string;
             serviceId?: string;
+            serviceName?: string;
+            staffName?: string;
           }>)
         : undefined,
       resourceId:
@@ -126,7 +130,7 @@ export const detectBookingTriggerLocale = (
 
   // Vietnamese triggers
   if (
-    /^(?:(?:hello|hi|hey|xin\s*ch[àa]o|ch[àa]o(?:\s*b[ạa]n)?|al[ôo]|good\s*(?:morning|afternoon|evening))\s*[,.!~]?\s*)?(?:(?:tôi|mình|em|anh|chị)?\s*(?:muốn|cần)?\s*)?(?:(?:đ[ặăa]t|dat)\s*(?:l[ịi]ch(?:\s*h[ẹe]n)?|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|l[êe]n\s*l[ịi]ch(?:\s*h[ẹe]n)?|book\s*(?:l[ịi]ch|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|đăng\s*k[ýy]\s*(?:đ[ặăa]t\s*)?l[ịi]ch|đ[ặăa]t)[\s!.]*$/i.test(
+    /^(?:(?:hello|hi|hey|xin\s*ch[àa]o|ch[àa]o(?:\s*b[ạa]n)?|al[ôo]|good\s*(?:morning|afternoon|evening))\s*[,.!~]?\s*)?(?:(?:tôi|mình|em|anh|chị)?\s*(?:muốn|cần)?\s*)?(?:(?:đ[ặăa]t|dat)\s*(?:l[ịi]ch(?:\s*h[ẹe]n)?|ti[ếe]p(?:\s*t[ụu]c)?|th[êe]m|l[ạa]i|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|l[êe]n\s*l[ịi]ch(?:\s*h[ẹe]n)?|book\s*(?:ti[ếe]p(?:\s*t[ụu]c)?|th[êe]m|l[ạa]i|l[ịi]ch|h[ẹe]n|s[âa]n|ch[ỗo]|ph[òo]ng)|đăng\s*k[ýy]\s*(?:đ[ặăa]t\s*)?l[ịi]ch|đ[ặăa]t)[\s!.]*$/i.test(
       trimmed,
     )
   ) {

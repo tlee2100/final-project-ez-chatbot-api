@@ -6,6 +6,8 @@ import {
 import type { LLMMessage } from './interfaces/llm-request.interface';
 
 export type BookingChipAction =
+  | 'select_booking_type'
+  | 'select_party_size'
   | 'select_service'
   | 'skip_service'
   | 'select_resource'
@@ -14,6 +16,8 @@ export type BookingChipAction =
   | 'no_preference'
   | 'skip_email'
   | 'submit_text'
+  | 'assign_remaining_service'
+  | 'assign_slot_services'
   | 'cancel_booking'
   | 'keep_booking';
 
@@ -38,6 +42,8 @@ export type BookingOptionSelection = {
 };
 
 const bookingChipActions = new Set<BookingChipAction>([
+  'select_booking_type',
+  'select_party_size',
   'select_service',
   'skip_service',
   'select_resource',
@@ -46,6 +52,8 @@ const bookingChipActions = new Set<BookingChipAction>([
   'no_preference',
   'skip_email',
   'submit_text',
+  'assign_remaining_service',
+  'assign_slot_services',
   'cancel_booking',
   'keep_booking',
 ]);
@@ -107,22 +115,41 @@ export const hasActiveStructuredBookingProgress = (
   );
 
 export type BookingOptionStep =
-  'service' | 'resource' | 'date' | 'name' | 'email';
+  | 'booking_type'
+  | 'party_size'
+  | 'service'
+  | 'resource'
+  | 'date'
+  | 'name'
+  | 'email'
+  | 'assign_remaining_service'
+  | 'assign_slot_services';
 
 const bookingStepFromText = (text: string): BookingOptionStep | null => {
   const stepMatch = text
     .match(
-      /<booking-step>\s*(service(?:id)?|resource(?:id)?|staff|date|time(?:slot)?|name|customername|email|customeremail)\s*<\/booking-step>/i,
+      /<booking-step>\s*(booking_type|type|party_size|group_size|party|size|service(?:id)?|resource(?:id)?|staff|date|time(?:slot)?|name|customername|email|customeremail|assign_slot_services|assign_remaining_service|remaining|schedule)\s*<\/booking-step>/i,
     )?.[1]
     ?.toLowerCase();
 
   if (stepMatch) {
+    if (
+      stepMatch.includes('party') ||
+      stepMatch.includes('group_size') ||
+      stepMatch === 'size'
+    )
+      return 'party_size';
+    if (stepMatch.includes('type')) return 'booking_type';
+    if (stepMatch.includes('slot_services') || stepMatch.includes('schedule'))
+      return 'assign_slot_services';
     if (stepMatch.startsWith('service')) return 'service';
     if (stepMatch.startsWith('resource') || stepMatch === 'staff')
       return 'resource';
     if (stepMatch === 'date') return 'date';
     if (stepMatch.includes('name')) return 'name';
     if (stepMatch.includes('email')) return 'email';
+    if (stepMatch.includes('remaining') || stepMatch.includes('assign'))
+      return 'assign_slot_services';
   }
 
   if (
@@ -137,6 +164,30 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
   }
 
   const lower = text.toLowerCase();
+  if (
+    /(?:bao\s*nhiêu\s*người|số\s*lượng\s*người|how\s*many\s*people|party\s*size|group\s*size|何名)/i.test(
+      lower,
+    )
+  ) {
+    return 'party_size';
+  }
+
+  if (
+    /(?:1\s*chỗ|nhiều\s*chỗ|1\s*slot|nhiều\s*slot|1\s*người|nhiều\s*người|đặt\s*1|đặt\s*nhiều)/i.test(
+      lower,
+    )
+  ) {
+    return 'booking_type';
+  }
+
+  if (
+    /(?:không\s*đủ\s*cho\s*nhóm|chọn\s*khung\s*giờ\s*khác|not\s*enough\s*staff|another\s*time\s*slot)/i.test(
+      lower,
+    )
+  ) {
+    return null;
+  }
+
   if (
     /(?:nhân\s*viên|chuyên\s*viên|thợ|bác\s*sĩ|huấn\s*luyện\s*viên|người\s*phục\s*vụ|stylist|barber|therapist|staff|specialist|resource|trainer)/i.test(
       lower,
@@ -275,16 +326,45 @@ export const buildChatMessageComponents = (
     }
   }
 
+  const isSalon = siteContext?.industryTemplateId === 'salon';
+  const explicitStep = bookingStepFromText(text);
   const selectedOption = parseBookingOptionSelection(latestUserText);
-  let step = selectedOption
-    ? selectedOption.action === 'select_service' ||
+
+  let step: BookingOptionStep | null = explicitStep;
+  if (!step && selectedOption) {
+    if (selectedOption.action === 'select_booking_type') {
+      if (isSalon && selectedOption.value === 'multiple') {
+        step = 'party_size';
+      } else if ((siteContext?.bookingServices ?? []).length > 0) {
+        step = 'service';
+      } else if ((siteContext?.bookingResources ?? []).length > 0) {
+        step = 'resource';
+      } else {
+        step = 'date';
+      }
+    } else if (
+      selectedOption.action === 'select_party_size' ||
+      /^\d+$/.test(latestUserText.trim())
+    ) {
+      step =
+        (siteContext?.bookingServices ?? []).length > 0 ? 'service' : 'date';
+    } else if (
+      selectedOption.action === 'select_service' ||
       selectedOption.action === 'skip_service'
-      ? 'resource'
-      : selectedOption.action === 'select_resource' ||
-          selectedOption.action === 'no_preference'
-        ? 'date'
-        : null
-    : (bookingStepFromText(text) ?? fallbackStep);
+    ) {
+      step =
+        (siteContext?.bookingResources ?? []).length > 0 ? 'resource' : 'date';
+    } else if (
+      selectedOption.action === 'select_resource' ||
+      selectedOption.action === 'no_preference'
+    ) {
+      step = 'date';
+    }
+  }
+
+  if (!step) {
+    step = fallbackStep;
+  }
 
   // Auto-fallback if step is service but site has no services configured
   if (step === 'service' && (siteContext?.bookingServices ?? []).length === 0) {
@@ -302,7 +382,45 @@ export const buildChatMessageComponents = (
   }
 
   let items: BookingChipItem[] = [];
-  if (step === 'service') {
+  if (step === 'booking_type') {
+    items = isSalon
+      ? [
+          {
+            action: 'select_booking_type',
+            value: 'single',
+            labelKey: 'chip.singlePerson',
+            label: 'Đặt cho 1 người',
+          },
+          {
+            action: 'select_booking_type',
+            value: 'multiple',
+            labelKey: 'chip.groupBooking',
+            label: 'Đặt cho nhiều người',
+          },
+        ]
+      : [
+          {
+            action: 'select_booking_type',
+            value: 'single',
+            labelKey: 'chip.singleSlot',
+            label: 'Đặt 1 chỗ',
+          },
+          {
+            action: 'select_booking_type',
+            value: 'multiple',
+            labelKey: 'chip.multipleSlots',
+            label: 'Đặt nhiều chỗ',
+          },
+        ];
+  } else if (step === 'party_size') {
+    items = [
+      { action: 'select_party_size', value: '2', label: '2 người' },
+      { action: 'select_party_size', value: '3', label: '3 người' },
+      { action: 'select_party_size', value: '4', label: '4 người' },
+      { action: 'select_party_size', value: '5', label: '5 người' },
+      { action: 'select_party_size', value: '6', label: '6 người' },
+    ];
+  } else if (step === 'service') {
     items = (siteContext?.bookingServices ?? []).map((service) => ({
       action: 'select_service',
       value: service.id ?? service.name,
@@ -356,6 +474,12 @@ export const buildChatMessageComponents = (
         : []),
       { action: 'skip_email', labelKey: 'chip.skip' },
     ];
+  } else if (step === 'assign_remaining_service') {
+    items = (siteContext?.bookingServices ?? []).map((service) => ({
+      action: 'assign_remaining_service' as const,
+      value: service.id ?? service.name,
+      label: service.name,
+    }));
   }
 
   return items.length ? [{ type: 'chips', items }] : [];

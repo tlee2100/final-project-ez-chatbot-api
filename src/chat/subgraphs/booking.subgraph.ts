@@ -104,9 +104,22 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
   } = deps;
 
   const initBookingNode = (state: typeof AgentState.State) => {
+    const templateId = options.siteContext?.industryTemplateId;
+    const isSalon = templateId === 'salon';
+
+    if (isSalon) {
+      const prompt = getBookingOptionPrompt(state.locale, 'booking_type');
+      return {
+        messages: [
+          new AIMessage(
+            `${prompt}\n\n<booking-step>booking_type</booking-step>`,
+          ),
+        ],
+      };
+    }
+
     const services = options.siteContext?.bookingServices ?? [];
     const resources = options.siteContext?.bookingResources ?? [];
-    const templateId = options.siteContext?.industryTemplateId;
     if (services.length > 0) {
       const prompt = getBookingOptionPrompt(
         state.locale,
@@ -240,6 +253,28 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           if (matched) serviceNames.push(matched.name);
         }
 
+        const rawSlots = Array.isArray(draftPayload.slots)
+          ? (draftPayload.slots as Array<Record<string, unknown>>)
+          : [];
+        const distinctResourceNames = Array.from(
+          new Set(
+            rawSlots
+              .map((s) => {
+                const r = resources.find((item) => item.id === s.resourceId);
+                return (
+                  (s.resourceName as string) ||
+                  (s.staffName as string) ||
+                  r?.name
+                );
+              })
+              .filter(Boolean),
+          ),
+        );
+        const combinedResourceName =
+          distinctResourceNames.length > 0
+            ? distinctResourceNames.join(', ')
+            : (resource?.name ?? (draftPayload.resourceName as string));
+
         chatGateway.emitBookingSummary(conversationId, {
           ...draftPayload,
           sessionId: updatedSessionId || effectiveSessionId,
@@ -251,7 +286,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             service?.name ??
             (draftPayload.serviceName as string),
           serviceNames: serviceNames.length > 0 ? serviceNames : undefined,
-          resourceName: resource?.name ?? (draftPayload.resourceName as string),
+          resourceName: combinedResourceName,
         });
         const prompt =
           lang === 'vi'
@@ -358,13 +393,114 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
 
     const templateId = options.siteContext?.industryTemplateId;
 
-    // 3. Handle /select-booking-option actions
+    // 3. Handle /select-booking-option actions and /assign-slot-services
+    const assignSlotServicesMatch = userText.match(
+      /^\/assign-slot-services\s+(.+?)(?:\s+::|$)/i,
+    );
+    if (assignSlotServicesMatch) {
+      const hasName = !!options.visitorContext?.name;
+      const prompt = getBookingOptionPrompt(locale, 'name');
+      const marker = hasName ? '\n\n<booking-step>name</booking-step>' : '';
+      return {
+        messages: [new AIMessage(`${prompt}${marker}`)],
+      };
+    }
+
     if (bookingOption) {
+      if (bookingOption.action === 'select_booking_type') {
+        if (templateId === 'salon' && bookingOption.value === 'multiple') {
+          const prompt = getBookingOptionPrompt(
+            locale,
+            'party_size',
+            templateId,
+          );
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>party_size</booking-step>`,
+              ),
+            ],
+          };
+        }
+        if (services.length > 0) {
+          const prompt = getBookingOptionPrompt(locale, 'service', templateId);
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>service</booking-step>`,
+              ),
+            ],
+          };
+        }
+        if (resources.length > 0) {
+          const prompt = getBookingOptionPrompt(locale, 'resource', templateId);
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>resource</booking-step>`,
+              ),
+            ],
+          };
+        }
+        const prompt = getBookingOptionPrompt(locale, 'date', templateId);
+        return {
+          messages: [
+            new AIMessage(`${prompt}\n\n<booking-step>date</booking-step>`),
+          ],
+        };
+      }
+
+      if (bookingOption.action === 'select_party_size') {
+        if (services.length > 0) {
+          const prompt = getBookingOptionPrompt(locale, 'service', templateId);
+          return {
+            messages: [
+              new AIMessage(
+                `${prompt}\n\n<booking-step>service</booking-step>`,
+              ),
+            ],
+          };
+        }
+        const prompt = getBookingOptionPrompt(locale, 'date', templateId);
+        return {
+          messages: [
+            new AIMessage(`${prompt}\n\n<booking-step>date</booking-step>`),
+          ],
+        };
+      }
+
+      if (
+        bookingOption.action === 'assign_remaining_service' ||
+        bookingOption.action === 'assign_slot_services'
+      ) {
+        const hasName = !!options.visitorContext?.name;
+        const prompt = getBookingOptionPrompt(locale, 'name');
+        const marker = hasName ? '\n\n<booking-step>name</booking-step>' : '';
+        return {
+          messages: [new AIMessage(`${prompt}${marker}`)],
+        };
+      }
+
       if (
         bookingOption.action === 'select_service' ||
         bookingOption.action === 'skip_service'
       ) {
-        if (resources.length === 0) {
+        const userMessages = state.messages
+          .filter((m) => m.constructor?.name?.includes('HumanMessage'))
+          .map(messageText);
+        const bookingTypeOpt = userMessages
+          .map((t) => parseBookingOptionSelection(t))
+          .filter((o) => o?.action === 'select_booking_type')
+          .pop();
+        const partySizeOpt = userMessages
+          .map((t) => parseBookingOptionSelection(t))
+          .filter((o) => o?.action === 'select_party_size')
+          .pop();
+        const isSalonGroup =
+          templateId === 'salon' &&
+          (bookingTypeOpt?.value === 'multiple' || !!partySizeOpt);
+
+        if (resources.length === 0 || isSalonGroup) {
           const prompt = getBookingOptionPrompt(locale, 'date', templateId);
           return {
             messages: [
@@ -646,18 +782,76 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             ? latestSlotSel.slots.length
             : 1);
 
-        const serviceIds: string[] | undefined =
-          selectedServices.length > 0
-            ? selectedServices.map((s) => s.id)
+        const assignedRemainingOpt = userMessages
+          .map((t) => parseBookingOptionSelection(t))
+          .filter((o) => o?.action === 'assign_remaining_service')
+          .pop();
+        const remainingServiceId = assignedRemainingOpt?.value;
+        const remainingService = services.find(
+          (s) => s.id === remainingServiceId || s.name === remainingServiceId,
+        );
+
+        type SlotAssignment = {
+          slotIndex: number;
+          serviceId: string;
+          serviceName?: string;
+          timeSlot?: string;
+        };
+        let customAssignments: SlotAssignment[] | null = null;
+        for (const msg of userMessages) {
+          const m = msg.match(/^\/assign-slot-services\s+(.+?)(?:\s+::|$)/i);
+          if (m) {
+            try {
+              const parsed = JSON.parse(m[1]) as {
+                assignments?: SlotAssignment[];
+              };
+              if (Array.isArray(parsed?.assignments)) {
+                customAssignments = parsed.assignments;
+              }
+            } catch {
+              // Ignore invalid JSON
+            }
+          }
+        }
+
+        const serviceIds: string[] | undefined = customAssignments
+          ? Array.from({ length: slotCount }, (_, idx) => {
+              const found = customAssignments.find((a) => a.slotIndex === idx);
+              return (
+                found?.serviceId ?? selectedServices[0]?.id ?? singleServiceId
+              );
+            })
+          : selectedServices.length > 0
+            ? Array.from({ length: slotCount }, (_, idx) => {
+                if (idx < selectedServices.length) {
+                  return selectedServices[idx].id;
+                }
+                return remainingServiceId ?? selectedServices[0].id;
+              })
             : rawSelectedServiceIds.length > 0
               ? rawSelectedServiceIds
               : singleServiceId
                 ? Array(slotCount).fill(singleServiceId)
                 : undefined;
 
-        const serviceNames: string[] | undefined =
-          selectedServices.length > 0
-            ? selectedServices.map((s) => s.name)
+        const serviceNames: string[] | undefined = customAssignments
+          ? Array.from({ length: slotCount }, (_, idx) => {
+              const found = customAssignments.find((a) => a.slotIndex === idx);
+              const sObj = services.find((s) => s.id === found?.serviceId);
+              return (
+                found?.serviceName ??
+                sObj?.name ??
+                selectedServices[0]?.name ??
+                singleService?.name
+              );
+            })
+          : selectedServices.length > 0
+            ? Array.from({ length: slotCount }, (_, idx) => {
+                if (idx < selectedServices.length) {
+                  return selectedServices[idx].name;
+                }
+                return remainingService?.name ?? selectedServices[0].name;
+              })
             : singleService
               ? Array(slotCount).fill(singleService.name)
               : undefined;
@@ -690,15 +884,36 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           calculatedEndTimeSlot = `${String(Math.floor(endM / 60) % 24).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
         }
 
-        const enrichedSlots = latestSlotSel?.slots?.map((s, idx) => ({
-          resourceId: s.resourceId,
-          date: s.date,
-          timeSlot: s.timeSlot,
-          serviceId: s.serviceId ?? serviceIds?.[idx] ?? primaryServiceId,
-          serviceName:
-            s.serviceName ?? serviceNames?.[idx] ?? primaryServiceName,
-          staffName: s.staffName ?? resource?.name,
-        }));
+        const distinctResourceNames = Array.from(
+          new Set(
+            (latestSlotSel?.slots || [])
+              .map((s) => {
+                const r = resources.find((item) => item.id === s.resourceId);
+                return s.resourceName || s.staffName || r?.name;
+              })
+              .filter(Boolean),
+          ),
+        );
+        const combinedResourceName =
+          distinctResourceNames.length > 0
+            ? distinctResourceNames.join(', ')
+            : resource?.name;
+
+        const enrichedSlots = latestSlotSel?.slots?.map((s, idx) => {
+          const r = resources.find((item) => item.id === s.resourceId);
+          const stName =
+            s.staffName || s.resourceName || r?.name || resource?.name;
+          return {
+            resourceId: s.resourceId,
+            resourceName: stName,
+            date: s.date,
+            timeSlot: s.timeSlot,
+            serviceId: s.serviceId ?? serviceIds?.[idx] ?? primaryServiceId,
+            serviceName:
+              s.serviceName ?? serviceNames?.[idx] ?? primaryServiceName,
+            staffName: stName,
+          };
+        });
 
         chatGateway.emitBookingSummary(conversationId, {
           locale: state.activeFlowLocale ?? state.locale,
@@ -710,7 +925,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           serviceName: primaryServiceName,
           serviceNames,
           resourceId,
-          resourceName: resource?.name,
+          resourceName: combinedResourceName,
           date: latestSlotSel?.date,
           timeSlot: latestSlotSel?.timeSlot,
           endTimeSlot: calculatedEndTimeSlot,
@@ -736,6 +951,40 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         .filter((m) => m.constructor?.name?.includes('HumanMessage'))
         .map(messageText);
 
+      const isSalon = templateId === 'salon';
+      const bookingTypeOpt = userMessages
+        .map((t) => parseBookingOptionSelection(t))
+        .filter((o) => o?.action === 'select_booking_type')
+        .pop();
+      const partySizeOpt = userMessages
+        .map((t) => parseBookingOptionSelection(t))
+        .filter((o) => o?.action === 'select_party_size')
+        .pop();
+
+      const partySizeFromText = userMessages
+        .map((t) => {
+          const trimmed = t.trim();
+          if (/^\d+$/.test(trimmed)) {
+            const num = parseInt(trimmed, 10);
+            if (num >= 1 && num <= 50) return num;
+          }
+          const m = trimmed.match(
+            /(\d+)\s*(?:người|nguoi|people|名|khách|khach)/i,
+          );
+          return m ? parseInt(m[1], 10) : null;
+        })
+        .filter(Boolean)
+        .pop();
+
+      const partySize =
+        (partySizeOpt?.value ? parseInt(partySizeOpt.value, 10) : null) ||
+        partySizeFromText ||
+        (isSalon && bookingTypeOpt?.value === 'multiple' ? 2 : 1);
+
+      const isSingleBooking = isSalon && bookingTypeOpt?.value === 'single';
+      const isGroupBooking =
+        isSalon && (bookingTypeOpt?.value === 'multiple' || partySize > 1);
+
       const serviceOpt = userMessages
         .map((t) => parseBookingOptionSelection(t))
         .filter((o) => o?.action === 'select_service')
@@ -753,14 +1002,15 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         slotSelection.slotCount ??
         (Array.isArray(slotSelection.slots) ? slotSelection.slots.length : 1);
 
-      if (serviceCount >= 2 && slotCount < serviceCount) {
+      // Single booking in Salon: 1 customer can choose multiple services, but must match exactly serviceCount slots (1-to-1)
+      if (isSingleBooking && serviceCount > 0 && slotCount !== serviceCount) {
         let mismatchPrompt = '';
         if (lang === 'vi') {
-          mismatchPrompt = `Bạn đã chọn ${serviceCount} dịch vụ nhưng chỉ chọn ${slotCount} khung giờ. Vui lòng chọn đủ ${serviceCount} khung giờ (mỗi dịch vụ tương ứng 1 khung giờ) hoặc chọn lại chỉ 1 dịch vụ.\n\n<booking-step>service</booking-step>`;
+          mismatchPrompt = `Bạn đang đặt lịch cho 1 người với ${serviceCount} dịch vụ. Vui lòng chọn đúng ${serviceCount} khung giờ nối tiếp nhau (mỗi dịch vụ tương ứng 1 khung giờ).`;
         } else if (lang === 'ja') {
-          mismatchPrompt = `${serviceCount}つのサービスを選択されていますが、${slotCount}つの時間枠のみ選択されています。各サービスに1つずつ（合計${serviceCount}枠）の時間枠を選択するか、1つのサービスのみを選択し直してください。\n\n<booking-step>service</booking-step>`;
+          mismatchPrompt = `1名様で${serviceCount}つのサービスをご予約中です。連続する${serviceCount}つの時間枠（1サービスにつき1枠）を選択してください。`;
         } else {
-          mismatchPrompt = `You have selected ${serviceCount} services but only chosen ${slotCount} time slot(s). Please select ${serviceCount} time slots (one slot per service) or choose only 1 service.\n\n<booking-step>service</booking-step>`;
+          mismatchPrompt = `You are booking for 1 person with ${serviceCount} service(s). Please select exactly ${serviceCount} consecutive time slot(s) (1 slot per service).`;
         }
 
         try {
@@ -785,9 +1035,106 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         };
       }
 
+      // Single booking in Salon: validate that slots do not share the exact same time
+      if (
+        isSingleBooking &&
+        slotSelection.slots &&
+        slotSelection.slots.length > 1
+      ) {
+        const timeKeys = slotSelection.slots.map(
+          (s) => `${s.date || ''}_${s.timeSlot || ''}`,
+        );
+        if (new Set(timeKeys).size !== slotSelection.slots.length) {
+          let dupTimePrompt = '';
+          if (lang === 'vi') {
+            dupTimePrompt = `Đặt lịch cho 1 người với nhiều dịch vụ yêu cầu các khung giờ nối tiếp nhau (không thể trùng cùng 1 khung giờ). Vui lòng chọn các khung giờ khác nhau.`;
+          } else if (lang === 'ja') {
+            dupTimePrompt = `1名様での複数サービスのご予約は、連続する異なる時間枠をご指定ください（同じ時間枠を重複して選択することはできません）。`;
+          } else {
+            dupTimePrompt = `Booking multiple services for 1 person requires sequential time slots. You cannot select the same time slot simultaneously. Please choose different consecutive slots.`;
+          }
+          try {
+            const result = await toolProvider.execute({
+              name: 'getAvailableSlots',
+              arguments: {
+                date: slotSelection.date,
+                serviceId: serviceOpt?.value,
+                resourceId: slotSelection.resourceId,
+              },
+            });
+            chatGateway.emitBookingSlots(conversationId, result.output);
+          } catch {
+            // Ignore slot fetch error
+          }
+          return {
+            messages: [new AIMessage(dupTimePrompt)],
+          };
+        }
+      }
+
+      // Group booking in Salon: validate partySize match and enrich slots
+      let effectiveSlots = slotSelection.slots;
+      if (
+        isGroupBooking &&
+        (!effectiveSlots || effectiveSlots.length < partySize)
+      ) {
+        let groupMismatchPrompt = '';
+        if (lang === 'vi') {
+          groupMismatchPrompt = `Bạn đang đặt lịch cho nhóm ${partySize} người. Vui lòng chọn đúng ${partySize} thợ/khung giờ.`;
+        } else if (lang === 'ja') {
+          groupMismatchPrompt = `${partySize} 名様のご予約です。${partySize} つの時間枠/スタッフを選択してください。`;
+        } else {
+          groupMismatchPrompt = `You are booking for a group of ${partySize} people. Please select exactly ${partySize} staff/slots.`;
+        }
+        try {
+          const result = await toolProvider.execute({
+            name: 'getAvailableSlots',
+            arguments: {
+              date: slotSelection.date,
+              serviceId: serviceOpt?.value,
+            },
+          });
+          chatGateway.emitBookingSlots(conversationId, result.output);
+        } catch (err) {
+          logger.error(
+            '[Structured Step] Failed to re-fetch slots on group mismatch',
+            err,
+          );
+        }
+        return {
+          messages: [new AIMessage(groupMismatchPrompt)],
+        };
+      }
+
+      if (effectiveSlots && effectiveSlots.length > 0) {
+        effectiveSlots = effectiveSlots.map((st, idx) => {
+          const resId = st.resourceId || slotSelection.resourceId || '';
+          const foundRes = resources.find((r) => r.id === resId);
+          const srvId =
+            st.serviceId ??
+            (isSingleBooking && selectedServiceIds[idx]
+              ? selectedServiceIds[idx]
+              : (serviceOpt?.value ?? services[0]?.id));
+          const foundSrv = services.find((s) => s.id === srvId);
+          return {
+            ...st,
+            resourceId: resId,
+            resourceName: st.resourceName || st.staffName || foundRes?.name,
+            staffName: st.staffName || st.resourceName || foundRes?.name,
+            serviceId: srvId,
+            serviceName: st.serviceName || foundSrv?.name,
+          };
+        });
+      }
+
+      const finalSlotCount =
+        effectiveSlots && effectiveSlots.length > 0
+          ? effectiveSlots.length
+          : slotCount;
+
       try {
         logger.log(
-          `[Structured Step] Calling holdSlot directly: date=${slotSelection.date}, timeSlot=${slotSelection.timeSlot}, resourceId=${slotSelection.resourceId}, slotCount=${slotCount}`,
+          `[Structured Step] Calling holdSlot directly: date=${slotSelection.date}, timeSlot=${slotSelection.timeSlot}, resourceId=${slotSelection.resourceId}, slotCount=${finalSlotCount}`,
         );
         await toolProvider.execute({
           name: 'holdSlot',
@@ -795,8 +1142,8 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             date: slotSelection.date,
             timeSlot: slotSelection.timeSlot,
             resourceId: slotSelection.resourceId,
-            slotCount,
-            slots: slotSelection.slots,
+            slotCount: finalSlotCount,
+            slots: effectiveSlots ?? slotSelection.slots,
             sessionId: conversationId,
           },
         });
@@ -809,6 +1156,35 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         Boolean(visitorName) &&
         visitorName?.toLowerCase() !== 'guest' &&
         visitorName?.toLowerCase() !== '[none]';
+      // If multiple services and more slots than services, or group booking with multiple services:
+      // Prompt visitor to assign services to slots with slot breakdown
+      if (
+        (serviceCount >= 2 && slotCount > serviceCount) ||
+        (isGroupBooking && serviceCount >= 2)
+      ) {
+        const selectedServices = selectedServiceIds
+          .map((id) => services.find((s) => s.id === id || s.name === id))
+          .filter((s): s is NonNullable<typeof s> => Boolean(s));
+        const selectedServiceNames = selectedServices.map((s) => s.name);
+        const prompt = getBookingOptionPrompt(
+          locale,
+          'assign_slot_services',
+          templateId,
+          {
+            serviceCount,
+            serviceNames: selectedServiceNames,
+            slotCount,
+          },
+        );
+        return {
+          messages: [
+            new AIMessage(
+              `${prompt}\n\n<booking-step>assign_slot_services</booking-step>`,
+            ),
+          ],
+        };
+      }
+
       const prompt = getBookingOptionPrompt(locale, 'name');
       const marker = isKnownName ? '\n\n<booking-step>name</booking-step>' : '';
       return {

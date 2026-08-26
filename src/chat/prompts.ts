@@ -171,12 +171,62 @@ export const getSlotCardPrompt = (locale: string): string => {
 
 export const getBookingOptionPrompt = (
   locale: string,
-  step: 'service' | 'resource' | 'date' | 'name' | 'email',
+  step:
+    | 'booking_type'
+    | 'party_size'
+    | 'service'
+    | 'resource'
+    | 'date'
+    | 'name'
+    | 'email'
+    | 'assign_remaining_service'
+    | 'assign_slot_services',
   template?: string,
+  extra?: {
+    serviceCount?: number;
+    serviceNames?: string[];
+    slotCount?: number;
+    partySize?: number;
+  },
 ): string => {
   const language = localeLanguage(locale);
   const isGeneral =
     template === 'general' || (template !== undefined && template !== 'salon');
+  const isSalon = template === 'salon';
+
+  if (step === 'booking_type') {
+    if (isSalon) {
+      if (language === 'vi')
+        return 'Bạn muốn đặt lịch cho 1 người hay cho nhóm nhiều người?';
+      if (language === 'ja')
+        return '1名様でのご予約ですか、それともグループ（複数名）でのご予約ですか？';
+      return 'Would you like to book for 1 person or for a group of multiple people?';
+    }
+    if (language === 'vi') return 'Bạn muốn đặt 1 chỗ hay nhiều chỗ?';
+    if (language === 'ja')
+      return '1枠の予約ですか、それとも複数枠の予約ですか？';
+    return 'Would you like to book 1 slot or multiple slots?';
+  }
+
+  if (step === 'party_size') {
+    if (language === 'vi') return 'Nhóm của bạn có bao nhiêu người?';
+    if (language === 'ja') return 'グループは何名様ですか？';
+    return 'How many people are in your group?';
+  }
+
+  if (step === 'assign_slot_services' || step === 'assign_remaining_service') {
+    const sCount = extra?.serviceCount || 0;
+    const sNames = extra?.serviceNames?.join(', ') || '';
+    const mCount = extra?.slotCount || 0;
+    if (language === 'vi') {
+      return `Tôi thấy bạn đã chọn ${sCount} dịch vụ (${sNames}) và ${mCount} khung giờ. Vui lòng phân bổ dịch vụ cho từng khung giờ bên dưới hoặc chọn áp dụng cho tất cả.`;
+    }
+    if (language === 'ja') {
+      return `${sCount}つのサービス（${sNames}）と${mCount}つの時間枠を選択されています。下のカードで各枠のサービスを設定するか、「すべてに適用」を選択してください。`;
+    }
+    return `You have selected ${sCount} services (${sNames}) and ${mCount} time slots. Please assign services to each slot below or apply one to all.`;
+  }
+
   const prompts =
     language === 'vi'
       ? {
@@ -207,7 +257,7 @@ export const getBookingOptionPrompt = (
             name: 'Please provide your name to continue.',
             email: 'Would you like to provide a confirmation email?',
           };
-  return prompts[step];
+  return (prompts as Record<string, string>)[step] || '';
 };
 
 export const getAbandonBookingPrompt = (locale: string): string => {
