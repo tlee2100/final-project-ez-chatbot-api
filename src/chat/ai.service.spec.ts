@@ -38,17 +38,14 @@ describe('AiService system prompt', () => {
     );
     expect(prompt).toContain('Do not include any time value such as HH:mm');
     expect(prompt).toContain('<booking-input>phone</booking-input>');
-    expect(prompt).toContain('<booking-step>service</booking-step>');
+    expect(prompt).toContain('<booking-step>serviceId</booking-step>');
     expect(prompt).toContain('Never output <chips>');
-    expect(prompt).toContain(
-      'Collect only missing fields in this order: serviceId, resourceId, date',
-    );
     expect(prompt).toContain(
       '/select-booking-option JSON is authoritative machine data',
     );
-    expect(prompt.match(/BOOKING FLOW:/g)).toHaveLength(1);
+    expect(prompt.match(/BOOKING FLOW & INDUSTRY TEMPLATE:/g)).toHaveLength(1);
     expect(prompt.lastIndexOf('LANGUAGE LOCK:')).toBeGreaterThan(
-      prompt.lastIndexOf('BOOKING FLOW:'),
+      prompt.lastIndexOf('BOOKING FLOW & INDUSTRY TEMPLATE:'),
     );
     expect(prompt).not.toContain('Vietnamese:');
     expect(prompt).not.toContain('In English:');

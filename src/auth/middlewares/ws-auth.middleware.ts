@@ -39,7 +39,7 @@ export const WsAuthMiddleware = (jwtService: JwtService) => {
   };
 };
 
-function extractToken(client: Socket): string | null {
+export function extractToken(client: Socket): string | null {
   const authToken = (client.handshake.auth as Partial<{ token: string }>).token;
   if (typeof authToken === 'string') {
     return authToken;

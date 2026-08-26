@@ -41,6 +41,8 @@ async function bootstrap() {
   const dataSource = app.get(DataSource);
   await seedDatabase(dataSource);
 
+  app.enableShutdownHooks();
+
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();

@@ -361,12 +361,21 @@ export class McpService {
   ): Promise<string | undefined> {
     if (!resourceIdOrName) return undefined;
     const resources = await this.bookingService.getResourcesBySiteId(siteId);
-    const matched = resources.find(
-      (r) =>
-        r.id === resourceIdOrName ||
-        r.name.toLowerCase().trim() === resourceIdOrName.toLowerCase().trim(),
-    );
-    return matched ? matched.id : resourceIdOrName;
+    const items = resourceIdOrName
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    const resolved = items.map((item) => {
+      const matched = resources.find(
+        (r) =>
+          r.id === item ||
+          r.name.toLowerCase().trim() === item.toLowerCase().trim(),
+      );
+      return matched ? matched.id : item;
+    });
+
+    return resolved.length > 0 ? resolved.join(',') : resourceIdOrName;
   }
 
   private async resolveServiceId(
@@ -375,12 +384,21 @@ export class McpService {
   ): Promise<string | undefined> {
     if (!serviceIdOrName) return undefined;
     const services = await this.bookingService.getServicesBySiteId(siteId);
-    const matched = services.find(
-      (s) =>
-        s.id === serviceIdOrName ||
-        s.name.toLowerCase().trim() === serviceIdOrName.toLowerCase().trim(),
-    );
-    return matched ? matched.id : serviceIdOrName;
+    const items = serviceIdOrName
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    const resolved = items.map((item) => {
+      const matched = services.find(
+        (s) =>
+          s.id === item ||
+          s.name.toLowerCase().trim() === item.toLowerCase().trim(),
+      );
+      return matched ? matched.id : item;
+    });
+
+    return resolved.length > 0 ? resolved.join(',') : serviceIdOrName;
   }
 
   /**
@@ -419,13 +437,18 @@ export class McpService {
         timezone,
         'HH:mm',
       );
-      const slotId = `slot-${date}-${idx}`;
+      const slotDate = formatInTimeZone(
+        new Date(slot.startAt),
+        timezone,
+        'yyyy-MM-dd',
+      );
+      const slotId = `slot-${slotDate}-${localTime}-${idx}`;
 
       // Branch B: No Preference — slot has availableResources
       if ('availableResources' in slot && slot.availableResources) {
         return {
           slotId,
-          date,
+          date: slotDate,
           timeSlot: localTime,
           availableResources: slot.availableResources,
           available: slot.availableResources.length > 0,
@@ -437,7 +460,7 @@ export class McpService {
       const matchedRes = allResources.find((r) => r.id === s.resourceId);
       return {
         slotId,
-        date,
+        date: slotDate,
         timeSlot: localTime,
         resourceId: s.resourceId ?? resolvedResourceId ?? 'any',
         resourceName: matchedRes?.name,

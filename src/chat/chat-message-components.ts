@@ -108,12 +108,20 @@ export type BookingOptionStep =
   'service' | 'resource' | 'date' | 'name' | 'email';
 
 const bookingStepFromText = (text: string): BookingOptionStep | null => {
-  const step = text
+  const stepMatch = text
     .match(
-      /<booking-step>\s*(service|resource|date|name|email)\s*<\/booking-step>/i,
+      /<booking-step>\s*(service(?:id)?|resource(?:id)?|staff|date|time(?:slot)?|name|customername|email|customeremail)\s*<\/booking-step>/i,
     )?.[1]
     ?.toLowerCase();
-  if (step) return step as BookingOptionStep;
+
+  if (stepMatch) {
+    if (stepMatch.startsWith('service')) return 'service';
+    if (stepMatch.startsWith('resource') || stepMatch === 'staff')
+      return 'resource';
+    if (stepMatch === 'date') return 'date';
+    if (stepMatch.includes('name')) return 'name';
+    if (stepMatch.includes('email')) return 'email';
+  }
 
   if (
     /<chips>.*?@.*?\..*?\|.*?(bỏ qua|skip|スキップ).*?<\/chips>/i.test(text) ||
@@ -124,6 +132,32 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
     )
   ) {
     return 'email';
+  }
+
+  const lower = text.toLowerCase();
+  if (
+    /(?:nhân\s*viên|chuyên\s*viên|thợ|bác\s*sĩ|huấn\s*luyện\s*viên|người\s*phục\s*vụ|stylist|barber|therapist|staff|specialist|resource|trainer)/i.test(
+      lower,
+    ) ||
+    /(?:which|who|select|choose|preferred)\s*(?:staff|specialist|therapist|doctor|trainer|resource|barber|stylist|person)/i.test(
+      lower,
+    )
+  ) {
+    return 'resource';
+  }
+
+  if (
+    /(?:chọn|vào|đặt)?\s*ngày\s*(?:nào|mấy|khác)?/i.test(lower) ||
+    /(?:which|what|select|choose)\s*date/i.test(lower)
+  ) {
+    return 'date';
+  }
+
+  if (
+    /(?:đặt|chọn|muốn)?\s*dịch\s*vụ\s*(?:nào|gì)?/i.test(lower) ||
+    /(?:which|what|select|choose)\s*service/i.test(lower)
+  ) {
+    return 'service';
   }
 
   return null;

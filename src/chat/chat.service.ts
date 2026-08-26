@@ -8,6 +8,7 @@ import {
   HttpStatus,
   forwardRef,
   Inject,
+  BeforeApplicationShutdown,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { WsException } from '@nestjs/websockets';
@@ -101,7 +102,7 @@ interface WsRateLimitEntry {
 }
 
 @Injectable()
-export class ChatService {
+export class ChatService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(ChatService.name);
   private readonly conversationsClosedListeners = new Set<
     (ids: string[]) => void
@@ -562,6 +563,10 @@ export class ChatService {
     }
 
     try {
+      this.logger.log(
+        `💬 [Chat Incoming Message] [Conv: ${payload.conversationId}] [Sender: ${payload.senderType}] Content: "${payload.content}"`,
+      );
+
       const { savedMessage, conversation } = await this.processIncomingMessage(
         payload.conversationId,
         payload.content,
@@ -1639,6 +1644,13 @@ export class ChatService {
       hasComponents: Boolean(components?.length),
       hasLocale: Boolean(locale),
     });
+
+    if (senderType === SenderType.AI) {
+      this.logger.log(
+        `🤖 [AI Message Saved to DB] [Conv: ${conversationId}] [Locale: ${locale ?? 'auto'}]\n${content}`,
+      );
+    }
+
     const savedMessage = await this.chatMessageRepository.save(message);
 
     if (agentId) {
@@ -1782,6 +1794,16 @@ export class ChatService {
     }
 
     return this.getConversationById(id);
+  }
+
+  /**
+   * Graceful Shutdown Hook: Cancels active conversation timers on shutdown.
+   */
+  beforeApplicationShutdown(signal?: string): void {
+    this.logger.warn(
+      `Server is shutting down (${signal || 'UNKNOWN'}). Cleaning up active conversation timers...`,
+    );
+    this.chatTimeoutService.onModuleDestroy?.();
   }
 
   /** Background job: generate AI summary then enqueue summary + transcript emails. */

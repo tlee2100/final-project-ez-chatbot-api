@@ -9,16 +9,19 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
-import { Logger } from '@nestjs/common';
+import { Logger, UseGuards } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import { UserRole } from 'src/user/enums/user-role.enum';
-import type { JwtUser } from 'src/auth/types/jwt-user.type';
+import { UserRole } from '../user/enums/user-role.enum';
+import type { JwtUser } from '../auth/types/jwt-user.type';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { WsRolesGuard } from '../auth/guards/ws-roles.guard';
 import { ChatService } from './chat.service';
 import { SenderType } from './entities/chat-message.entity';
 import { Conversation } from './entities/conversation.entity';
 import { NotificationGateway } from '../notification/notification.gateway';
 import { ChatToastPayload } from '../notification/types/chat-toast-payload.type';
 import type { RawPageContext } from './interfaces/page-context.interface';
+import { extractToken } from '../auth/middlewares/ws-auth.middleware';
 
 type JwtPayload = {
   sub: string;
@@ -79,17 +82,18 @@ export class ChatGateway
     next: (err?: Error) => void,
   ): Promise<void> {
     try {
-      const token = this.extractToken(client);
+      const token = extractToken(client);
 
       if (!token) {
         const conversationId = this.extractVisitorConversationId(client);
-        const siteId = client.handshake.query.siteId as string;
+        const siteId = (client.handshake.auth?.siteId ||
+          client.handshake.query?.siteId) as string;
 
         if (conversationId || siteId) {
           const socketData = client.data as SocketData;
           socketData.visitor = {
             conversationId: conversationId || undefined,
-            siteId,
+            siteId: siteId || undefined,
           };
           next();
           return;
@@ -99,15 +103,24 @@ export class ChatGateway
         return;
       }
 
-      const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
+      const payload = await this.jwtService.verifyAsync<
+        JwtPayload & { type?: string; conversationId?: string; siteId?: string }
+      >(token);
       const socketData = client.data as SocketData;
 
-      socketData.user = {
-        id: payload.sub,
-        email: payload.email,
-        role: payload.role,
-        organizationId: payload.organizationId,
-      };
+      if (payload.type === 'visitor') {
+        socketData.visitor = {
+          conversationId: payload.conversationId || payload.sub,
+          siteId: payload.siteId,
+        };
+      } else {
+        socketData.user = {
+          id: payload.sub,
+          email: payload.email,
+          role: payload.role,
+          organizationId: payload.organizationId,
+        };
+      }
 
       next();
     } catch {
@@ -135,6 +148,8 @@ export class ChatGateway
 
   // ─── Live-chat: Join conversation room (agent "Takes Chat") ───────────────
 
+  @UseGuards(WsRolesGuard)
+  @Roles(UserRole.AGENT)
   @SubscribeMessage('joinConversation')
   async handleJoinConversation(
     @ConnectedSocket() client: Socket,
@@ -145,6 +160,8 @@ export class ChatGateway
 
   // ─── Live-chat: Subscribe (preview without claiming) ──────────────────────
 
+  @UseGuards(WsRolesGuard)
+  @Roles(UserRole.AGENT, UserRole.ADMIN, UserRole.SUPER_ADMIN)
   @SubscribeMessage('subscribeConversation')
   async handleSubscribeConversation(
     @ConnectedSocket() client: Socket,
@@ -291,28 +308,6 @@ export class ChatGateway
     this.server
       .to(`conversation-${conversationId}`)
       .emit('bookingCancelled', { conversationId, payload });
-  }
-
-  // ─── Auth / Query extractors ─────────────────────────────────────────────
-
-  private extractToken(client: Socket): string | null {
-    const authToken = (client.handshake.auth as Partial<{ token: string }>)
-      .token;
-    if (typeof authToken === 'string') {
-      return authToken;
-    }
-
-    const queryToken = client.handshake.query?.token;
-    if (typeof queryToken === 'string') {
-      return queryToken;
-    }
-
-    const authorization = client.handshake.headers.authorization;
-    if (authorization?.startsWith('Bearer ')) {
-      return authorization.slice(7);
-    }
-
-    return null;
   }
 
   private extractVisitorConversationId(client: Socket): string | null {

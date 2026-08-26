@@ -615,10 +615,60 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
 
     // 4. Handle /select-booking-slot
     if (slotSelection && toolProvider) {
+      const userMessages = state.messages
+        .filter((m) => m.constructor?.name?.includes('HumanMessage'))
+        .map(messageText);
+
+      const serviceOpt = userMessages
+        .map((t) => parseBookingOptionSelection(t))
+        .filter((o) => o?.action === 'select_service')
+        .pop();
+
+      const selectedServiceIds = serviceOpt?.value
+        ? serviceOpt.value
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : [];
+      const serviceCount = selectedServiceIds.length;
+
+      const slotCount =
+        slotSelection.slotCount ??
+        (Array.isArray(slotSelection.slots) ? slotSelection.slots.length : 1);
+
+      if (serviceCount >= 2 && slotCount < serviceCount) {
+        let mismatchPrompt = '';
+        if (lang === 'vi') {
+          mismatchPrompt = `Bạn đã chọn ${serviceCount} dịch vụ nhưng chỉ chọn ${slotCount} khung giờ. Vui lòng chọn đủ ${serviceCount} khung giờ (mỗi dịch vụ tương ứng 1 khung giờ) hoặc chọn lại chỉ 1 dịch vụ.\n\n<booking-step>service</booking-step>`;
+        } else if (lang === 'ja') {
+          mismatchPrompt = `${serviceCount}つのサービスを選択されていますが、${slotCount}つの時間枠のみ選択されています。各サービスに1つずつ（合計${serviceCount}枠）の時間枠を選択するか、1つのサービスのみを選択し直してください。\n\n<booking-step>service</booking-step>`;
+        } else {
+          mismatchPrompt = `You have selected ${serviceCount} services but only chosen ${slotCount} time slot(s). Please select ${serviceCount} time slots (one slot per service) or choose only 1 service.\n\n<booking-step>service</booking-step>`;
+        }
+
+        try {
+          const result = await toolProvider.execute({
+            name: 'getAvailableSlots',
+            arguments: {
+              date: slotSelection.date,
+              serviceId: serviceOpt?.value,
+              resourceId: slotSelection.resourceId,
+            },
+          });
+          chatGateway.emitBookingSlots(conversationId, result.output);
+        } catch (err) {
+          logger.error(
+            '[Structured Step] Failed to re-fetch slots on slot count mismatch',
+            err,
+          );
+        }
+
+        return {
+          messages: [new AIMessage(mismatchPrompt)],
+        };
+      }
+
       try {
-        const slotCount =
-          slotSelection.slotCount ??
-          (Array.isArray(slotSelection.slots) ? slotSelection.slots.length : 1);
         logger.log(
           `[Structured Step] Calling holdSlot directly: date=${slotSelection.date}, timeSlot=${slotSelection.timeSlot}, resourceId=${slotSelection.resourceId}, slotCount=${slotCount}`,
         );
