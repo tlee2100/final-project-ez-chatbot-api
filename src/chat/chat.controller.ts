@@ -131,7 +131,7 @@ export class ChatController {
   /**
    * Public — visitor's chat widget calls this to get an AI-streamed response.
    */
-  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Post('conversations/:id/stream')
   @HttpCode(HttpStatus.OK)
   @Header('Content-Type', 'text/plain; charset=utf-8')
@@ -181,7 +181,7 @@ export class ChatController {
     return this.chatService.getMessagesForConversation(id, cursor, limit);
   }
 
-  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Get('public/conversations/:id/status')
   getPublicConversationStatus(@Param('id') id: string) {
     return this.chatService.getPublicConversationStatus(id);
@@ -321,7 +321,7 @@ export class ChatController {
     return this.chatService.deleteConversation(id, req.user);
   }
 
-  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Patch('public/conversations/:id/status')
   async updatePublicConversationStatus(
     @Param('id') id: string,
@@ -330,7 +330,7 @@ export class ChatController {
     return this.chatService.updatePublicConversationStatus(id, dto);
   }
 
-  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Patch('public/conversations/:id/call-agent')
   async callAgent(@Param('id') id: string) {
     return this.chatService.escalateToAgent(id);
@@ -338,7 +338,7 @@ export class ChatController {
 
   // ─── Attachments ────────────────────────────────────────────────────────
 
-  @UseGuards(DomainAllowlistGuard, ApiThrottlerGuard)
+  @UseGuards(DomainAllowlistGuard, VisitorTokenGuard, ApiThrottlerGuard)
   @Post('public/conversations/:id/upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadAttachmentPublic(

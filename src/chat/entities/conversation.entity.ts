@@ -52,11 +52,11 @@ export class Conversation {
   @JoinColumn({ name: 'agentId' })
   agent: User | null;
 
-  @Column()
+  @Column({ default: 'Guest' })
   visitorName: string;
 
-  @Column()
-  visitorEmail: string;
+  @Column({ type: 'varchar', nullable: true })
+  visitorEmail: string | null;
 
   @Column({
     type: 'enum',

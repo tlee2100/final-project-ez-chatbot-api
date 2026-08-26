@@ -302,7 +302,11 @@ export class AiService {
 
     if (input.visitorContext) {
       prompt += `\n\nVISITOR CONTEXT:`;
-      if (input.visitorContext.name) {
+      if (
+        input.visitorContext.name &&
+        input.visitorContext.name.trim().toLowerCase() !== 'guest' &&
+        input.visitorContext.name.trim().toLowerCase() !== '[none]'
+      ) {
         prompt += `\n- name: ${input.visitorContext.name}`;
       }
       if (input.visitorContext.email) {
