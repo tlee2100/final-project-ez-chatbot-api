@@ -87,6 +87,75 @@ describe('LangGraph Subgraphs & Interrupts', () => {
       expect(lastMsg).toBeInstanceOf(AIMessage);
       expect(typeof lastMsg.content).toBe('string');
     });
+
+    it('forwards the current page context to the knowledge prompt', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn().mockResolvedValue({ output: { chunks: [] } }),
+      };
+      const invokeMock = jest
+        .fn()
+        .mockResolvedValue(new AIMessage('Page-grounded response'));
+      const buildSystemPromptMock = jest.fn().mockReturnValue('System Prompt');
+      const mockAiService = {
+        buildSystemPrompt: buildSystemPromptMock,
+        buildModelForSite: jest.fn().mockReturnValue({ invoke: invokeMock }),
+      } as unknown as AiService;
+      const mockLogger = {
+        log: jest.fn(),
+        error: jest.fn(),
+        warn: jest.fn(),
+      } as unknown as Logger;
+      const mockServer = {
+        to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+      } as unknown as SocketServer;
+      const pageContext = {
+        pageUrl: 'https://example.com/products/alpha',
+        pageTitle: 'Alpha',
+        pageContent: 'Price: $10.',
+      };
+
+      const subgraph = buildKnowledgeSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: mockAiService,
+        logger: mockLogger,
+        conversationId: 'test-conv-page',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          maxTokensPerResponse: 500,
+        },
+        server: mockServer,
+      });
+
+      await subgraph.invoke({
+        messages: [new HumanMessage('What is the price on this page?')],
+        siteId: 'site-1',
+        conversationId: 'test-conv-page',
+        visitorContext: {},
+        pageContext,
+        siteContext: {
+          domains: ['example.com'],
+          bookingEnabled: false,
+          bookingServices: [],
+          bookingResources: [],
+        },
+        intent: 'question',
+        locale: 'en',
+        activeFlow: null,
+        activeFlowLocale: null,
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      expect(buildSystemPromptMock).toHaveBeenCalledWith(
+        expect.objectContaining({ pageContext }),
+      );
+    });
   });
 
   describe('Booking Subgraph with interrupt()', () => {

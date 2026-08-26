@@ -5,6 +5,7 @@ import type { Server as SocketServer } from 'socket.io';
 import type { CancelFlowAction, CancelState, CancelStep } from './prompts';
 import type { KnowledgeSearchStatus } from './chat-flow.utils';
 import type { LLMMessage } from './interfaces/llm-request.interface';
+import type { SanitizedPageContext } from './interfaces/page-context.interface';
 import type { ChatMessageComponent } from './chat-message-components';
 import { DEFAULT_LOCALE } from './chat-locale.utils';
 
@@ -65,6 +66,10 @@ export const AgentState = Annotation.Root({
   visitorContext: Annotation<{ name?: string; email?: string }>({
     reducer: (_, y) => y,
     default: () => ({}),
+  }),
+  pageContext: Annotation<SanitizedPageContext | undefined>({
+    reducer: (_, y) => y,
+    default: () => undefined,
   }),
   siteContext: Annotation<{
     name?: string;
@@ -158,6 +163,8 @@ export interface GraphRunOptions {
     name?: string;
     email?: string;
   };
+  /** Sanitized page content for the current visitor message. */
+  pageContext?: SanitizedPageContext;
   /** Site details to provide context to the LLM */
   siteContext?: {
     name?: string;

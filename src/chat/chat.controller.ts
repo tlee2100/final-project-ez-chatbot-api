@@ -50,6 +50,7 @@ import { validateAndGetImageFile } from '../utils/file-signature.util';
 import { ClosedReason } from './entities/conversation.entity';
 import { CreateAdminTestConversationDto } from './dto/create-admin-test-conversation.dto';
 import { AdminTestStreamDto } from './dto/admin-test-stream.dto';
+import { VisitorStreamDto } from './dto/visitor-stream.dto';
 
 @ApiTags('Chat')
 @Controller('chat')
@@ -140,13 +141,27 @@ export class ChatController {
   @Header('X-Accel-Buffering', 'no')
   streamAiResponse(
     @Param('id') conversationId: string,
-    @Body() dto: { siteId: string },
+    @Body() dto: VisitorStreamDto,
     @Res() res: Response,
   ) {
+    const pageContext =
+      dto.pageUrl !== undefined ||
+      dto.pageTitle !== undefined ||
+      dto.pageContent !== undefined
+        ? {
+            pageUrl: dto.pageUrl,
+            pageTitle: dto.pageTitle,
+            pageContent: dto.pageContent,
+          }
+        : undefined;
+
     return this.graphService.handleVisitorMessage(
       conversationId,
       dto.siteId,
       res,
+      undefined,
+      undefined,
+      pageContext,
     );
   }
 

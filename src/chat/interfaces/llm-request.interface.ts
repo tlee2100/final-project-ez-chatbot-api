@@ -1,3 +1,5 @@
+import type { SanitizedPageContext } from './page-context.interface';
+
 /**
  * Represents a single message in the conversation history sent to the LLM.
  */
@@ -37,6 +39,9 @@ export interface LLMRequest {
     name?: string;
     email?: string;
   };
+
+  /** Sanitized, ephemeral content from the page currently viewed by the visitor. */
+  pageContext?: SanitizedPageContext;
 
   /** Site details to provide context to the LLM */
   siteContext?: {

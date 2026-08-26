@@ -77,6 +77,8 @@ import {
   type ChatMessageComponent,
 } from './chat-message-components';
 import { buildToolSchema } from './tool-schema.utils';
+import { PageContextService } from './page-context.service';
+import type { RawPageContext } from './interfaces/page-context.interface';
 
 export { AgentState };
 export type {
@@ -128,6 +130,7 @@ export class GraphService {
     @Inject(forwardRef(() => ChatGateway))
     private readonly chatGateway: ChatGateway,
     private readonly notificationService: NotificationService,
+    private readonly pageContextService: PageContextService,
   ) {}
 
   // ─── AI Guard ──────────────────────────────────────────────────────────────
@@ -186,6 +189,7 @@ export class GraphService {
     res?: ExpressResponse,
     onNegativeSentiment?: (text: string) => Promise<void>,
     newTestMessageContent?: string,
+    rawPageContext?: RawPageContext,
   ): Promise<void> {
     const aiEnabled = await this.canRunAi(conversationId, siteId);
     if (!aiEnabled) {
@@ -317,6 +321,18 @@ export class GraphService {
       ),
     ]);
 
+    const pageContextResult = this.pageContextService.sanitize(
+      rawPageContext,
+      site?.allowedDomains ?? [],
+      site?.useCurrentPageContent === true,
+    );
+    const pageContext = pageContextResult.context;
+    if (pageContextResult.reason !== 'not_provided') {
+      this.logger.log(
+        `[Page Context] site=${siteId} conversation=${conversationId} status=${pageContext ? 'accepted' : 'rejected'} reason=${pageContextResult.reason} hostname=${pageContextResult.hostname ?? 'none'} contentLength=${pageContextResult.contentLength}`,
+      );
+    }
+
     const messages: LLMMessage[] = dbMessages.map((m) => ({
       role:
         m.senderType === SenderType.VISITOR
@@ -402,6 +418,7 @@ export class GraphService {
           name: conversation.visitorName ?? undefined,
           email: conversation.visitorEmail ?? undefined,
         },
+        pageContext,
         siteContext: {
           name: site?.name ?? undefined,
           domains: site?.allowedDomains ?? [],
@@ -1325,7 +1342,10 @@ export class GraphService {
           });
 
           finalState = await app.invoke(
-            new Command({ resume: latestUserText }),
+            new Command({
+              resume: latestUserText,
+              update: { pageContext: options.pageContext },
+            }),
             threadConfig,
           );
         } else {
@@ -1335,6 +1355,7 @@ export class GraphService {
               siteId,
               conversationId,
               visitorContext: options.visitorContext ?? {},
+              pageContext: options.pageContext,
               siteContext: options.siteContext ?? {},
               intent: null,
               locale: resolveEffectiveLocale({
@@ -1365,6 +1386,7 @@ export class GraphService {
           siteId,
           conversationId,
           visitorContext: options.visitorContext ?? {},
+          pageContext: options.pageContext,
           siteContext: options.siteContext ?? {},
           intent: null,
           locale: resolveEffectiveLocale({

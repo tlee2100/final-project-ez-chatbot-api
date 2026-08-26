@@ -232,6 +232,7 @@ export function buildKnowledgeSubgraph(deps: KnowledgeSubgraphDeps) {
       siteId: state.siteId,
       conversationId: state.conversationId,
       visitorContext: state.visitorContext,
+      pageContext: state.pageContext,
       siteContext: promptSiteContext,
       systemPromptOverride: options.systemPromptOverride,
       locale: state.locale,
