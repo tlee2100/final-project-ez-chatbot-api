@@ -219,8 +219,10 @@ const bookingStepFromText = (text: string): BookingOptionStep | null => {
 export const stripModelBookingDirectives = (text: string): string =>
   text
     .replace(/\s*<chips>.*?<\/chips>/gis, '')
-    .replace(/\s*<booking-step>.*?<\/booking-step>/gis, '')
-    .replace(/\s*<booking-input>.*?<\/booking-input>/gis, '');
+    .replace(
+      /\s*<booking-step>\s*(?!(?:assign_slot_services|assign_remaining_service)\b).*?<\/booking-step>/gis,
+      '',
+    );
 
 const dateInTimezone = (date: Date, timezone: string): Date => {
   const parts = new Intl.DateTimeFormat('en-CA', {
