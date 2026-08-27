@@ -813,17 +813,69 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           options.visitorContext.name.trim().toLowerCase() === 'guest' ||
           options.visitorContext.name.trim().toLowerCase() === '[none]';
 
+        // Find the typed name directly after the name prompt in conversation history
+        let typedNameFromHistory: string | undefined;
+        for (let i = 0; i < state.messages.length; i++) {
+          const msg = state.messages[i];
+          if (msg.constructor?.name?.includes('AIMessage')) {
+            const txt = messageText(msg);
+            const isNamePrompt =
+              /<booking-step>\s*name\s*<\/booking-step>/i.test(txt) ||
+              /(?:provide your name|cho biết tên|tên của bạn|nhập tên|vui lòng cho biết tên|お名前|enter your name|your name)/i.test(
+                txt,
+              );
+            if (isNamePrompt) {
+              for (let j = i + 1; j < state.messages.length; j++) {
+                const nextMsg = state.messages[j];
+                if (nextMsg.constructor?.name?.includes('HumanMessage')) {
+                  const candidate = messageText(nextMsg).trim();
+                  if (
+                    candidate &&
+                    !candidate.startsWith('/') &&
+                    !/^[+0-9\s().-]{7,25}$/.test(candidate) &&
+                    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) &&
+                    !isExcludedNameText(candidate)
+                  ) {
+                    typedNameFromHistory = candidate;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Fallback: look at user message right before phone number
+        if (!typedNameFromHistory) {
+          const phoneIndex = userMessages.findIndex(
+            (t) =>
+              /^[+0-9\s().-]{7,25}$/.test(t.trim()) &&
+              !t.startsWith('/select-') &&
+              !t.startsWith('/confirm-') &&
+              !t.startsWith('/update-'),
+          );
+          if (phoneIndex > 0) {
+            for (let k = phoneIndex - 1; k >= 0; k--) {
+              const candidate = userMessages[k].trim();
+              if (
+                candidate &&
+                !candidate.startsWith('/') &&
+                !/^[+0-9\s().-]{7,25}$/.test(candidate) &&
+                !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidate) &&
+                !isExcludedNameText(candidate)
+              ) {
+                typedNameFromHistory = candidate;
+                break;
+              }
+            }
+          }
+        }
+
         const rawName =
           nameOpt?.value ??
           nameOpt?.label ??
+          typedNameFromHistory ??
           (!isAnonymousVisitor ? options.visitorContext?.name : undefined) ??
-          userMessages.find(
-            (t) =>
-              !t.startsWith('/') &&
-              !/^[+0-9\s().-]{7,25}$/.test(t.trim()) &&
-              !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t.trim()) &&
-              !isExcludedNameText(t),
-          ) ??
           '';
 
         const rawSelectedServiceIds = (serviceOpt?.value || '')

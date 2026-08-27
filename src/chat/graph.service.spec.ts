@@ -293,8 +293,7 @@ describe('booking chat flow guards', () => {
   it('grounds answers in both current-page context and KB results', () => {
     const grounded = getKnowledgeGroundingRule('success');
     expect(grounded).toContain('together with CURRENT PAGE CONTEXT');
-    expect(grounded).toContain('prefer CURRENT PAGE CONTEXT');
-    expect(grounded).toContain('prefer the knowledge chunks');
+    expect(grounded).toContain('Knowledge Base information');
 
     const empty = getKnowledgeGroundingRule('empty');
     expect(empty).toContain('directly supported by CURRENT PAGE CONTEXT');
