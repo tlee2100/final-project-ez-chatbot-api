@@ -39,6 +39,7 @@ describe('CrawlerService external sources', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const itemRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
       create: jest.fn((value: Record<string, unknown>) => value),
@@ -46,6 +47,7 @@ describe('CrawlerService external sources', () => {
         Promise.resolve({ id: 'item-id', ...value }),
       ),
       update: jest.fn().mockResolvedValue(undefined),
+      remove: jest.fn().mockResolvedValue(undefined),
     };
     const queue = {
       add: jest.fn().mockResolvedValue(undefined),
@@ -314,6 +316,165 @@ describe('CrawlerService external sources', () => {
 
     expect(subject.runRepository.save).not.toHaveBeenCalled();
     expect(subject.queue.add).not.toHaveBeenCalled();
+  });
+
+  describe('deleteFailedItem', () => {
+    it('recounts the run and completes a partial run after its last failure is deleted', async () => {
+      const subject = createSubject();
+      const run = {
+        id: 'run-id',
+        siteId,
+        status: CrawlRunStatus.PARTIAL_FAILED,
+        totalPages: 10,
+        processedPages: 10,
+        indexedPages: 9,
+        unchangedPages: 0,
+        skippedPages: 0,
+        failedPages: 1,
+        quotaExceededPages: 0,
+      };
+      const item = {
+        id: 'item-id',
+        runId: run.id,
+        status: CrawlRunItemStatus.FAILED,
+      };
+      subject.runRepository.findOne.mockResolvedValue(run);
+      subject.itemRepository.findOne.mockResolvedValue(item);
+      subject.itemRepository.count
+        .mockResolvedValueOnce(9)
+        .mockResolvedValueOnce(9)
+        .mockResolvedValueOnce(9)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0);
+
+      await expect(
+        subject.service.deleteFailedItem(
+          siteId,
+          run.id,
+          item.id,
+          user as never,
+        ),
+      ).resolves.toEqual({ success: true });
+
+      expect(subject.runRepository.findOne).toHaveBeenCalledWith({
+        where: { id: run.id, siteId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      expect(subject.itemRepository.remove).toHaveBeenCalledWith(item);
+      expect(subject.runRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          totalPages: 9,
+          processedPages: 9,
+          indexedPages: 9,
+          failedPages: 0,
+          quotaExceededPages: 0,
+          status: CrawlRunStatus.COMPLETED,
+        }),
+      );
+    });
+
+    it('keeps a partial run partial when another failed item remains', async () => {
+      const subject = createSubject();
+      const run = {
+        id: 'run-id',
+        siteId,
+        status: CrawlRunStatus.PARTIAL_FAILED,
+      };
+      const item = {
+        id: 'item-id',
+        runId: run.id,
+        status: CrawlRunItemStatus.QUOTA_EXCEEDED,
+      };
+      subject.runRepository.findOne.mockResolvedValue(run);
+      subject.itemRepository.findOne.mockResolvedValue(item);
+      subject.itemRepository.count
+        .mockResolvedValueOnce(10)
+        .mockResolvedValueOnce(10)
+        .mockResolvedValueOnce(9)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(0)
+        .mockResolvedValueOnce(1)
+        .mockResolvedValueOnce(0);
+
+      await subject.service.deleteFailedItem(
+        siteId,
+        run.id,
+        item.id,
+        user as never,
+      );
+
+      expect(subject.runRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          failedPages: 1,
+          quotaExceededPages: 0,
+          status: CrawlRunStatus.PARTIAL_FAILED,
+        }),
+      );
+    });
+
+    it('does not report a fully failed empty run as completed', async () => {
+      const subject = createSubject();
+      const run = {
+        id: 'run-id',
+        siteId,
+        status: CrawlRunStatus.FAILED,
+      };
+      const item = {
+        id: 'item-id',
+        runId: run.id,
+        status: CrawlRunItemStatus.FAILED,
+      };
+      subject.runRepository.findOne.mockResolvedValue(run);
+      subject.itemRepository.findOne.mockResolvedValue(item);
+
+      await subject.service.deleteFailedItem(
+        siteId,
+        run.id,
+        item.id,
+        user as never,
+      );
+
+      expect(subject.runRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          totalPages: 0,
+          failedPages: 0,
+          status: CrawlRunStatus.FAILED,
+        }),
+      );
+    });
+
+    it('propagates a run save failure from the transaction', async () => {
+      const subject = createSubject();
+      const run = {
+        id: 'run-id',
+        siteId,
+        status: CrawlRunStatus.PARTIAL_FAILED,
+      };
+      const item = {
+        id: 'item-id',
+        runId: run.id,
+        status: CrawlRunItemStatus.FAILED,
+      };
+      subject.runRepository.findOne.mockResolvedValue(run);
+      subject.itemRepository.findOne.mockResolvedValue(item);
+      subject.runRepository.save.mockRejectedValueOnce(
+        new Error('run save failed'),
+      );
+
+      await expect(
+        subject.service.deleteFailedItem(
+          siteId,
+          run.id,
+          item.id,
+          user as never,
+        ),
+      ).rejects.toThrow('run save failed');
+
+      expect(subject.dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(subject.itemRepository.remove).toHaveBeenCalledWith(item);
+    });
   });
 
   describe('recoverOrphanedRuns', () => {
