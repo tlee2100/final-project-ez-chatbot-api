@@ -255,7 +255,7 @@ describe('LangGraph Subgraphs & Interrupts', () => {
   });
 
   describe('Booking Subgraph with interrupt()', () => {
-    it('generates initial service prompt on book_appointment_init', async () => {
+    it('generates initial booking_type prompt on book_appointment_init for salon template', async () => {
       const mockToolProvider: IToolProvider = {
         listTools: jest.fn().mockResolvedValue([]),
         execute: jest.fn(),
@@ -292,6 +292,7 @@ describe('LangGraph Subgraphs & Interrupts', () => {
           site: { id: 'site-1' },
           siteContext: {
             bookingEnabled: true,
+            industryTemplateId: 'salon',
             bookingServices: [{ id: 's1', name: 'Service 1' }],
             bookingResources: [{ id: 'r1', name: 'Staff 1' }],
           },
@@ -310,6 +311,87 @@ describe('LangGraph Subgraphs & Interrupts', () => {
         visitorContext: {},
         siteContext: {
           bookingEnabled: true,
+          industryTemplateId: 'salon',
+          bookingServices: [{ id: 's1', name: 'Service 1' }],
+          bookingResources: [{ id: 'r1', name: 'Staff 1' }],
+          domains: [],
+        },
+        intent: 'book_appointment_init',
+        locale: 'vi',
+        activeFlow: 'BOOKING',
+        activeFlowLocale: 'vi',
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      const lastMsg = result.messages[result.messages.length - 1];
+      expect(lastMsg).toBeInstanceOf(AIMessage);
+      expect(lastMsg.content).toContain(
+        '<booking-step>booking_type</booking-step>',
+      );
+    });
+
+    it('generates initial service prompt directly for general template', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn(),
+      };
+
+      const mockAiService = {
+        buildSystemPrompt: jest.fn(),
+        buildModelForSite: jest.fn(),
+      } as unknown as AiService;
+
+      const mockChatGateway = {
+        emitBookingSummary: jest.fn(),
+        emitBookingSuccess: jest.fn(),
+        emitBookingSlots: jest.fn(),
+      } as unknown as ChatGateway;
+
+      const mockLogger = {
+        log: jest.fn(),
+        error: jest.fn(),
+        warn: jest.fn(),
+      } as unknown as Logger;
+
+      const mockServer = {
+        to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+      } as unknown as SocketServer;
+
+      const subgraph = buildBookingSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: mockAiService,
+        logger: mockLogger,
+        conversationId: 'test-conv-book-general',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          siteContext: {
+            bookingEnabled: true,
+            industryTemplateId: 'general',
+            bookingServices: [{ id: 's1', name: 'Service 1' }],
+            bookingResources: [{ id: 'r1', name: 'Staff 1' }],
+          },
+          visitorContext: {},
+        },
+        chatGateway: mockChatGateway,
+        server: mockServer,
+        bookingTools: [],
+        clearActiveFlow: jest.fn().mockResolvedValue(undefined),
+      });
+
+      const result = await subgraph.invoke({
+        messages: [new HumanMessage('Tôi muốn đặt sân')],
+        siteId: 'site-1',
+        conversationId: 'test-conv-book-general',
+        visitorContext: {},
+        siteContext: {
+          bookingEnabled: true,
+          industryTemplateId: 'general',
           bookingServices: [{ id: 's1', name: 'Service 1' }],
           bookingResources: [{ id: 'r1', name: 'Staff 1' }],
           domains: [],
@@ -329,6 +411,181 @@ describe('LangGraph Subgraphs & Interrupts', () => {
       const lastMsg = result.messages[result.messages.length - 1];
       expect(lastMsg).toBeInstanceOf(AIMessage);
       expect(lastMsg.content).toContain('<booking-step>service</booking-step>');
+    });
+
+    it('prompts party_size when multiple is selected in salon template', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn(),
+      };
+
+      const subgraph = buildBookingSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: {} as AiService,
+        logger: {
+          log: jest.fn(),
+          error: jest.fn(),
+          warn: jest.fn(),
+        } as unknown as Logger,
+        conversationId: 'test-conv-party',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          siteContext: {
+            bookingEnabled: true,
+            industryTemplateId: 'salon',
+            bookingServices: [{ id: 's1', name: 'Gội đầu' }],
+            bookingResources: [
+              { id: 'r1', name: 'Thợ A' },
+              { id: 'r2', name: 'Thợ B' },
+            ],
+          },
+          visitorContext: {},
+        },
+        chatGateway: {
+          emitBookingSummary: jest.fn(),
+          emitBookingSuccess: jest.fn(),
+          emitBookingSlots: jest.fn(),
+        } as unknown as ChatGateway,
+        server: {
+          to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+        } as unknown as SocketServer,
+        bookingTools: [],
+        clearActiveFlow: jest.fn().mockResolvedValue(undefined),
+      });
+
+      const result = await subgraph.invoke({
+        messages: [
+          new HumanMessage('Tôi muốn đặt lịch'),
+          new AIMessage(
+            'Bạn muốn đặt lịch cho 1 người hay cho nhóm nhiều người?\n\n<booking-step>booking_type</booking-step>',
+          ),
+          new HumanMessage(
+            '/select-booking-option {"action":"select_booking_type","value":"multiple"} :: Đặt cho nhiều người',
+          ),
+        ],
+        siteId: 'site-1',
+        conversationId: 'test-conv-party',
+        visitorContext: {},
+        siteContext: {
+          bookingEnabled: true,
+          industryTemplateId: 'salon',
+          bookingServices: [{ id: 's1', name: 'Gội đầu' }],
+          bookingResources: [
+            { id: 'r1', name: 'Thợ A' },
+            { id: 'r2', name: 'Thợ B' },
+          ],
+          domains: [],
+        },
+        intent: 'structured_booking_step',
+        locale: 'vi',
+        activeFlow: 'BOOKING',
+        activeFlowLocale: 'vi',
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      const lastMsg = result.messages[result.messages.length - 1];
+      expect(lastMsg).toBeInstanceOf(AIMessage);
+      expect(lastMsg.content).toContain(
+        '<booking-step>party_size</booking-step>',
+      );
+    });
+
+    it('enforces 1-to-1 matching for single person booking with multiple services', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn().mockResolvedValue({ output: { slots: [] } }),
+      };
+
+      const subgraph = buildBookingSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: {} as AiService,
+        logger: {
+          log: jest.fn(),
+          error: jest.fn(),
+          warn: jest.fn(),
+        } as unknown as Logger,
+        conversationId: 'test-conv-single-mismatch',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          siteContext: {
+            bookingEnabled: true,
+            industryTemplateId: 'salon',
+            bookingServices: [
+              { id: 's1', name: 'Gội đầu' },
+              { id: 's2', name: 'Cắt tóc' },
+            ],
+            bookingResources: [{ id: 'r1', name: 'Thợ A' }],
+          },
+          visitorContext: {},
+        },
+        chatGateway: {
+          emitBookingSummary: jest.fn(),
+          emitBookingSuccess: jest.fn(),
+          emitBookingSlots: jest.fn(),
+        } as unknown as ChatGateway,
+        server: {
+          to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+        } as unknown as SocketServer,
+        bookingTools: [],
+        clearActiveFlow: jest.fn().mockResolvedValue(undefined),
+      });
+
+      const result = await subgraph.invoke({
+        messages: [
+          new HumanMessage('Tôi muốn đặt lịch'),
+          new AIMessage(
+            'Bạn muốn đặt lịch cho 1 người hay cho nhóm nhiều người?\n\n<booking-step>booking_type</booking-step>',
+          ),
+          new HumanMessage(
+            '/select-booking-option {"action":"select_booking_type","value":"single"} :: Đặt cho 1 người',
+          ),
+          new AIMessage(
+            'Bạn muốn đặt dịch vụ nào?\n\n<booking-step>service</booking-step>',
+          ),
+          new HumanMessage(
+            '/select-booking-option {"action":"select_service","value":"s1,s2"} :: Gội đầu, Cắt tóc',
+          ),
+          new HumanMessage(
+            '/select-booking-slot {"date":"2026-08-27","timeSlot":"09:00","slotCount":1} :: 09:00',
+          ),
+        ],
+        siteId: 'site-1',
+        conversationId: 'test-conv-single-mismatch',
+        visitorContext: {},
+        siteContext: {
+          bookingEnabled: true,
+          industryTemplateId: 'salon',
+          bookingServices: [
+            { id: 's1', name: 'Gội đầu' },
+            { id: 's2', name: 'Cắt tóc' },
+          ],
+          bookingResources: [{ id: 'r1', name: 'Thợ A' }],
+          domains: [],
+        },
+        intent: 'structured_booking_step',
+        locale: 'vi',
+        activeFlow: 'BOOKING',
+        activeFlowLocale: 'vi',
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      const lastMsg = result.messages[result.messages.length - 1];
+      expect(lastMsg).toBeInstanceOf(AIMessage);
+      expect(lastMsg.content).toContain(
+        'Bạn đang đặt lịch cho 1 người với 2 dịch vụ',
+      );
     });
   });
 

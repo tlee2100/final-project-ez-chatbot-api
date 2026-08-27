@@ -214,8 +214,14 @@ export function buildIntentClassifierNode(deps: IntentClassifierDeps) {
     }
 
     // ── 1. Fast-Path Check (Deterministic routing without LLM call) ──
-    if (/^\/(?:update-draft-booking|confirm-booking)\b/i.test(contentStr)) {
-      logger.log('[Fast-Path Intent] structured_booking_step (update/confirm)');
+    if (
+      /^\/(?:update-draft-booking|confirm-booking|assign-slot-services)\b/i.test(
+        contentStr,
+      )
+    ) {
+      logger.log(
+        '[Fast-Path Intent] structured_booking_step (update/confirm/assign)',
+      );
       return applyLocaleState('structured_booking_step', activeFlowLocale);
     }
 
