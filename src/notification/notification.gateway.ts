@@ -50,7 +50,6 @@ export class NotificationGateway
       `Client connected to notifications: ${client.id} (${user.email})`,
     );
     void client.join(this.getNotificationRoom(user.id));
-    void client.join(this.getNotificationRoom(user.id));
   }
 
   handleDisconnect(client: Socket) {

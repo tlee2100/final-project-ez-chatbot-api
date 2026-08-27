@@ -158,22 +158,8 @@ export class OrganizationService {
   ): Promise<OrganizationResponseDto> {
     await this.assertSlugAvailable(createOrganizationDto.slug);
 
-    // Validate a provided owner exists and is an ADMIN before saving,
-    // rather than surfacing a raw FK violation or allowing a non-admin owner.
     if (createOrganizationDto.ownerId) {
-      const owner = await this.userRepository.findOne({
-        where: { id: createOrganizationDto.ownerId },
-      });
-      if (!owner) {
-        throw new NotFoundException(
-          `Owner user '${createOrganizationDto.ownerId}' not found`,
-        );
-      }
-      if (owner.role !== UserRole.ADMIN) {
-        throw new ForbiddenException(
-          'Organization owner must be a user with the ADMIN role',
-        );
-      }
+      await this.assertOwnerAvailable(createOrganizationDto.ownerId);
     }
 
     const organization = this.organizationRepository.create(
@@ -204,6 +190,15 @@ export class OrganizationService {
 
     if (updateOrganizationDto.slug) {
       await this.assertSlugAvailable(updateOrganizationDto.slug, id);
+    }
+
+    if (
+      updateOrganizationDto.ownerId !== undefined &&
+      updateOrganizationDto.ownerId !== organization.ownerId
+    ) {
+      if (updateOrganizationDto.ownerId !== null) {
+        await this.assertOwnerAvailable(updateOrganizationDto.ownerId, id);
+      }
     }
 
     Object.assign(organization, updateOrganizationDto);
@@ -279,6 +274,39 @@ export class OrganizationService {
           field: 'slug',
         },
       });
+    }
+  }
+
+  private async assertOwnerAvailable(
+    ownerId: string,
+    ignoreId?: string,
+  ): Promise<void> {
+    const [existingOrg, owner] = await Promise.all([
+      this.organizationRepository.findOne({
+        where: ignoreId ? { ownerId, id: Not(ignoreId) } : { ownerId },
+      }),
+      this.userRepository.findOne({
+        where: { id: ownerId },
+      }),
+    ]);
+
+    if (existingOrg) {
+      throw new ConflictException({
+        error: 'CONFLICT',
+        message: `User '${ownerId}' is already the owner of organization '${existingOrg.name}'`,
+        details: {
+          field: 'ownerId',
+        },
+      });
+    }
+
+    if (!owner) {
+      throw new NotFoundException(`Owner user '${ownerId}' not found`);
+    }
+    if (owner.role !== UserRole.ADMIN) {
+      throw new ForbiddenException(
+        'Organization owner must be a user with the ADMIN role',
+      );
     }
   }
 

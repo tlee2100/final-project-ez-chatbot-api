@@ -42,8 +42,40 @@ async function bootstrap() {
 
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/v1/docs', app, document);
+  const envOrigins = [
+    ...(process.env.FRONTEND_URL?.split(',') || []),
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+  ]
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  const allowedAdminOrigins = Array.from(new Set(envOrigins));
+
+  type StaticOrigin = boolean | string | RegExp | (string | RegExp)[];
+  const corsOriginHandler = (
+    origin: string | undefined,
+    callback: (err: Error | null, origin?: StaticOrigin) => void,
+  ): void => {
+    // 1. Cho phép requests không có origin (server-to-server, curl, internal MCP)
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    // 2. Cho phép các Admin Dashboard origins được cấu hình
+    if (allowedAdminOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    // 3. Cho phép các origin nhúng widget công khai (SEC-002: DomainAllowlistGuard sẽ kiểm tra theo từng site.allowedDomains)
+    callback(null, true);
+  };
+
   app.enableCors({
-    origin: true,
+    origin: corsOriginHandler,
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
