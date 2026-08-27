@@ -79,4 +79,23 @@ describe('OrganizationService access rules', () => {
       },
     );
   });
+
+  it('returns 409 CONFLICT if user already owns another organization', async () => {
+    organizationRepository.findOne
+      .mockResolvedValueOnce(null) // slug check: available
+      .mockResolvedValueOnce({ id: 'org-1', name: 'Existing Org' }); // owner check: already owns org-1
+
+    await expect(
+      service.create({
+        name: 'New Org',
+        slug: 'new-org',
+        ownerId: 'user-admin-1',
+      }),
+    ).rejects.toMatchObject({
+      response: {
+        error: 'CONFLICT',
+        details: { field: 'ownerId' },
+      },
+    });
+  });
 });

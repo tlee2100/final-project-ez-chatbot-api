@@ -73,7 +73,7 @@ export class AuthController {
   }
 
   @Post('refresh')
-  @ApiOperation({ summary: 'Refresh access token using httpOnly cookie' })
+  @ApiOperation({ summary: 'Refresh access token using JSON body' })
   @ApiResponse({
     status: 201,
     description: 'Access token refreshed successfully',
