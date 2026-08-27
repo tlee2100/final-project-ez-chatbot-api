@@ -335,6 +335,89 @@ describe('LangGraph Subgraphs & Interrupts', () => {
       );
     });
 
+    it('generates initial booking_type prompt on generic book_appointment intent for salon template', async () => {
+      const mockToolProvider: IToolProvider = {
+        listTools: jest.fn().mockResolvedValue([]),
+        execute: jest.fn(),
+      };
+
+      const mockAiService = {
+        buildSystemPrompt: jest.fn(),
+        buildModelForSite: jest.fn(),
+      } as unknown as AiService;
+
+      const mockChatGateway = {
+        emitBookingSummary: jest.fn(),
+        emitBookingSuccess: jest.fn(),
+        emitBookingSlots: jest.fn(),
+      } as unknown as ChatGateway;
+
+      const mockLogger = {
+        log: jest.fn(),
+        error: jest.fn(),
+        warn: jest.fn(),
+      } as unknown as Logger;
+
+      const mockServer = {
+        to: jest.fn().mockReturnValue({ emit: jest.fn() }),
+      } as unknown as SocketServer;
+
+      const subgraph = buildBookingSubgraph({
+        toolProvider: mockToolProvider,
+        aiService: mockAiService,
+        logger: mockLogger,
+        conversationId: 'test-conv-book-generic',
+        siteId: 'site-1',
+        options: {
+          site: { id: 'site-1' },
+          siteContext: {
+            bookingEnabled: true,
+            industryTemplateId: 'salon',
+            bookingServices: [{ id: 's1', name: 'Service 1' }],
+            bookingResources: [{ id: 'r1', name: 'Staff 1' }],
+          },
+          visitorContext: {},
+        },
+        chatGateway: mockChatGateway,
+        server: mockServer,
+        bookingTools: [],
+        clearActiveFlow: jest.fn().mockResolvedValue(undefined),
+      });
+
+      const result = await subgraph.invoke({
+        messages: [new HumanMessage('i book')],
+        siteId: 'site-1',
+        conversationId: 'test-conv-book-generic',
+        visitorContext: {},
+        siteContext: {
+          bookingEnabled: true,
+          industryTemplateId: 'salon',
+          bookingServices: [{ id: 's1', name: 'Service 1' }],
+          bookingResources: [{ id: 'r1', name: 'Staff 1' }],
+          domains: [],
+        },
+        intent: 'book_appointment',
+        locale: 'en',
+        activeFlow: 'BOOKING',
+        activeFlowLocale: 'en',
+        cancelState: { step: null, bookingCode: null, phoneVerified: false },
+        knowledgeSources: [],
+        knowledgeSearchStatus: 'idle',
+        summary: '',
+        summarizedMessageCount: 0,
+        exitSubgraph: null,
+      });
+
+      const lastMsg = result.messages[result.messages.length - 1];
+      expect(lastMsg).toBeInstanceOf(AIMessage);
+      expect(lastMsg.content).toContain(
+        '<booking-step>booking_type</booking-step>',
+      );
+      expect(lastMsg.content).toContain(
+        'Would you like to book for 1 person or for a group of multiple people?',
+      );
+    });
+
     it('generates initial service prompt directly for general template', async () => {
       const mockToolProvider: IToolProvider = {
         listTools: jest.fn().mockResolvedValue([]),

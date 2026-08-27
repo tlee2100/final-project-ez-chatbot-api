@@ -108,7 +108,11 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
     const isSalon = templateId === 'salon';
 
     if (isSalon) {
-      const prompt = getBookingOptionPrompt(state.locale, 'booking_type');
+      const prompt = getBookingOptionPrompt(
+        state.locale,
+        'booking_type',
+        templateId,
+      );
       return {
         messages: [
           new AIMessage(
@@ -155,13 +159,45 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
   const structuredBookingStepNode = async (state: typeof AgentState.State) => {
     const userText = getLatestUserText(state).trim();
     const locale = state.locale;
-    const bookingOption =
+
+    const lastBotMessage = state.messages
+      .slice()
+      .reverse()
+      .find((m) => m.constructor?.name?.includes('AIMessage'));
+    const lastBotText = lastBotMessage ? messageText(lastBotMessage) : '';
+
+    const isNameStep =
+      /<booking-step>\s*name\s*<\/booking-step>/i.test(lastBotText) ||
+      /(?:provide your name|cho biết tên|tên của bạn|お名前|enter your name|your name)/i.test(
+        lastBotText,
+      );
+
+    const isTypedName =
+      isNameStep &&
+      userText.length > 0 &&
+      !userText.startsWith('/') &&
+      !/^[+0-9\s().-]{7,25}$/.test(userText) &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userText);
+
+    const isTypedEmail =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userText) && !userText.startsWith('/');
+
+    const parsedOption =
       parseBookingOptionSelection(userText) ??
       (/^(?:bỏ\s*qua(?:\s*(?:email|bước\s*này))?|skip(?:\s*email)?|khỏi(?:\s*cần)?\s*email|không\s*(?:cần|dùng|có)?\s*email|スキップ)$/i.test(
         userText,
       )
         ? { action: 'skip_email' as const }
         : null);
+
+    const bookingOption =
+      parsedOption ??
+      (isTypedName
+        ? { action: 'submit_text' as const, value: userText }
+        : isTypedEmail
+          ? { action: 'submit_text' as const, value: userText }
+          : null);
+
     const slotSelection = parseBookingSlotSelection(userText);
     const services = options.siteContext?.bookingServices ?? [];
     const resources = options.siteContext?.bookingResources ?? [];
@@ -780,7 +816,14 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         const rawName =
           nameOpt?.value ??
           nameOpt?.label ??
-          (!isAnonymousVisitor ? options.visitorContext?.name : '') ??
+          (!isAnonymousVisitor ? options.visitorContext?.name : undefined) ??
+          userMessages.find(
+            (t) =>
+              !t.startsWith('/') &&
+              !/^[+0-9\s().-]{7,25}$/.test(t.trim()) &&
+              !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t.trim()) &&
+              !isExcludedNameText(t),
+          ) ??
           '';
 
         const rawSelectedServiceIds = (serviceOpt?.value || '')
@@ -1472,6 +1515,59 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         if (state.intent === 'book_appointment_init') return 'init_booking';
         if (state.intent === 'structured_booking_step')
           return 'structured_booking_step';
+
+        const templateId = options.siteContext?.industryTemplateId;
+        const isSalon = templateId === 'salon';
+
+        if (isSalon) {
+          const userMessages = state.messages
+            .filter((m) => m.constructor?.name?.includes('HumanMessage'))
+            .map(messageText);
+
+          const hasBookingType = userMessages.some((text) => {
+            const opt = parseBookingOptionSelection(text);
+            return (
+              opt?.action === 'select_booking_type' ||
+              opt?.action === 'select_party_size' ||
+              /(?:1\s*người|đặt\s*cho\s*1\s*người|đi\s*1\s*mình|cá\s*nhân|single|1\s*person|one\s*person|nhóm|nhiều\s*người|group|multiple|\b\d+\s*người\b|\b\d+\s*people\b|\b\d+\s*persons\b)/i.test(
+                text,
+              )
+            );
+          });
+
+          if (!hasBookingType) {
+            return 'init_booking';
+          }
+        }
+
+        const userText = getLatestUserText(state).trim();
+        const lastBotMessage = state.messages
+          .slice()
+          .reverse()
+          .find((m) => m.constructor?.name?.includes('AIMessage'));
+        const lastBotText = lastBotMessage ? messageText(lastBotMessage) : '';
+
+        const isNameStep =
+          /<booking-step>\s*name\s*<\/booking-step>/i.test(lastBotText) ||
+          /(?:provide your name|cho biết tên|tên của bạn|お名前|enter your name|your name)/i.test(
+            lastBotText,
+          );
+
+        const isTypedName =
+          isNameStep &&
+          userText.length > 0 &&
+          !userText.startsWith('/') &&
+          !/^[+0-9\s().-]{7,25}$/.test(userText) &&
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userText);
+
+        const isTypedEmail =
+          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userText) &&
+          !userText.startsWith('/');
+
+        if (isTypedName || isTypedEmail) {
+          return 'structured_booking_step';
+        }
+
         return 'model_node';
       },
       {
