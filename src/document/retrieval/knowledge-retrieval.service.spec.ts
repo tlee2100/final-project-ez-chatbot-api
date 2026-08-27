@@ -80,9 +80,9 @@ describe('KnowledgeRetrievalService', () => {
 
   it('ignores caller similarity threshold and enforces the site setting', async () => {
     const candidates = [
-      result('first', 0.95),
-      result('second', 0.8),
-      result('third', 0.7),
+      { ...result('first', 0.95), keywordMatched: false },
+      { ...result('second', 0.8), keywordMatched: false },
+      { ...result('third', 0.7), keywordMatched: false },
     ];
     searchSimilarChunks.mockResolvedValue(candidates);
 
@@ -96,7 +96,10 @@ describe('KnowledgeRetrievalService', () => {
   });
 
   it('does not let callers lower the site similarity threshold', async () => {
-    const candidates = [result('positive', 0.8), result('zero', 0)];
+    const candidates = [
+      { ...result('positive', 0.8), keywordMatched: false },
+      { ...result('zero', 0), keywordMatched: false },
+    ];
     searchSimilarChunks.mockResolvedValue(candidates);
 
     await expect(
@@ -108,7 +111,7 @@ describe('KnowledgeRetrievalService', () => {
     ).resolves.toEqual([candidates[0]]);
   });
 
-  it('prioritizes and accepts an exact meaningful keyword match', async () => {
+  it('does not let an exact keyword match bypass the semantic threshold', async () => {
     const generic = result('generic', 0.9);
     const exact = {
       ...result('refine', 0.31),
@@ -121,12 +124,54 @@ describe('KnowledgeRetrievalService', () => {
       query: 'refine là gì',
     });
 
+    expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({
-      chunkId: 'refine',
-      keywordMatched: true,
-      similarity: 0.31,
+      chunkId: 'generic',
+      keywordMatched: false,
+      similarity: 0.9,
     });
-    expect(results).toHaveLength(2);
+  });
+
+  it('rejects a keyword match below a 0.4 site semantic threshold', async () => {
+    const siteRepository = service['siteRepository'];
+    jest.spyOn(siteRepository, 'findOne').mockResolvedValueOnce({
+      id: siteId,
+      kbRetrievalTopK: 4,
+      kbSimilarityThreshold: 0.4,
+    } as Site);
+    searchSimilarChunks.mockResolvedValue([
+      {
+        ...result('price', 0.31),
+        content: 'The product price is available on request.',
+      },
+    ]);
+
+    await expect(
+      service.searchRelevantChunks({ siteId, query: 'product price' }),
+    ).resolves.toEqual([]);
+  });
+
+  it('uses keyword matches only to rerank candidates above the semantic threshold', async () => {
+    const semanticWinner = result('semantic-winner', 0.62);
+    const keywordWinner = {
+      ...result('keyword-winner', 0.51),
+      content: 'Refine is a React-based framework for building applications.',
+    };
+    searchSimilarChunks.mockResolvedValue([semanticWinner, keywordWinner]);
+
+    const results = await service.searchRelevantChunks({
+      siteId,
+      query: 'refine là gì',
+    });
+
+    expect(results.map((item) => item.chunkId)).toEqual([
+      'keyword-winner',
+      'semantic-winner',
+    ]);
+    expect(results[0]).toMatchObject({
+      similarity: 0.51,
+      keywordMatched: true,
+    });
   });
 
   it('does not query the repository when query embedding fails', async () => {

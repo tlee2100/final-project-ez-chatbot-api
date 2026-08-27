@@ -383,42 +383,87 @@ export class CrawlerService implements OnModuleInit {
   ) {
     this.assertFeatureEnabled();
     await this.siteService.assertSiteAccess(siteId, user);
-    const run = await this.runRepository.findOne({
-      where: { id: runId, siteId },
+
+    await this.dataSource.transaction(async (manager) => {
+      const runRepo = manager.getRepository(CrawlRun);
+      const itemRepo = manager.getRepository(CrawlRunItem);
+
+      const run = await runRepo.findOne({
+        where: { id: runId, siteId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!run) throw new NotFoundException('Crawl run not found');
+
+      const item = await itemRepo.findOne({
+        where: { id: itemId, runId },
+      });
+      if (!item) throw new NotFoundException('Crawl run item not found');
+
+      if (
+        item.status !== CrawlRunItemStatus.FAILED &&
+        item.status !== CrawlRunItemStatus.QUOTA_EXCEEDED
+      ) {
+        throw new ConflictException('Can only delete failed crawl items');
+      }
+
+      await itemRepo.remove(item);
+
+      const [
+        totalPages,
+        processedPages,
+        indexedPages,
+        unchangedPages,
+        skippedPages,
+        failedPages,
+        quotaExceededPages,
+      ] = await Promise.all([
+        itemRepo.count({ where: { runId } }),
+        itemRepo.count({
+          where: { runId, status: In(TERMINAL_CRAWL_ITEM_STATUSES) },
+        }),
+        itemRepo.count({
+          where: { runId, status: CrawlRunItemStatus.INDEXED },
+        }),
+        itemRepo.count({
+          where: { runId, status: CrawlRunItemStatus.UNCHANGED },
+        }),
+        itemRepo.count({
+          where: {
+            runId,
+            status: In([
+              CrawlRunItemStatus.SKIPPED_ROBOTS,
+              CrawlRunItemStatus.SKIPPED_NOINDEX,
+            ]),
+          },
+        }),
+        itemRepo.count({
+          where: { runId, status: CrawlRunItemStatus.FAILED },
+        }),
+        itemRepo.count({
+          where: { runId, status: CrawlRunItemStatus.QUOTA_EXCEEDED },
+        }),
+      ]);
+
+      Object.assign(run, {
+        totalPages,
+        processedPages,
+        indexedPages,
+        unchangedPages,
+        skippedPages,
+        failedPages,
+        quotaExceededPages,
+      });
+
+      if (
+        run.status === CrawlRunStatus.PARTIAL_FAILED &&
+        failedPages === 0 &&
+        quotaExceededPages === 0
+      ) {
+        run.status = CrawlRunStatus.COMPLETED;
+      }
+
+      await runRepo.save(run);
     });
-    if (!run) throw new NotFoundException('Crawl run not found');
-
-    const item = await this.itemRepository.findOne({
-      where: { id: itemId, runId },
-    });
-    if (!item) throw new NotFoundException('Crawl run item not found');
-
-    if (
-      item.status !== CrawlRunItemStatus.FAILED &&
-      item.status !== CrawlRunItemStatus.QUOTA_EXCEEDED
-    ) {
-      throw new ConflictException('Can only delete failed crawl items');
-    }
-
-    await this.itemRepository.remove(item);
-
-    if (item.status === CrawlRunItemStatus.FAILED) {
-      run.failedPages = Math.max(0, run.failedPages - 1);
-    } else if (item.status === CrawlRunItemStatus.QUOTA_EXCEEDED) {
-      run.quotaExceededPages = Math.max(0, run.quotaExceededPages - 1);
-    }
-    run.totalPages = Math.max(0, run.totalPages - 1);
-    run.processedPages = Math.max(0, run.processedPages - 1);
-
-    if (
-      run.status === CrawlRunStatus.PARTIAL_FAILED &&
-      run.failedPages === 0 &&
-      run.quotaExceededPages === 0
-    ) {
-      run.status = CrawlRunStatus.COMPLETED;
-    }
-
-    await this.runRepository.save(run);
 
     return { success: true };
   }

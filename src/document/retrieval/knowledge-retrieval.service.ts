@@ -13,6 +13,8 @@ import type {
 import { validateSearchRelevantChunksInput } from './validation/knowledge-search-input.validator';
 import { Site } from '../../site/entities/site.entity';
 
+const KEYWORD_RANKING_BOOST = 0.15;
+
 @Injectable()
 export class KnowledgeRetrievalService {
   private readonly logger = new Logger(KnowledgeRetrievalService.name);
@@ -66,22 +68,20 @@ export class KnowledgeRetrievalService {
 
     const keywords = extractMeaningfulKeywords(query);
     const rankedCandidates = candidates
-      .map((candidate) => ({
-        candidate,
-        keywordMatched: hasKeywordMatch(candidate.content, keywords),
-      }))
-      .sort((left, right) => {
-        if (left.keywordMatched !== right.keywordMatched) {
-          return left.keywordMatched ? -1 : 1;
-        }
-        return right.candidate.similarity - left.candidate.similarity;
-      });
+      .map((candidate) => {
+        const keywordMatched = hasKeywordMatch(candidate.content, keywords);
+        const rankingScore =
+          candidate.similarity + (keywordMatched ? KEYWORD_RANKING_BOOST : 0);
+        return {
+          candidate,
+          keywordMatched,
+          rankingScore,
+        };
+      })
+      .filter(({ candidate }) => candidate.similarity >= minSimilarity)
+      .sort((left, right) => right.rankingScore - left.rankingScore);
 
     const results = rankedCandidates
-      .filter(
-        ({ candidate, keywordMatched }) =>
-          candidate.similarity >= minSimilarity || keywordMatched,
-      )
       .slice(0, topK)
       .map(({ candidate, keywordMatched }) => ({
         ...candidate,
@@ -98,15 +98,19 @@ export class KnowledgeRetrievalService {
       totalDurationMs: searchCompletedAt - totalStartedAt,
       candidateCount: candidates.length,
       acceptedCount: results.length,
-      candidateScores: candidates.map((candidate) => ({
-        documentId: candidate.documentId,
-        filename: candidate.filename,
-        similarity: candidate.similarity.toFixed(3),
-        keywordMatched: hasKeywordMatch(candidate.content, keywords),
-        accepted:
-          candidate.similarity >= minSimilarity ||
-          hasKeywordMatch(candidate.content, keywords),
-      })),
+      candidateScores: candidates.map((candidate) => {
+        const keywordMatched = hasKeywordMatch(candidate.content, keywords);
+        const rankingScore =
+          candidate.similarity + (keywordMatched ? KEYWORD_RANKING_BOOST : 0);
+        return {
+          documentId: candidate.documentId,
+          filename: candidate.filename,
+          semanticSimilarity: candidate.similarity.toFixed(3),
+          rankingScore: rankingScore.toFixed(3),
+          keywordMatched,
+          accepted: candidate.similarity >= minSimilarity,
+        };
+      }),
       acceptedChunks: results.map((r) => ({
         docId: r.documentId,
         similarity: r.similarity.toFixed(3),
