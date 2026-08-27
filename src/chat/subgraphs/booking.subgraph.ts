@@ -605,7 +605,57 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
               resourceId,
             },
           });
-          chatGateway.emitBookingSlots(conversationId, result.output);
+          const extractSlots = (output: unknown): unknown[] => {
+            if (!output) return [];
+            if (Array.isArray(output)) return output;
+            if (typeof output === 'object') {
+              const obj = output as Record<string, unknown>;
+              if (Array.isArray(obj.result)) return obj.result;
+              if (Array.isArray(obj.slots)) return obj.slots;
+              if (Array.isArray(obj.data)) return obj.data;
+            }
+            if (typeof output === 'string') {
+              try {
+                const parsed: unknown = JSON.parse(output);
+                return extractSlots(parsed);
+              } catch {
+                return [];
+              }
+            }
+            return [];
+          };
+
+          const rawSlots = extractSlots(result.output);
+          chatGateway.emitBookingSlots(conversationId, rawSlots);
+
+          if (rawSlots.length === 0) {
+            const staffObj = resources.find((r) => r.id === resourceId);
+            const staffName = staffObj?.name || '';
+            const [year, month, day] = (selectedDate || '').split('-');
+            const displayDate =
+              day && month
+                ? `${day}/${month}${year ? '/' + year : ''}`
+                : selectedDate;
+
+            let noSlotPrompt = '';
+            if (lang === 'vi') {
+              noSlotPrompt = staffName
+                ? `Rất tiếc, nhân viên **${staffName}** không có khung giờ trống vào ngày **${displayDate}** (do đã kín lịch hoặc đang nghỉ/bị chặn lịch). Quý khách vui lòng chọn ngày khác hoặc chọn nhân viên khác nhé!\n\n<booking-step>date</booking-step>`
+                : `Rất tiếc, ngày **${displayDate}** hiện không còn khung giờ trống nào. Quý khách vui lòng chọn ngày khác nhé!\n\n<booking-step>date</booking-step>`;
+            } else if (lang === 'ja') {
+              noSlotPrompt = staffName
+                ? `申し訳ございません。スタッフ **${staffName}** は **${displayDate}** に予約可能な時間枠がございません（満席または休業のため）。別の日程または別のスタッフをお選びください。\n\n<booking-step>date</booking-step>`
+                : `申し訳ございません。**${displayDate}** には現在予約可能な時間枠がございません。別の日程をお選びください。\n\n<booking-step>date</booking-step>`;
+            } else {
+              noSlotPrompt = staffName
+                ? `Sorry, staff member **${staffName}** has no available time slots on **${displayDate}** (fully booked or on leave). Please choose another date or staff member!\n\n<booking-step>date</booking-step>`
+                : `Sorry, there are no available time slots on **${displayDate}**. Please choose another date!\n\n<booking-step>date</booking-step>`;
+            }
+
+            return {
+              messages: [new AIMessage(noSlotPrompt)],
+            };
+          }
 
           const prompt = getSlotCardPrompt(locale);
           return {
@@ -861,7 +911,9 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         const primaryServiceName: string | undefined =
           serviceNames?.[0] ?? singleService?.name;
 
-        // Calculate chronological endTimeSlot
+        // Calculate chronological endTimeSlot using site's configured slotDuration
+        const slotDuration =
+          options.siteContext?.bookingHours?.slotDuration ?? 30;
         let calculatedEndTimeSlot = latestSlotSel?.endTimeSlot;
         if (
           Array.isArray(latestSlotSel?.slots) &&
@@ -875,12 +927,12 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
           const lastSlot = sorted[sorted.length - 1];
           if (lastSlot?.timeSlot) {
             const [h, m] = lastSlot.timeSlot.split(':').map(Number);
-            const endM = (h || 0) * 60 + (m || 0) + 30;
+            const endM = (h || 0) * 60 + (m || 0) + slotDuration;
             calculatedEndTimeSlot = `${String(Math.floor(endM / 60) % 24).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
           }
         } else if (latestSlotSel?.timeSlot) {
           const [h, m] = latestSlotSel.timeSlot.split(':').map(Number);
-          const endM = (h || 0) * 60 + (m || 0) + 30 * slotCount;
+          const endM = (h || 0) * 60 + (m || 0) + slotDuration * slotCount;
           calculatedEndTimeSlot = `${String(Math.floor(endM / 60) % 24).padStart(2, '0')}:${String(endM % 60).padStart(2, '0')}`;
         }
 
