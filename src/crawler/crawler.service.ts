@@ -409,6 +409,15 @@ export class CrawlerService implements OnModuleInit {
     }
     run.totalPages = Math.max(0, run.totalPages - 1);
     run.processedPages = Math.max(0, run.processedPages - 1);
+
+    if (
+      run.status === CrawlRunStatus.PARTIAL_FAILED &&
+      run.failedPages === 0 &&
+      run.quotaExceededPages === 0
+    ) {
+      run.status = CrawlRunStatus.COMPLETED;
+    }
+
     await this.runRepository.save(run);
 
     return { success: true };
