@@ -112,6 +112,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         state.locale,
         'booking_type',
         templateId,
+        { isInitial: true },
       );
       return {
         messages: [
@@ -129,6 +130,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         state.locale,
         'service',
         templateId,
+        { isInitial: true },
       );
       return {
         messages: [
@@ -141,6 +143,7 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         state.locale,
         'resource',
         templateId,
+        { isInitial: true },
       );
       return {
         messages: [
@@ -148,7 +151,9 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
         ],
       };
     }
-    const prompt = getBookingOptionPrompt(state.locale, 'date', templateId);
+    const prompt = getBookingOptionPrompt(state.locale, 'date', templateId, {
+      isInitial: true,
+    });
     return {
       messages: [
         new AIMessage(`${prompt}\n\n<booking-step>date</booking-step>`),
@@ -622,10 +627,8 @@ export function buildBookingSubgraph(deps: BookingSubgraphDeps) {
             : (resourceOpt?.value ??
               resources.find((r) => r.id === resourceOpt?.value)?.id ??
               resources.find((r) =>
-                userMessages.some(
-                  (msg) =>
-                    msg.toLowerCase() === r.name.toLowerCase() ||
-                    msg.toLowerCase().endsWith(` with ${r.name.toLowerCase()}`),
+                userMessages.some((msg) =>
+                  msg.toLowerCase().includes(r.name.toLowerCase()),
                 ),
               )?.id);
 

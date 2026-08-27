@@ -921,10 +921,8 @@ export class GraphService {
                     (item) => item.id === slotSelection?.resourceId,
                   ) ??
                   resources.find((item) =>
-                    userMessages.some(
-                      (message) =>
-                        message === item.name.toLowerCase() ||
-                        message.endsWith(` with ${item.name.toLowerCase()}`),
+                    userMessages.some((message) =>
+                      message.toLowerCase().includes(item.name.toLowerCase()),
                     ),
                   );
 
