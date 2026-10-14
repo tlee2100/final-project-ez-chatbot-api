@@ -9,17 +9,25 @@ import {
   Patch,
   Delete,
   UseGuards,
-  Query,
   Req,
+  UploadedFile,
+  BadRequestException,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { UserService } from './user.service';
 import { CreateUserDto } from './dto/create-user.dto';
-import { UpdateUserDto } from './dto/update-user.dto';
+import { ChangePasswordDto, UpdateUserDto } from './dto/update-user.dto';
 import { JwtAuthGuard } from 'src/auth/guards/jwt-auth.guard';
-import { QueryUserDto } from './dto/query-user.dto';
+import {
+  Paginate,
+  type PaginateQuery,
+  ApiOkPaginatedResponse,
+} from 'nestjs-paginate';
+import { USER_PAGINATION_CONFIG } from './config/user-pagination.config';
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiConsumes,
   ApiExtraModels,
   ApiOperation,
   ApiParam,
@@ -28,7 +36,7 @@ import {
 } from '@nestjs/swagger';
 import {
   DeleteUserResponseDto,
-  PaginatedUsersDto,
+  CreateUserResponseDto,
   UserDto,
 } from './dto/user.dto';
 import { RolesGuard } from 'src/auth/guards/roles.guard';
@@ -36,9 +44,38 @@ import { UserRole } from './enums/user-role.enum';
 import { Roles } from 'src/auth/decorators/roles.decorator';
 import type { AuthRequest } from 'src/auth/types/auth-request.type';
 
+const avatarUploadOptions = {
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (
+    _req: unknown,
+    file: Express.Multer.File,
+    callback: (error: Error | null, acceptFile: boolean) => void,
+  ) => {
+    callback(
+      file.mimetype.startsWith('image/')
+        ? null
+        : new BadRequestException('Avatar must be an image'),
+      file.mimetype.startsWith('image/'),
+    );
+  },
+};
+
+const avatarMultipartBody = {
+  schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', example: 'Nguyen Van B' },
+      gender: { type: 'string', example: 'male' },
+      dateOfBirth: { type: 'string', example: '1995-01-20' },
+      phone: { type: 'string', example: '+84901234567' },
+      avatar: { type: 'string', format: 'binary' },
+    },
+  },
+};
+
 @ApiTags('Users')
 @ApiBearerAuth()
-@ApiExtraModels(UserDto, PaginatedUsersDto, DeleteUserResponseDto)
+@ApiExtraModels(UserDto, DeleteUserResponseDto, CreateUserResponseDto)
 @Controller('users')
 @UseInterceptors(ClassSerializerInterceptor)
 export class UserController {
@@ -48,18 +85,13 @@ export class UserController {
   @ApiOperation({
     summary: 'Get all users with pagination, filtering and sorting',
   })
-  @ApiResponse({
-    status: 200,
-    description: 'Users retrieved successfully',
-    type: PaginatedUsersDto,
-  })
+  @ApiOkPaginatedResponse(UserDto, USER_PAGINATION_CONFIG)
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 403, description: 'Forbidden' })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  findAll(@Query() query: QueryUserDto): Promise<PaginatedUsersDto> {
-    console.log('Swagger/Postman query:', query);
-    return this.userService.findAll(query);
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  findAll(@Paginate() query: PaginateQuery, @Req() req: AuthRequest) {
+    return this.userService.findAll(query, req.user);
   }
 
   @Post()
@@ -68,7 +100,7 @@ export class UserController {
   @ApiResponse({
     status: 201,
     description: 'User created successfully',
-    type: UserDto,
+    type: CreateUserResponseDto,
   })
   @ApiResponse({
     status: 400,
@@ -84,9 +116,31 @@ export class UserController {
     description: 'User with this email already exists',
   })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  create(@Body() createUserDto: CreateUserDto): Promise<UserDto> {
-    return this.userService.create(createUserDto);
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  create(
+    @Body() createUserDto: CreateUserDto,
+    @Req() req: AuthRequest,
+  ): Promise<CreateUserResponseDto> {
+    return this.userService.create(createUserDto, req.user);
+  }
+
+  @Post(':id/resend-activation')
+  @ApiOperation({ summary: 'Resend user account activation email' })
+  @ApiParam({ name: 'id', description: 'User ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Activation email queued successfully',
+  })
+  @ApiResponse({ status: 400, description: 'User is already active' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  resendActivation(
+    @Param('id') id: string,
+    @Req() req: AuthRequest,
+  ): Promise<{ activationEmailQueued: boolean }> {
+    return this.userService.resendActivation(id, req.user);
   }
 
   @Get('me')
@@ -129,14 +183,16 @@ export class UserController {
     description: 'User not found',
   })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  findOne(@Param('id') id: string): Promise<UserDto> {
-    return this.userService.findOne(id);
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  findOne(@Param('id') id: string, @Req() req: AuthRequest): Promise<UserDto> {
+    return this.userService.findOne(id, req.user);
   }
 
   @Patch('me')
+  @UseInterceptors(FileInterceptor('avatar', avatarUploadOptions))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Update current user profile' })
-  @ApiBody({ type: UpdateUserDto })
+  @ApiBody(avatarMultipartBody)
   @ApiResponse({
     status: 200,
     description: 'Current user updated successfully',
@@ -154,11 +210,22 @@ export class UserController {
   updateMe(
     @Req() req: AuthRequest,
     @Body() updateUserDto: UpdateUserDto,
+    @UploadedFile() file?: Express.Multer.File,
   ): Promise<UserDto> {
-    return this.userService.update(req.user.id, updateUserDto);
+    return this.userService.updateMe(req.user.id, updateUserDto, file);
+  }
+
+  @Patch('me/password')
+  @ApiOperation({ summary: 'Change current user password' })
+  @ApiBody({ type: ChangePasswordDto })
+  @UseGuards(JwtAuthGuard)
+  changePassword(@Req() req: AuthRequest, @Body() dto: ChangePasswordDto) {
+    return this.userService.changePassword(req.user.id, dto);
   }
 
   @Patch(':id')
+  @UseInterceptors(FileInterceptor('avatar', avatarUploadOptions))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary: 'Update user',
     description: 'Update user information except email and role',
@@ -168,9 +235,7 @@ export class UserController {
     description: 'User ID',
     example: '550e8400-e29b-41d4-a716-446655440000',
   })
-  @ApiBody({
-    type: UpdateUserDto,
-  })
+  @ApiBody(avatarMultipartBody)
   @ApiResponse({
     status: 200,
     description: 'User updated successfully',
@@ -190,12 +255,14 @@ export class UserController {
     description: 'User not found',
   })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
   update(
     @Param('id') id: string,
     @Body() updateUserDto: UpdateUserDto,
+    @Req() req: AuthRequest,
+    @UploadedFile() file?: Express.Multer.File,
   ): Promise<UserDto> {
-    return this.userService.update(id, updateUserDto);
+    return this.userService.update(id, updateUserDto, req.user, file);
   }
 
   @Delete(':id')
@@ -222,8 +289,11 @@ export class UserController {
     description: 'User not found',
   })
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN)
-  remove(@Param('id') id: string): Promise<DeleteUserResponseDto> {
-    return this.userService.remove(id);
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+  remove(
+    @Param('id') id: string,
+    @Req() req: AuthRequest,
+  ): Promise<DeleteUserResponseDto> {
+    return this.userService.remove(id, req.user);
   }
 }

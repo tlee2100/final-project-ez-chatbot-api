@@ -1,5 +1,6 @@
 import { AutoMap } from '@automapper/classes';
 import { UserRole } from '../enums/user-role.enum';
+import { UserGender } from '../entities/user.entity';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class UserDto {
@@ -17,6 +18,18 @@ export class UserDto {
   @AutoMap()
   email: string;
 
+  @ApiProperty({ description: 'Whether the user has activated the account' })
+  @AutoMap()
+  isActive: boolean;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'Activation token expiry timestamp',
+    example: '2026-08-07T12:00:00.000Z',
+  })
+  @AutoMap(() => Date)
+  activationTokenExpiresAt: Date | null;
+
   @ApiProperty({
     example: 'Nguyen Van A',
     description: 'User name',
@@ -31,46 +44,33 @@ export class UserDto {
   })
   @AutoMap()
   role: UserRole;
+
+  @ApiProperty({ enum: UserGender, nullable: true })
+  @AutoMap(() => String)
+  gender: UserGender | null;
+
+  @ApiProperty({ nullable: true })
+  @AutoMap(() => String)
+  dateOfBirth: string | null;
+
+  @ApiProperty({ nullable: true })
+  @AutoMap(() => String)
+  phone: string | null;
+
+  @ApiProperty({ nullable: true })
+  @AutoMap(() => String)
+  avatarUrl: string | null;
 }
 
-export class PaginatedUserMetaDto {
-  @ApiProperty({
-    example: 1,
-    description: 'Current page',
-  })
-  page: number;
+export class CreateUserResponseDto {
+  @ApiProperty({ type: () => UserDto })
+  user: UserDto;
 
   @ApiProperty({
-    example: 10,
-    description: 'Items per page',
+    description: 'Whether the activation email was added to the email queue',
+    example: true,
   })
-  limit: number;
-
-  @ApiProperty({
-    example: 42,
-    description: 'Total number of users',
-  })
-  total: number;
-
-  @ApiProperty({
-    example: 5,
-    description: 'Total number of pages',
-  })
-  totalPages: number;
-}
-
-export class PaginatedUsersDto {
-  @ApiProperty({
-    type: () => [UserDto],
-    description: 'Users on the current page',
-  })
-  data: UserDto[];
-
-  @ApiProperty({
-    type: () => PaginatedUserMetaDto,
-    description: 'Pagination metadata',
-  })
-  meta: PaginatedUserMetaDto;
+  activationEmailQueued: boolean;
 }
 
 export class DeleteUserResponseDto {

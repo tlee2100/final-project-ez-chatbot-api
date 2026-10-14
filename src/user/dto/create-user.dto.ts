@@ -1,14 +1,7 @@
-import {
-  IsEmail,
-  IsNotEmpty,
-  IsString,
-  MinLength,
-  MaxLength,
-  IsOptional,
-  IsEnum,
-} from 'class-validator';
+import { IsEmail, IsNotEmpty, IsString, IsEnum, IsUUID } from 'class-validator';
 import { UserRole } from '../enums/user-role.enum';
 import { ApiProperty } from '@nestjs/swagger';
+import { UserGender } from '../entities/user.entity';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'user@gmail.com' })
@@ -16,19 +9,22 @@ export class CreateUserDto {
   @IsEmail({}, { message: 'Invalid email format' })
   email: string;
 
-  @ApiProperty({ example: 'user@gmail.com' })
-  @IsNotEmpty({ message: 'Password is required' })
-  @IsString({ message: 'Password must be a string' })
-  @MinLength(8, { message: '[Password must be at least 8 characters long' })
-  @MaxLength(32, { message: 'Password must not exceed 32 characters' })
-  password: string;
-
   @ApiProperty({ example: 'Nguyen Van A' })
+  @IsNotEmpty()
   @IsString()
   name: string;
 
   @ApiProperty({ enum: UserRole, example: UserRole.AGENT })
-  @IsOptional()
   @IsEnum(UserRole)
-  role?: UserRole;
+  role: UserRole;
+
+  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000' })
+  @IsNotEmpty()
+  @IsUUID()
+  organizationId: string;
+
+  @ApiProperty({ enum: UserGender, example: UserGender.OTHER })
+  @IsNotEmpty()
+  @IsEnum(UserGender)
+  gender: UserGender;
 }

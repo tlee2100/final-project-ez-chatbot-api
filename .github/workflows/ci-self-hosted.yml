@@ -1,0 +1,106 @@
+name: CI (self-hosted)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  img_name: chatbot-api
+
+jobs:
+  validate:
+    name: Lint, Type Check & Test
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Install dependencies (Strict Lockfile)
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run type-check
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm test
+
+  build-docker-image:
+    name: Build Docker Image
+    needs: validate
+    runs-on: self-hosted
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Use file-based Docker config
+        run: |
+          cfg="${RUNNER_TEMP}/docker-config"
+          mkdir -p "$cfg"
+          printf '%s\n' '{"auths":{}}' > "$cfg/config.json"
+          echo "DOCKER_CONFIG=${cfg}" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=unix://${HOME}/.docker/run/docker.sock" >> "$GITHUB_ENV"
+          echo "${HOME}/actions-runners/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to private registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY_URL }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Set image name
+        id: image
+        run: |
+          registry="${{ secrets.DOCKER_REGISTRY_URL }}"
+          tag="${{ github.run_number }}"
+          image="${registry}/internship/${{ env.img_name }}:${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "image=$(printf '%s' "$image" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+
+  deploy:
+    name: Deploy
+    needs: build-docker-image
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Check out deployment helper
+        uses: actions/checkout@v6
+
+      - name: Deploy to Coolify
+        env:
+          COOLIFY_API_URL: ${{ secrets.COOLIFY_API_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_DEPLOY_MODE: docker-image
+          IMAGE_TAG: ${{ needs.build-docker-image.outputs.tag }}
+          DEPLOY_IMAGE: ${{ needs.build-docker-image.outputs.image }}
+          RELEASE_VERSION: ${{ needs.build-docker-image.outputs.tag }}
+        run: bash .github/scripts/deploy-coolify.sh

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  img_name: chatbot-api
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out deployment helper
+        uses: actions/checkout@v6
+
+      - name: Deploy to Coolify
+        env:
+          COOLIFY_API_URL: ${{ secrets.COOLIFY_API_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_DEPLOY_MODE: docker-image
+          IMAGE_TAG: 124
+          DEPLOY_IMAGE: registry.royal.zodinet.tech/internship/chatbot-api:124
+          RELEASE_VERSION: 124
+        run: bash .github/scripts/deploy-coolify.sh

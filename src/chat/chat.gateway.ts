@@ -7,51 +7,47 @@ import {
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
-  WsException,
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
+import { Logger, UseGuards } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import { UserRole } from 'src/user/enums/user-role.enum';
-import { Logger } from '@nestjs/common';
+import { UserRole } from '../user/enums/user-role.enum';
+import type { JwtUser } from '../auth/types/jwt-user.type';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { WsRolesGuard } from '../auth/guards/ws-roles.guard';
+import { ChatService } from './chat.service';
+import { SenderType } from './entities/chat-message.entity';
+import { Conversation } from './entities/conversation.entity';
+import { NotificationGateway } from '../notification/notification.gateway';
+import { ChatToastPayload } from '../notification/types/chat-toast-payload.type';
+import type { RawPageContext } from './interfaces/page-context.interface';
+import { extractToken } from '../auth/middlewares/ws-auth.middleware';
 
 type JwtPayload = {
   sub: string;
   email: string;
   role: UserRole;
+  organizationId: string | null;
 };
 
-type SocketUser = {
-  id: string;
-  email: string;
-  role: UserRole;
+export type SocketData = {
+  user?: JwtUser;
+  visitor?: {
+    conversationId?: string;
+    siteId?: string;
+  };
 };
 
-type SocketData = {
-  user?: SocketUser;
-};
+export type ChatMessagePayload = string | { message: string };
 
-type ChatMessagePayload = string | { message: string };
-
-export type DocumentNotificationPayload =
-  | {
-      type: 'document-processing';
-      documentId: string;
-      filename: string;
-      status: 'processing';
-    }
-  | {
-      type: 'document-ready';
-      documentId: string;
-      filename: string;
-      status: 'ready';
-      processedAt: string;
-    };
-
-const MAX_MESSAGE_LENGTH = 1000;
+// const frontendOrigins = process.env.FRONTEND_URL?.split(',')
+//   .map((origin) => origin.trim())
+//   .filter(Boolean);
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL,
+    origin: true,
+    credentials: true,
   },
 })
 export class ChatGateway
@@ -59,7 +55,11 @@ export class ChatGateway
 {
   private readonly logger = new Logger(ChatGateway.name);
 
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly chatService: ChatService,
+    private readonly notificationGateway: NotificationGateway,
+  ) {}
 
   @WebSocketServer()
   server!: Server;
@@ -68,6 +68,13 @@ export class ChatGateway
     server.use((client: Socket, next) => {
       void this.authenticateClient(client, next);
     });
+
+    this.chatService.onConversationsClosed((conversationIds) => {
+      for (const id of conversationIds) {
+        this.notifyConversationClosed(id);
+        this.emitConversationStatusChanged(id, 'CLOSED');
+      }
+    });
   }
 
   private async authenticateClient(
@@ -75,21 +82,62 @@ export class ChatGateway
     next: (err?: Error) => void,
   ): Promise<void> {
     try {
-      const token = this.extractToken(client);
+      const token = extractToken(client);
 
       if (!token) {
-        next(new Error('Missing access token'));
+        const requestedConvId = this.extractVisitorConversationId(client);
+        if (requestedConvId) {
+          if (requestedConvId.startsWith('admin-test-')) {
+            const siteId = (client.handshake.auth?.siteId ||
+              client.handshake.query?.siteId) as string;
+            const socketData = client.data as SocketData;
+            socketData.visitor = {
+              conversationId: requestedConvId,
+              siteId,
+            };
+            next();
+            return;
+          }
+          next(new Error('Visitor token is required to access conversation'));
+          return;
+        }
+
+        const siteId = (client.handshake.auth?.siteId ||
+          client.handshake.query?.siteId) as string;
+
+        if (siteId) {
+          const socketData = client.data as SocketData;
+          socketData.visitor = {
+            siteId,
+          };
+          next();
+          return;
+        }
+
+        next(new Error('Missing access token or visitor token'));
         return;
       }
 
-      const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
+      const payload = await this.jwtService.verifyAsync<
+        JwtPayload & { type?: string; conversationId?: string; siteId?: string }
+      >(token);
       const socketData = client.data as SocketData;
 
-      socketData.user = {
-        id: payload.sub,
-        email: payload.email,
-        role: payload.role,
-      };
+      if (payload.type === 'visitor') {
+        const fallbackSiteId = (client.handshake.auth?.siteId ||
+          client.handshake.query?.siteId) as string;
+        socketData.visitor = {
+          conversationId: payload.conversationId || payload.sub,
+          siteId: payload.siteId || fallbackSiteId,
+        };
+      } else {
+        socketData.user = {
+          id: payload.sub,
+          email: payload.email,
+          role: payload.role,
+          organizationId: payload.organizationId,
+        };
+      }
 
       next();
     } catch {
@@ -97,133 +145,199 @@ export class ChatGateway
     }
   }
 
-  handleConnection(client: Socket) {
-    const socketData = client.data as SocketData;
-    const user = socketData.user;
-
-    if (!user) {
-      client.disconnect();
-      return;
-    }
-
-    this.logger.log(`Client connected: ${client.id} (${user.email})`);
-    void client.join(this.getNotificationRoom(user.id));
-    client.emit('message', `Server: connected as ${user.email}`);
+  async handleConnection(client: Socket) {
+    await this.chatService.handleConnection(client);
   }
 
   handleDisconnect(client: Socket) {
-    this.logger.log(`Client disconnected: ${client.id}`);
+    this.chatService.handleDisconnect(client);
   }
+
+  // ─── Legacy message event (kept for backward compat) ──────────────────────
 
   @SubscribeMessage('message')
   handleMessage(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: ChatMessagePayload,
   ) {
-    const socketData = client.data as SocketData;
-    const user = socketData.user;
-
-    if (!user) {
-      throw new WsException('Unauthenticated client');
-    }
-
-    const message = this.validateMessagePayload(payload);
-    const sender = user.email;
-    const text = `${sender}: ${message}`;
-
-    this.logger.log(`Message received from ${sender}: ${message}`);
-    this.server.emit('message', text);
-
-    return message;
+    return this.chatService.handleLegacyMessage(client, payload);
   }
 
-  emitToUser(userId: string, payload: DocumentNotificationPayload): void {
-    this.server
-      .to(this.getNotificationRoom(userId))
-      .emit('notification', payload);
+  // ─── Live-chat: Join conversation room (agent "Takes Chat") ───────────────
+
+  @UseGuards(WsRolesGuard)
+  @Roles(UserRole.AGENT)
+  @SubscribeMessage('joinConversation')
+  async handleJoinConversation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
+  ): Promise<void> {
+    await this.chatService.handleJoinConversation(client, payload);
   }
 
-  emitDocumentStatusToUsers(
-    userIds: Array<string | null | undefined>,
-    payload: DocumentNotificationPayload,
+  // ─── Live-chat: Subscribe (preview without claiming) ──────────────────────
+
+  @UseGuards(WsRolesGuard)
+  @Roles(UserRole.AGENT, UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @SubscribeMessage('subscribeConversation')
+  async handleSubscribeConversation(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
+  ): Promise<void> {
+    await this.chatService.handleSubscribeConversation(client, payload);
+  }
+
+  // ─── Live-chat: Send message ───────────────────────────────────────────────
+
+  @SubscribeMessage('sendMessage')
+  async handleSendMessage(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    payload: {
+      conversationId: string;
+      content: string;
+      senderType: SenderType;
+      localId?: string;
+    } & RawPageContext,
+  ): Promise<void> {
+    await this.chatService.handleSendMessage(client, payload);
+  }
+
+  // ─── Live-chat: Typing & Status ──────────────────────────────────────────
+
+  @SubscribeMessage('conversation-typing')
+  handleTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
   ): void {
-    const rooms = [...new Set(userIds)]
-      .filter(
-        (userId): userId is string =>
-          typeof userId === 'string' && userId.trim().length > 0,
-      )
-      .map((userId) => this.getNotificationRoom(userId));
+    this.chatService.handleTyping(client, payload);
+  }
 
-    if (rooms.length === 0) {
-      this.logger.warn(
-        `Skipped document status notification for document ${payload.documentId}: no recipients`,
-      );
-      return;
-    }
+  @SubscribeMessage('conversation-read')
+  async handleConversationRead(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { conversationId: string },
+  ): Promise<void> {
+    await this.chatService.handleConversationRead(client, payload);
+  }
 
-    this.server.to(rooms).emit('document-status-changed', payload);
+  // ─── Emit helpers (called by the REST controller / service) ───────────────
+
+  emitChatToastToAgent(agentId: string, payload: ChatToastPayload): void {
+    this.notificationGateway.emitChatToast(agentId, payload);
     this.logger.log(
-      `Emitted ${payload.status} status for document ${payload.documentId} to ${rooms.length} user room(s)`,
+      `Chat toast forwarded to agent ${agentId} for conversation ${payload.conversationId}`,
     );
   }
 
-  private getNotificationRoom(userId: string): string {
-    return `notification-${userId}`;
+  notifyAgentsOfNewConversation(conversation: Conversation): void {
+    this.server.to(`site-${conversation.siteId}`).emit('newConversation', {
+      id: conversation.id,
+      siteId: conversation.siteId,
+      visitorName: conversation.visitorName,
+      visitorEmail: conversation.visitorEmail,
+      status: conversation.status,
+      handlingStatus: conversation.handlingStatus,
+      createdAt: new Date().toISOString(),
+    });
+    this.logger.log(
+      `Notified site-${conversation.siteId} of new conversation ${conversation.id}`,
+    );
   }
 
-  private validateMessagePayload(payload: ChatMessagePayload): string {
-    const message =
-      typeof payload === 'string'
-        ? payload
-        : this.extractMessageFromObject(payload);
-
-    if (typeof message !== 'string') {
-      throw new WsException('Message must be a string');
-    }
-
-    const normalizedMessage = message.trim();
-
-    if (!normalizedMessage) {
-      throw new WsException('Message must not be empty');
-    }
-
-    if (normalizedMessage.length > MAX_MESSAGE_LENGTH) {
-      throw new WsException(
-        `Message must not exceed ${MAX_MESSAGE_LENGTH} characters`,
-      );
-    }
-
-    return normalizedMessage;
+  notifyConversationAssigned(conversationId: string, siteId: string): void {
+    this.server
+      .to(`site-${siteId}`)
+      .emit('conversationAssigned', { id: conversationId });
   }
 
-  private extractMessageFromObject(payload: ChatMessagePayload): string | null {
-    if (
-      !payload ||
-      typeof payload !== 'object' ||
-      Array.isArray(payload) ||
-      !Object.hasOwn(payload, 'message')
-    ) {
-      return null;
-    }
+  notifyConversationClosed(conversationId: string, siteId?: string): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('conversationClosed', { id: conversationId });
 
-    return payload.message;
+    if (siteId) {
+      this.server.to(`site-${siteId}`).emit('conversationClosed', {
+        id: conversationId,
+      });
+    }
   }
 
-  private extractToken(client: Socket): string | null {
-    const authToken = (client.handshake.auth as Partial<{ token: string }>)
-      .token;
-    if (typeof authToken === 'string') {
-      return authToken;
+  notifyHandoffRequested(conversationId: string, siteId: string): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('handlingStatusUpdated', {
+        conversationId,
+        handlingStatus: 'WAITING_FOR_AGENT',
+      });
+    this.server.to(`site-${siteId}`).emit('conversationActivity', {
+      id: conversationId,
+    });
+    this.logger.log(
+      `Handoff requested for conversation ${conversationId} (site ${siteId})`,
+    );
+  }
+
+  emitConversationStatusChanged(conversationId: string, status: string): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('conversationStatusChanged', { conversationId, status });
+  }
+
+  broadcastSiteSettingsUpdated(
+    conversationIds: string[],
+    settings: unknown,
+  ): void {
+    for (const id of conversationIds) {
+      this.server
+        .to(`conversation-${id}`)
+        .emit('siteSettingsUpdated', settings);
+    }
+  }
+
+  // ─── Booking Emit Helpers ────────────────────────────────────────────────
+
+  emitBookingSlots(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSlots', { conversationId, payload });
+  }
+
+  emitBookingSummary(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSummary', { conversationId, payload });
+  }
+
+  emitBookingSuccess(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingSuccess', { conversationId, payload });
+  }
+
+  emitBookingCancellation(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingCancellation', { conversationId, payload });
+  }
+
+  emitBookingCancelled(conversationId: string, payload: unknown): void {
+    this.server
+      .to(`conversation-${conversationId}`)
+      .emit('bookingCancelled', { conversationId, payload });
+  }
+
+  private extractVisitorConversationId(client: Socket): string | null {
+    const authConvId = (
+      client.handshake.auth as Partial<{ conversationId: string }>
+    ).conversationId;
+    if (typeof authConvId === 'string') {
+      return authConvId;
     }
 
-    const queryToken = client.handshake.query?.token;
-    if (typeof queryToken === 'string') {
-      return queryToken;
-    }
-
-    const authorization = client.handshake.headers.authorization;
-    if (authorization?.startsWith('Bearer ')) {
-      return authorization.slice(7);
+    const queryConvId = client.handshake.query?.conversationId;
+    if (typeof queryConvId === 'string') {
+      return queryConvId;
     }
 
     return null;

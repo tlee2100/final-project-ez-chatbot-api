@@ -20,7 +20,7 @@ Backend API for a multi-user chatbot management system. It is built with NestJS,
 - DTO validation with `class-validator` and global `ValidationPipe`
 - Password hashing with bcrypt
 - Swagger UI for API testing
-- TypeORM migrations and admin seeding script
+- TypeORM migrations and super admin seeding script
 
 ## Tech Stack
 
@@ -69,7 +69,7 @@ src/
 |   `-- document.service.ts
 |-- migrations/
 |-- scripts/
-|   `-- seed-admin.ts
+|   `-- seed-super-admin.ts
 |-- shared/
 |-- site/
 |   |-- dto/
@@ -131,20 +131,20 @@ docker compose up -d
 npm run migration:run
 ```
 
-### 5. Seed the first admin user
+### 5. Seed the first super admin user
 
 Set these variables in `.env` before running the seed:
 
 ```env
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=adminPassword123
-ADMIN_NAME=Administrator
+SUPER_ADMIN_EMAIL=superadmin@example.com
+SUPER_ADMIN_PASSWORD=superAdminPassword123
+SUPER_ADMIN_NAME=Super Administrator
 ```
 
 Then run:
 
 ```bash
-npm run seed:admin
+npm run seed:super-admin
 ```
 
 ### 6. Configure Cloudinary for document upload
@@ -194,7 +194,7 @@ http://localhost:3000/api
 
 ```env
 PORT=3000
-FRONTEND_URL=http://localhost:5173
+FRONTEND_URL=http://localhost:3001,http://localhost:5173
 
 DB_HOST=localhost
 DB_PORT=5432
@@ -215,14 +215,14 @@ CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name
 CLOUDINARY_API_KEY=your_cloudinary_api_key
 CLOUDINARY_API_SECRET=your_cloudinary_api_secret
 
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=adminPassword123
-ADMIN_NAME=Administrator
+SUPER_ADMIN_EMAIL=superadmin@example.com
+SUPER_ADMIN_PASSWORD=superAdminPassword123
+SUPER_ADMIN_NAME=Super Administrator
 ```
 
 Notes:
 
-- `FRONTEND_URL` is used by CORS for REST APIs and Socket.IO.
+- `FRONTEND_URL` is used by CORS for REST APIs and Socket.IO. Add each landing page origin, separated by commas.
 - `RECAPTCHA_SECRET_KEY` is required for login.
 - `JWT_SECRET` is required for API authentication and websocket authentication.
 - Cloudinary variables are required for document upload. Uploaded files are stored in the `documents` folder on Cloudinary with `resource_type: raw`; PostgreSQL stores the Cloudinary URL/public id and document status, not the file bytes.
@@ -495,6 +495,55 @@ Upload flow:
 5. A Bull job is queued in Redis.
 6. The worker marks the document as `processing`, then `ready`.
 
+## Web Crawler and Sitemap Sync
+
+The crawler implements KB-006, KB-007, and KB-008. It discovers URLs from one
+root sitemap per site (including nested sitemap indexes and gzip files), renders
+each public page with Chromium, extracts the readable content, and reuses the
+existing chunking, embedding, and pgvector pipeline. The configured sitemap,
+nested sitemaps, and listed pages may use public hostnames that differ from the
+site's primary URL.
+
+Production deployment is feature-flagged. Set `CRAWLER_ENABLED=true` and provide
+a Browserless WebSocket URL through `BROWSER_WS_ENDPOINT`. Keep the Browserless
+token in deployment secrets; do not commit or log the endpoint. The API opens
+one remote browser session per rendered page and closes it after use.
+
+Crawler management endpoints require `ADMIN` or `SUPER_ADMIN` and tenant access
+to `siteId`:
+
+| Method | Endpoint                                               | Purpose                          |
+| ------ | ------------------------------------------------------ | -------------------------------- |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawler`                     | Read config and active run       |
+| `PUT`  | `/api/v1/sites/:siteId/kb/crawler`                     | Save sitemap and 7-day auto-sync |
+| `POST` | `/api/v1/sites/:siteId/kb/crawl`                       | Start a full sitemap run         |
+| `POST` | `/api/v1/sites/:siteId/kb/upload/url`                  | Ingest one public URL            |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls`                      | List run history                 |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls/:runId`               | Read progress and counters       |
+| `GET`  | `/api/v1/sites/:siteId/kb/crawls/:runId/pages`         | Filter/search URL results        |
+| `POST` | `/api/v1/sites/:siteId/kb/crawls/:runId/retry-failed`  | Retry failed URLs                |
+| `POST` | `/api/v1/sites/:siteId/kb/sources/:documentId/recrawl` | Recrawl one web source           |
+
+The crawler always enforces `robots.txt`, ports 80/443, redirect validation, and
+public IPv4/IPv6 resolution. A sitemap may list pages and nested sitemaps on
+different public hosts, but each individual HTTP request may only redirect
+within its initial hostname and may not downgrade HTTPS to HTTP. The crawler
+sends no backend cookies or authorization headers. ETag/Last-Modified and
+extracted-content hashes avoid unnecessary Chromium and embedding work. A
+failed recrawl keeps the last indexed chunks. Sitemap sources are retired from
+retrieval only after they are absent from two consecutive successful full
+syncs.
+
+Reverting the crawler migration removes URL-source documents and their chunks
+so the legacy non-null file-path constraint can be restored; back up crawler
+content before a migration rollback.
+
+Run `npm test -- --runInBand src/crawler` for the crawler unit suite. For the
+Browserless smoke test, set `RUN_CRAWLER_INTEGRATION=true`,
+`BROWSER_WS_ENDPOINT`, and `CRAWLER_INTEGRATION_URL` to a public test page, then
+run `npm run test:crawler:integration`. Browserless cannot access a fixture on
+the API process's localhost.
+
 ## WebSocket Chat
 
 The Socket.IO gateway requires a valid JWT. The token can be sent through handshake auth, query string, or `Authorization` header.
@@ -538,30 +587,35 @@ Supported event:
 
 ## Scripts
 
-| Command                                             | Description                             |
-| --------------------------------------------------- | --------------------------------------- |
-| `npm run start`                                     | Start NestJS once                       |
-| `npm run start:dev`                                 | Start in development watch mode         |
-| `npm run start:debug`                               | Start in debug watch mode               |
-| `npm run build`                                     | Build the app                           |
-| `npm run start:prod`                                | Run the built app from `dist/main`      |
-| `npm run lint`                                      | Run ESLint                              |
-| `npm run lint:fix`                                  | Run ESLint with auto-fix                |
-| `npm run format`                                    | Format the repository with Prettier     |
-| `npm run format:check`                              | Check Prettier formatting               |
-| `npm run type-check`                                | Run TypeScript type checking            |
-| `npm run test`                                      | Run unit tests                          |
-| `npm run test:e2e`                                  | Run e2e tests                           |
-| `npm run test:cov`                                  | Run tests with coverage                 |
-| `npm run migration:run`                             | Run TypeORM migrations                  |
-| `npm run migration:revert`                          | Revert the latest TypeORM migration     |
-| `npm run migration:generate -- src/migrations/Name` | Generate a migration                    |
-| `npm run seed:admin`                                | Create the first admin user from `.env` |
+| Command                                             | Description                                   |
+| --------------------------------------------------- | --------------------------------------------- |
+| `npm run start`                                     | Start NestJS once                             |
+| `npm run start:dev`                                 | Start in development watch mode               |
+| `npm run start:debug`                               | Start in debug watch mode                     |
+| `npm run build`                                     | Build the app                                 |
+| `npm run start:prod`                                | Run the built app from `dist/main`            |
+| `npm run lint`                                      | Run ESLint                                    |
+| `npm run lint:fix`                                  | Run ESLint with auto-fix                      |
+| `npm run format`                                    | Format the repository with Prettier           |
+| `npm run format:check`                              | Check Prettier formatting                     |
+| `npm run type-check`                                | Run TypeScript type checking                  |
+| `npm run test`                                      | Run unit tests                                |
+| `npm run test:e2e`                                  | Run e2e tests                                 |
+| `npm run test:cov`                                  | Run tests with coverage                       |
+| `npm run migration:run`                             | Run TypeORM migrations                        |
+| `npm run migration:revert`                          | Revert the latest TypeORM migration           |
+| `npm run migration:generate -- src/migrations/Name` | Generate a migration                          |
+| `npm run seed:super-admin`                          | Create the first super admin user from `.env` |
 
 ## Development Notes
 
 - Keep `synchronize` disabled and use migrations for schema changes.
 - Run PostgreSQL and Redis before starting the API.
-- Run migrations before seeding the admin user.
+- Run migrations before seeding the super admin user.
 - Keep Cloudinary credentials configured before testing document upload.
 - Use Swagger at `/api` for manual REST API testing.
+
+## ⚠️ Database Migrations & HNSW Index
+
+When running `npm run migration:generate`, TypeORM might generate a `DROP INDEX` for the `IDX_document_chunks_embedding_hnsw` index because TypeORM does not fully support `hnsw` indices natively in its decorators.
+**You MUST manually remove that `DROP INDEX` statement** from your generated migration files to prevent the database from losing this performance optimization.

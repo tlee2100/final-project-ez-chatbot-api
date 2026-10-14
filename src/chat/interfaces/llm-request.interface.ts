@@ -1,0 +1,63 @@
+import type { SanitizedPageContext } from './page-context.interface';
+
+/**
+ * Represents a single message in the conversation history sent to the LLM.
+ */
+export interface LLMMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+/**
+ * Input contract for the AiService.
+ * Consumed by both invoke() and stream() methods.
+ */
+export interface LLMRequest {
+  /** Full conversation history (user/assistant turns) */
+  messages: LLMMessage[];
+
+  /** Effective BCP 47 locale selected by the conversation flow */
+  locale?: string;
+
+  /** Optional system prompt override. Defaults to SYSTEM_PROMPT env var. */
+  systemPrompt?: string;
+
+  /** Custom system prompt override for the site */
+  systemPromptOverride?: string | null;
+
+  /** Site UUID — used to scope tool calls and knowledge retrieval */
+  siteId?: string;
+
+  /** Conversation UUID — passed to tools for context */
+  conversationId?: string;
+
+  /** Optional summary of earlier messages to compress history */
+  summary?: string;
+
+  /** Visitor details to provide context to the LLM */
+  visitorContext?: {
+    name?: string;
+    email?: string;
+  };
+
+  /** Sanitized, ephemeral content from the page currently viewed by the visitor. */
+  pageContext?: SanitizedPageContext;
+
+  /** Site details to provide context to the LLM */
+  siteContext?: {
+    name?: string;
+    domains?: string[];
+    bookingEnabled?: boolean;
+    bookingServices?: { id: string; name: string }[];
+    bookingResources?: { id: string; name: string }[];
+    bookingHours?: {
+      timezone?: string | null;
+      availableDays?: number[];
+      startTime?: string;
+      endTime?: string;
+      slotDuration?: number;
+    };
+    industryTemplateId?: string;
+    industryTemplateConfig?: Record<string, unknown>;
+  };
+}

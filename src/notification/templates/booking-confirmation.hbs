@@ -1,0 +1,71 @@
+<html>
+
+  <head>
+    <meta charset='utf-8' />
+    <meta name='viewport' content='width=device-width, initial-scale=1.0' />
+    <title>Booking Confirmed – #{{bookingCode}}</title>
+  </head>
+
+  <body
+    style='font-family: Arial, Helvetica, sans-serif; background-color: #f3f4f6; margin: 0; padding: 24px; color: #374151; line-height: 1.6;'
+  >
+    <div
+      style='max-width: 520px; margin: 0 auto; background-color: #ffffff; padding: 32px; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);'
+    >
+      <h2
+        style='color: #10B981; margin-top: 0; font-size: 20px; font-weight: bold;'
+      >Booking Confirmed</h2>
+      <p style='margin: 16px 0;'>Hello <strong>{{customerName}}</strong>,</p>
+      <p style='margin: 16px 0;'>Your appointment at
+        <strong>{{siteName}}</strong>
+        has been successfully booked.
+      </p>
+
+      <div
+        style='background-color: #F9FAFB; padding: 16px; border-radius: 8px; border: 1px solid #E5E7EB; margin: 20px 0;'
+      >
+        <p style='margin: 0 0 8px 0; font-size: 14px; color: #6B7280;'>Booking
+          Code</p>
+        <p
+          style='margin: 0 0 16px 0; font-size: 18px; font-weight: bold; color: #111827;'
+        >#{{bookingCode}}</p>
+
+        <p
+          style='margin: 0 0 8px 0; font-size: 14px; color: #6B7280;'
+        >Service</p>
+        <p
+          style='margin: 0 0 16px 0; font-size: 16px; font-weight: 500; color: #111827;'
+        >{{serviceName}}</p>
+
+        {{#if resourceName}}
+          <p
+            style='margin: 0 0 8px 0; font-size: 14px; color: #6B7280;'
+          >Staff</p>
+          <p
+            style='margin: 0 0 16px 0; font-size: 16px; font-weight: 500; color: #111827;'
+          >{{resourceName}}</p>
+        {{/if}}
+
+        <p style='margin: 0 0 8px 0; font-size: 14px; color: #6B7280;'>Date &
+          Time</p>
+        <p
+          style='margin: 0 0 4px 0; font-size: 16px; font-weight: 500; color: #111827;'
+        >{{startAtFormatted}}
+          -
+          {{endAtFormatted}}</p>
+        <p
+          style='margin: 0; font-size: 12px; color: #6B7280;'
+        >({{timezone}})</p>
+      </div>
+
+      <p style='margin: 16px 0;'>If you need to make any changes, please contact
+        us directly.</p>
+
+      <p
+        style='font-size: 12px; color: #9ca3af; margin: 32px 0 0 0; border-top: 1px solid #f3f4f6; padding-top: 16px;'
+      >
+        This is an automated notification. Please do not reply to this email.</p>
+    </div>
+  </body>
+
+</html>
