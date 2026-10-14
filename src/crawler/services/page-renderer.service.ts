@@ -128,31 +128,95 @@ export class PageRendererService {
   }
 
   private async connectBrowser(): Promise<Browser> {
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
     const browserWSEndpoint = process.env.BROWSER_WS_ENDPOINT?.trim();
-    if (!browserWSEndpoint) {
+
+    if (!browserWSEndpoint && !executablePath) {
       throw new ServiceUnavailableException(
-        'BROWSER_WS_ENDPOINT is required for crawler rendering',
+        'BROWSER_WS_ENDPOINT or PUPPETEER_EXECUTABLE_PATH is required for crawler rendering',
       );
     }
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      const { default: puppeteer } = await import('puppeteer-core');
-      const connectPromise = puppeteer.connect({ browserWSEndpoint });
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error('Browser WebSocket connection timeout (15s)'));
-        }, CRAWLER_BROWSER_CONNECT_TIMEOUT_MS);
-      });
-      return await Promise.race([connectPromise, timeoutPromise]);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Browser connection failed: ${detail}`);
-      throw new ServiceUnavailableException(
-        `Browser rendering service is unavailable: ${detail}`,
-      );
-    } finally {
-      if (timer) clearTimeout(timer);
+
+    const { default: puppeteer } = await import('puppeteer-core');
+
+    if (executablePath) {
+      try {
+        const noSandbox = process.env.CRAWLER_CHROMIUM_NO_SANDBOX === 'true';
+        return await puppeteer.launch({
+          executablePath,
+          headless: true,
+          args: [
+            '--disable-dev-shm-usage',
+            ...(noSandbox ? ['--no-sandbox', '--disable-setuid-sandbox'] : []),
+          ],
+        });
+      } catch (error) {
+        const detail = this.extractErrorMessage(error);
+        this.logger.error(`Local browser launch failed: ${detail}`);
+        if (!browserWSEndpoint) {
+          throw new ServiceUnavailableException(
+            `Browser rendering service is unavailable: ${detail}`,
+          );
+        }
+      }
     }
+
+    if (browserWSEndpoint) {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const connectPromise = puppeteer.connect({ browserWSEndpoint });
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('Browser WebSocket connection timeout (15s)'));
+          }, CRAWLER_BROWSER_CONNECT_TIMEOUT_MS);
+        });
+        return await Promise.race([connectPromise, timeoutPromise]);
+      } catch (error) {
+        const detail = this.extractErrorMessage(error);
+        this.logger.error(`Browser connection failed: ${detail}`);
+        throw new ServiceUnavailableException(
+          `Browser rendering service is unavailable: ${detail}`,
+        );
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    throw new ServiceUnavailableException(
+      'Browser rendering service is unavailable',
+    );
+  }
+
+  private extractErrorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'object' && error !== null) {
+      const record = error as Record<string | symbol, unknown>;
+      if (typeof record.message === 'string') return record.message;
+      if (
+        record.error &&
+        typeof record.error === 'object' &&
+        typeof (record.error as Record<string, unknown>).message === 'string'
+      ) {
+        return (record.error as Record<string, unknown>).message as string;
+      }
+      for (const sym of Object.getOwnPropertySymbols(record)) {
+        const val = record[sym];
+        if (typeof val === 'string') return val;
+        if (
+          val &&
+          typeof val === 'object' &&
+          typeof (val as Record<string, unknown>).message === 'string'
+        ) {
+          return (val as Record<string, unknown>).message as string;
+        }
+      }
+      try {
+        return JSON.stringify(error);
+      } catch {
+        return 'Unknown browser error';
+      }
+    }
+    return typeof error === 'string' ? error : 'Unknown browser error';
   }
 
   private async assertCachedPublicUrl(rawUrl: string): Promise<void> {
