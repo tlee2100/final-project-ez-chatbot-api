@@ -51,7 +51,9 @@ export class EmbeddingService {
     private readonly delay: Delay = defaultDelay,
   ) {
     this.config = config ?? loadEmbeddingConfig();
-    this.client = client ?? new OpenAI({ apiKey: this.config.apiKey });
+    this.client =
+      client ??
+      new OpenAI({ apiKey: this.config.apiKey, baseURL: this.config.baseURL });
   }
 
   async embedMany(texts: string[]): Promise<EmbeddingResult> {
