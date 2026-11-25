@@ -12,6 +12,7 @@ export type EmbeddingConfig = {
   apiKey: string;
   model: string;
   dimensions: number;
+  baseURL?: string;
 };
 
 export function loadEmbeddingConfig(
@@ -41,9 +42,12 @@ export function loadEmbeddingConfig(
     );
   }
 
+  const baseURL = env.OPENAI_BASE_URL?.trim() || env.DEEPSEEK_BASE_URL?.trim();
+
   return {
     apiKey,
     model,
     dimensions,
+    baseURL,
   };
 }
