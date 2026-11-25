@@ -3,6 +3,10 @@ import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SharedModule } from 'src/shared/shared.module';
+import {
+  resolvePostgresSslConfig,
+  resolveRedisConnectionOptions,
+} from './shared/connection-options';
 import { BullModule } from '@nestjs/bull';
 import { CoreModule } from 'src/core/core.module';
 import { UserModule } from './user/user.module';
@@ -47,6 +51,7 @@ import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
       username: process.env.DB_USERNAME,
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME,
+      ssl: resolvePostgresSslConfig(),
       entities: [
         User,
         Site,
@@ -69,11 +74,7 @@ import { CrawlRunItem } from './crawler/entities/crawl-run-item.entity';
       synchronize: false, // set true for dev, false for prod
     }),
     BullModule.forRoot({
-      redis: {
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379', 10),
-        password: process.env.REDIS_PASSWORD || undefined,
-      },
+      redis: resolveRedisConnectionOptions(),
     }),
     AutomapperModule.forRoot({
       strategyInitializer: classes(),
